@@ -19,10 +19,11 @@ export interface ClinicSettings {
     showLogo: boolean;
     showWatermark: boolean;
   };
+  themeColor: string;
 }
 
 const defaultSettings: ClinicSettings = {
-  clinicName: 'MediCare Hospital',
+  clinicName: 'Salamaat Medicare',
   address: '123 Healthcare Avenue, Medical District',
   city: 'City, State - 400001',
   phone: '+91 98765 43210',
@@ -39,6 +40,7 @@ const defaultSettings: ClinicSettings = {
     showLogo: true,
     showWatermark: false,
   },
+  themeColor: '221 83% 53%', // Default Blue
 };
 
 interface SettingsStore {

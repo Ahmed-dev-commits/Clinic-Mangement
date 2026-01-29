@@ -21,130 +21,143 @@ import { UnauthorizedPage } from "./pages/Unauthorized";
 import NotFound from "./pages/NotFound";
 
 const queryClient = new QueryClient();
+import { useSettingsStore } from "./store/settingsStore";
+import { applyTheme } from "./lib/themes";
+import { useEffect } from "react";
 
-const App = () => (
-  <QueryClientProvider client={queryClient}>
-    <TooltipProvider>
-      <Toaster />
-      <Sonner />
-      <GlobalErrorBoundary>
-        <BrowserRouter>
-          <Routes>
-            {/* Public routes */}
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/unauthorized" element={<UnauthorizedPage />} />
+const App = () => {
+  const { settings } = useSettingsStore();
 
-            {/* Protected routes */}
-            <Route
-              path="/*"
-              element={
-                <ProtectedRoute>
-                  <MainLayout>
-                    <Routes>
-                      {/* Dashboard - All roles */}
-                      <Route path="/" element={<DashboardPage />} />
+  useEffect(() => {
+    if (settings.themeColor) {
+      applyTheme(settings.themeColor);
+    }
+  }, [settings.themeColor]);
 
-                      {/* Patients - Receptionist, Doctor */}
-                      <Route
-                        path="/patients"
-                        element={
-                          <ProtectedRoute allowedRoles={['Receptionist', 'Doctor', 'Admin']}>
-                            <PatientsPage />
-                          </ProtectedRoute>
-                        }
-                      />
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <Toaster />
+        <Sonner />
+        <GlobalErrorBoundary>
+          <BrowserRouter>
+            <Routes>
+              {/* Public routes */}
+              <Route path="/login" element={<LoginPage />} />
+              <Route path="/unauthorized" element={<UnauthorizedPage />} />
 
-                      {/* Fees - Receptionist */}
-                      <Route
-                        path="/fees"
-                        element={
-                          <ProtectedRoute allowedRoles={['Receptionist', 'Admin']}>
-                            <FeesPage />
-                          </ProtectedRoute>
-                        }
-                      />
+              {/* Protected routes */}
+              <Route
+                path="/*"
+                element={
+                  <ProtectedRoute>
+                    <MainLayout>
+                      <Routes>
+                        {/* Dashboard - All roles */}
+                        <Route path="/" element={<DashboardPage />} />
 
-                      {/* Pharmacy - Receptionist only */}
-                      <Route
-                        path="/stock"
-                        element={
-                          <ProtectedRoute allowedRoles={['Receptionist', 'Admin']}>
-                            <StockPage />
-                          </ProtectedRoute>
-                        }
-                      />
+                        {/* Patients - Receptionist, Doctor */}
+                        <Route
+                          path="/patients"
+                          element={
+                            <ProtectedRoute allowedRoles={['Receptionist', 'Doctor', 'Admin']}>
+                              <PatientsPage />
+                            </ProtectedRoute>
+                          }
+                        />
 
-                      {/* Medicines - Doctor only */}
-                      <Route
-                        path="/medicines"
-                        element={
-                          <ProtectedRoute allowedRoles={['Doctor', 'Admin']}>
-                            <MedicinesPage />
-                          </ProtectedRoute>
-                        }
-                      />
+                        {/* Fees - Receptionist */}
+                        <Route
+                          path="/fees"
+                          element={
+                            <ProtectedRoute allowedRoles={['Receptionist', 'Admin']}>
+                              <FeesPage />
+                            </ProtectedRoute>
+                          }
+                        />
 
-                      {/* Prescriptions - Doctor */}
-                      <Route
-                        path="/prescriptions"
-                        element={
-                          <ProtectedRoute allowedRoles={['Doctor', 'Admin']}>
-                            <PrescriptionsPage />
-                          </ProtectedRoute>
-                        }
-                      />
+                        {/* Pharmacy - Receptionist only */}
+                        <Route
+                          path="/stock"
+                          element={
+                            <ProtectedRoute allowedRoles={['Receptionist', 'Admin']}>
+                              <StockPage />
+                            </ProtectedRoute>
+                          }
+                        />
 
-                      {/* Lab Results - Lab Technician only */}
-                      <Route
-                        path="/lab-results"
-                        element={
-                          <ProtectedRoute allowedRoles={['LabTechnician', 'Admin']}>
-                            <LabResultsPage />
-                          </ProtectedRoute>
-                        }
-                      />
+                        {/* Medicines - Doctor only */}
+                        <Route
+                          path="/medicines"
+                          element={
+                            <ProtectedRoute allowedRoles={['Doctor', 'Admin']}>
+                              <MedicinesPage />
+                            </ProtectedRoute>
+                          }
+                        />
 
-                      {/* Users - Admin only */}
-                      <Route
-                        path="/users"
-                        element={
-                          <ProtectedRoute allowedRoles={['Admin']}>
-                            <UsersPage />
-                          </ProtectedRoute>
-                        }
-                      />
+                        {/* Prescriptions - Doctor */}
+                        <Route
+                          path="/prescriptions"
+                          element={
+                            <ProtectedRoute allowedRoles={['Doctor', 'Admin']}>
+                              <PrescriptionsPage />
+                            </ProtectedRoute>
+                          }
+                        />
 
-                      {/* Daily Expenses - Admin & Receptionist */}
-                      <Route
-                        path="/daily-expenses"
-                        element={
-                          <ProtectedRoute allowedRoles={['Admin', 'Receptionist']}>
-                            <DailyExpensesPage />
-                          </ProtectedRoute>
-                        }
-                      />
+                        {/* Lab Results - Lab Technician only */}
+                        <Route
+                          path="/lab-results"
+                          element={
+                            <ProtectedRoute allowedRoles={['LabTechnician', 'Admin']}>
+                              <LabResultsPage />
+                            </ProtectedRoute>
+                          }
+                        />
 
-                      {/* Settings - Admin only */}
-                      <Route
-                        path="/settings"
-                        element={
-                          <ProtectedRoute allowedRoles={['Admin', 'Doctor', 'Receptionist']}>
-                            <SettingsPage />
-                          </ProtectedRoute>
-                        }
-                      />
+                        {/* Users - Admin only */}
+                        <Route
+                          path="/users"
+                          element={
+                            <ProtectedRoute allowedRoles={['Admin']}>
+                              <UsersPage />
+                            </ProtectedRoute>
+                          }
+                        />
 
-                      <Route path="*" element={<NotFound />} />
-                    </Routes>
-                  </MainLayout>
-                </ProtectedRoute>
-              }
-            />
-          </Routes>
-        </BrowserRouter>
-      </GlobalErrorBoundary>
-    </TooltipProvider>
-  </QueryClientProvider>
-);
+                        {/* Daily Expenses - Admin & Receptionist */}
+                        <Route
+                          path="/daily-expenses"
+                          element={
+                            <ProtectedRoute allowedRoles={['Admin', 'Receptionist']}>
+                              <DailyExpensesPage />
+                            </ProtectedRoute>
+                          }
+                        />
+
+                        {/* Settings - Admin only */}
+                        <Route
+                          path="/settings"
+                          element={
+                            <ProtectedRoute allowedRoles={['Admin', 'Doctor', 'Receptionist']}>
+                              <SettingsPage />
+                            </ProtectedRoute>
+                          }
+                        />
+
+                        <Route path="*" element={<NotFound />} />
+                      </Routes>
+                    </MainLayout>
+                  </ProtectedRoute>
+                }
+              />
+            </Routes>
+          </BrowserRouter>
+        </GlobalErrorBoundary>
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+};
 
 export default App;

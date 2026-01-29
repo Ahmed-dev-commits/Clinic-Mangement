@@ -8,7 +8,8 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Separator } from '@/components/ui/separator';
 import { toast } from 'sonner';
 import { Textarea } from '@/components/ui/textarea';
-import { Save, RotateCcw, Upload, X, Building2, User, Image, Printer } from 'lucide-react';
+import { Save, RotateCcw, Upload, X, Building2, User, Image, Printer, Palette } from 'lucide-react';
+import { THEME_PRESETS, applyTheme } from '@/lib/themes';
 
 export function SettingsPage() {
   const { settings, updateSettings, resetSettings } = useSettingsStore();
@@ -83,8 +84,17 @@ export function SettingsPage() {
         showLogo: true,
         showWatermark: false,
       },
+      themeColor: '221 83% 53%',
     });
+    // Reset theme immediately
+    applyTheme('221 83% 53%');
     toast.success('Settings reset to defaults');
+  };
+
+  const handleThemeChange = (colorValue: string) => {
+    setFormData(prev => ({ ...prev, themeColor: colorValue }));
+    // Preview immediately
+    applyTheme(colorValue);
   };
 
   return (
@@ -265,6 +275,48 @@ export function SettingsPage() {
           </CardContent>
         </Card>
       </div>
+
+      {/* Portal Appearance */}
+      <Card className="lg:col-span-2 mt-6">
+        <CardHeader>
+          <div className="flex items-center gap-2">
+            <Palette className="h-5 w-5 text-primary" />
+            <CardTitle>Portal Appearance</CardTitle>
+          </div>
+          <CardDescription>
+            Customize the color theme of the portal interface
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-4">
+            <Label>Theme Color</Label>
+            <div className="flex flex-wrap gap-4">
+              {THEME_PRESETS.map((preset) => (
+                <button
+                  key={preset.name}
+                  onClick={() => handleThemeChange(preset.value)}
+                  className={`
+                    relative group flex flex-col items-center gap-2 p-2 rounded-lg border-2 transition-all
+                    ${formData.themeColor === preset.value ? 'border-primary bg-primary/5' : 'border-transparent hover:bg-muted'}
+                  `}
+                >
+                  <div
+                    className="w-12 h-12 rounded-full shadow-sm border border-border"
+                    style={{ backgroundColor: preset.hex }}
+                  />
+                  <span className="text-xs font-medium">{preset.name}</span>
+                  {formData.themeColor === preset.value && (
+                    <div className="absolute top-2 right-2 w-3 h-3 bg-primary rounded-full border-2 border-white" />
+                  )}
+                </button>
+              ))}
+            </div>
+            <p className="text-sm text-muted-foreground mt-2">
+              Select a color theme to apply to the entire application interface.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* PDF Customization */}
       <Card className="lg:col-span-2 mt-6">
