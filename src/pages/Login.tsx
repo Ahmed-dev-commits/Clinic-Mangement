@@ -50,7 +50,7 @@ export function LoginPage() {
             <Building2 className="h-8 w-8 text-primary-foreground" />
           </div>
           <div>
-            <CardTitle className="text-2xl">Hospital Management</CardTitle>
+            <CardTitle className="text-2xl">Salamaat Medicare</CardTitle>
             <CardDescription>Sign in to access the system</CardDescription>
           </div>
         </CardHeader>
@@ -95,12 +95,12 @@ export function LoginPage() {
           </form>
 
           <div className="mt-6 p-4 bg-muted/50 rounded-lg">
-            <p className="text-sm font-medium text-muted-foreground mb-2">Default Credentials:</p>
-            <div className="space-y-1 text-xs text-muted-foreground">
+            <p className="text-sm font-medium text-muted-foreground mb-2"></p>
+            {/* <div className="space-y-1 text-xs text-muted-foreground">
               <p><strong>Receptionist:</strong> receptionist / reception123</p>
               <p><strong>Doctor:</strong> doctor / doctor123</p>
               <p><strong>Lab Tech:</strong> labtech / lab123</p>
-            </div>
+            </div> */}
           </div>
         </CardContent>
       </Card>

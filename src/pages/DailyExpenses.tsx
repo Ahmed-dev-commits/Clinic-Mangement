@@ -11,7 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Badge } from '@/components/ui/badge';
 import { Plus, Trash2, Search, TrendingUp, TrendingDown, DollarSign, Calendar } from 'lucide-react';
 import { format, parseISO, isSameMonth, isSameDay } from 'date-fns';
-import { v4 as uuidv4 } from 'uuid';
+
 
 const CATEGORIES = [
     'Supplies',
@@ -25,11 +25,7 @@ const CATEGORIES = [
 ];
 
 const PAYMENT_METHODS = [
-    'Cash',
-    'Card',
-    'UPI',
-    'Bank Transfer',
-    'Cheque'
+    'Cash'
 ];
 
 export function DailyExpensesPage() {
@@ -111,7 +107,7 @@ export function DailyExpensesPage() {
                         <DollarSign className="h-4 w-4 text-muted-foreground" />
                     </CardHeader>
                     <CardContent>
-                        <div className="text-2xl font-bold">₹{totalExpenses.toLocaleString()}</div>
+                        <div className="text-2xl font-bold">Rs {totalExpenses.toLocaleString()}</div>
                     </CardContent>
                 </Card>
 
@@ -126,7 +122,7 @@ export function DailyExpensesPage() {
                             {Object.entries(categoryStats).sort((a, b) => b[1] - a[1])[0]?.[0] || 'N/A'}
                         </div>
                         <p className="text-xs text-muted-foreground">
-                            ₹{Object.entries(categoryStats).sort((a, b) => b[1] - a[1])[0]?.[1]?.toLocaleString() || 0}
+                            Rs {Object.entries(categoryStats).sort((a, b) => b[1] - a[1])[0]?.[1]?.toLocaleString() || 0}
                         </p>
                     </CardContent>
                 </Card>
@@ -181,7 +177,7 @@ export function DailyExpensesPage() {
                                                 />
                                             </div>
                                             <div className="space-y-2">
-                                                <Label>Amount (₹)</Label>
+                                                <Label>Amount (Rs)</Label>
                                                 <Input
                                                     type="number"
                                                     placeholder="0.00"
@@ -274,7 +270,7 @@ export function DailyExpensesPage() {
                                 {loading ? (
                                     <TableRow>
                                         <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
-                                            Loading loaded expenses...
+                                            Loading expenses...
                                         </TableCell>
                                     </TableRow>
                                 ) : filteredExpenses.length === 0 ? (
@@ -294,7 +290,7 @@ export function DailyExpensesPage() {
                                             <TableCell>{expense.paymentMethod}</TableCell>
                                             <TableCell className="text-muted-foreground text-sm">{expense.createdBy}</TableCell>
                                             <TableCell className="text-right font-bold">
-                                                ₹{expense.amount.toFixed(2)}
+                                                Rs {expense.amount.toFixed(2)}
                                             </TableCell>
                                             <TableCell>
                                                 <Button
