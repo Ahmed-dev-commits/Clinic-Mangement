@@ -1,0 +1,89 @@
+-- ============================================
+-- Hospital Management System - MS Access Schema
+-- ============================================
+-- 
+-- INSTRUCTIONS:
+-- 1. Open Microsoft Access
+-- 2. Create a new blank database named "HospitalDB.accdb"
+-- 3. Create the following tables manually:
+--
+-- ============================================
+-- TABLE: Patients
+-- ============================================
+-- Field Name       | Data Type    | Size/Format
+-- -----------------+--------------+-------------
+-- ID               | Short Text   | 20 (Primary Key)
+-- Name             | Short Text   | 100
+-- Age              | Number       | Integer
+-- Gender           | Short Text   | 10
+-- Phone            | Short Text   | 20
+-- Address          | Long Text    | -
+-- VisitDate        | Short Text   | 20
+-- Symptoms         | Long Text    | -
+-- CreatedAt        | Short Text   | 50
+--
+-- ============================================
+-- TABLE: Stock
+-- ============================================
+-- Field Name       | Data Type    | Size/Format
+-- -----------------+--------------+-------------
+-- ID               | Short Text   | 20 (Primary Key)
+-- Name             | Short Text   | 100
+-- Category         | Short Text   | 50
+-- Quantity         | Number       | Long Integer
+-- Price            | Number       | Double
+-- LowStockThreshold| Number       | Long Integer
+-- CreatedAt        | Short Text   | 50
+--
+-- ============================================
+-- TABLE: Payments
+-- ============================================
+-- Field Name       | Data Type    | Size/Format
+-- -----------------+--------------+-------------
+-- ID               | Short Text   | 20 (Primary Key)
+-- PatientID        | Short Text   | 20
+-- PatientName      | Short Text   | 100
+-- ConsultationFee  | Number       | Double
+-- LabFee           | Number       | Double
+-- MedicineFee      | Number       | Double
+-- TotalAmount      | Number       | Double
+-- PaymentMode      | Short Text   | 20
+-- Medicines        | Long Text    | - (JSON string)
+-- CreatedAt        | Short Text   | 50
+--
+-- ============================================
+-- TABLE: Prescriptions
+-- ============================================
+-- Field Name       | Data Type    | Size/Format
+-- -----------------+--------------+-------------
+-- ID               | Short Text   | 20 (Primary Key)
+-- PatientID        | Short Text   | 20
+-- PatientName      | Short Text   | 100
+-- PatientAge       | Number       | Integer
+-- Diagnosis        | Long Text    | -
+-- Medicines        | Long Text    | - (JSON string)
+-- LabTests         | Long Text    | - (JSON string)
+-- DoctorNotes      | Long Text    | -
+-- Precautions      | Long Text    | -
+-- GeneratedText    | Long Text    | -
+-- FollowUpDate     | Short Text   | 20
+-- CreatedAt        | Short Text   | 50
+--
+-- ============================================
+-- TABLE: LabResults
+-- ============================================
+-- Field Name       | Data Type    | Size/Format
+-- -----------------+--------------+-------------
+-- ID               | Short Text   | 20 (Primary Key)
+-- PatientID        | Short Text   | 20
+-- PatientName      | Short Text   | 100
+-- PatientAge       | Number       | Integer
+-- TestDate         | Short Text   | 20
+-- ReportDate       | Short Text   | 20
+-- Tests            | Long Text    | - (JSON string)
+-- Notes            | Long Text    | -
+-- Technician       | Short Text   | 100
+-- Status           | Short Text   | 30
+-- NotifiedAt       | Short Text   | 50
+-- CollectedAt      | Short Text   | 50
+-- CreatedAt        | Short Text   | 50
