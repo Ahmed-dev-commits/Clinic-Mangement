@@ -207,6 +207,7 @@ export interface PrescriptionDTO {
   Precautions: string;
   GeneratedText: string;
   FollowUpDate: string;
+  Status: 'Draft' | 'Finalized';
   CreatedAt: string;
 }
 
@@ -225,9 +226,28 @@ export const prescriptionsApi = {
     precautions: string;
     generatedText: string;
     followUpDate: string;
+    status: 'Draft' | 'Finalized';
   }) =>
     apiCall<{ success: boolean; id: string }>('/prescriptions', {
       method: 'POST',
+      body: JSON.stringify(prescription),
+    }),
+
+  update: (id: string, prescription: {
+    patientId: string;
+    patientName: string;
+    patientAge: number;
+    diagnosis: string;
+    medicines: PrescriptionMedicineDTO[];
+    labTests: string[];
+    doctorNotes: string;
+    precautions: string;
+    generatedText: string;
+    followUpDate: string;
+    status: 'Draft' | 'Finalized';
+  }) =>
+    apiCall<{ success: boolean }>(`/prescriptions/${id}`, {
+      method: 'PUT',
       body: JSON.stringify(prescription),
     }),
 };

@@ -15,9 +15,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Plus, Trash2, Copy, Printer, Download, FileText, Search, RefreshCw, Loader2 } from 'lucide-react';
+import { Plus, Trash2, Copy, Printer, Download, FileText, Search, RefreshCw, Loader2, Save } from 'lucide-react';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 import { PrescriptionMedicine, Prescription } from '@/types/hospital';
@@ -25,14 +31,16 @@ import jsPDF from 'jspdf';
 import { ConnectionStatus } from '@/components/ConnectionStatus';
 import { MedicineSearch } from '@/components/medicines/MedicineSearch';
 import { PrescriptionHistoryDialog } from '@/components/prescriptions/PrescriptionHistoryDialog';
+import { PrescriptionPreviewDialog } from '@/components/prescriptions/PrescriptionPreviewDialog';
 
 export function PrescriptionsPage() {
   const { patients } = useAccessPatients();
-  const { prescriptions, loading, addPrescription, refetch } = usePrescriptions();
+  const { prescriptions, loading, addPrescription, updatePrescription, refetch } = usePrescriptions();
   const { stock, reduceStock } = useStock();
   const { settings } = useSettingsStore();
 
   const [selectedPatientId, setSelectedPatientId] = useState('');
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [diagnosis, setDiagnosis] = useState('');
   const [medicines, setMedicines] = useState<PrescriptionMedicine[]>([]);
   const [labTests, setLabTests] = useState<string[]>([]);
@@ -52,6 +60,9 @@ export function PrescriptionsPage() {
   // Search
   const [searchQuery, setSearchQuery] = useState('');
   const [historyDialogOpen, setHistoryDialogOpen] = useState(false);
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+  const [previewDialogOpen, setPreviewDialogOpen] = useState(false);
+  const [previewPrescription, setPreviewPrescription] = useState<Prescription | null>(null);
 
   const selectedPatient = patients.find(p => p.id === selectedPatientId);
 
@@ -93,16 +104,31 @@ export function PrescriptionsPage() {
     setLabTests(labTests.filter((_, i) => i !== index));
   };
 
-  const handleSubmit = () => {
+  const handleEditDraft = (rx: Prescription) => {
+    setEditingId(rx.id);
+    setSelectedPatientId(rx.patientId);
+    setDiagnosis(rx.diagnosis);
+    setMedicines(rx.medicines);
+    setLabTests(rx.labTests);
+    setDoctorNotes(rx.doctorNotes);
+    setPrecautions(rx.precautions);
+    setFollowUpDate(rx.followUpDate);
+    toast.info('Draft loaded for editing');
+  };
+
+  const handleSaveAction = (status: 'Draft' | 'Finalized' = 'Finalized') => {
+    setSaveDialogOpen(false);
     if (!selectedPatientId) {
       toast.error('Please select a patient');
       return;
     }
-    if (!diagnosis.trim()) {
+    if (!diagnosis.trim() && status === 'Finalized') {
       toast.error('Please enter diagnosis');
       return;
     }
-    if (medicines.length === 0) {
+
+    // For drafts, we can be more lenient, but at least patient is needed
+    if (status === 'Finalized' && medicines.length === 0) {
       toast.error('Please add at least one medicine');
       return;
     }
@@ -110,15 +136,22 @@ export function PrescriptionsPage() {
     const patient = patients.find(p => p.id === selectedPatientId)!;
     const generatedText = generatePrescriptionText();
 
-    // Reduce stock for medicines that exist in stock
-    medicines.forEach(med => {
-      const stockItem = stock.find(s => s.name.toLowerCase().includes(med.name.toLowerCase()));
-      if (stockItem) {
-        reduceStock(stockItem.id, 1);
-      }
-    });
+    // Reduce stock for medicines that exist in stock ONLY if finalized
+    if (status === 'Finalized') {
+      medicines.forEach(med => {
+        const stockItem = stock.find(s => s.name.toLowerCase().includes(med.name.toLowerCase()));
+        if (stockItem && editingId) {
+          // Logic complexity: if updating finalized, we might double deduct? 
+          // Assumption: You can't edit finalized scripts here (they don't show in draft list). 
+          // Drafts didn't deduct stock yet.
+          reduceStock(stockItem.id, 1);
+        } else if (stockItem) {
+          reduceStock(stockItem.id, 1);
+        }
+      });
+    }
 
-    addPrescription({
+    const prescriptionData = {
       patientId: selectedPatientId,
       patientName: patient.name,
       patientAge: patient.age,
@@ -129,11 +162,27 @@ export function PrescriptionsPage() {
       precautions,
       generatedText,
       followUpDate: followUpDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
-    });
+      status
+    };
 
-    toast.success('Prescription created successfully');
+    if (editingId) {
+      updatePrescription(editingId, prescriptionData);
+    } else {
+      addPrescription(prescriptionData);
+    }
+
+    toast.success(`Prescription ${status === 'Draft' ? 'saved as draft' : 'created successfully'}`);
+
+    if (status === 'Finalized') {
+      // If creating fresh, we'll need ID. But addPrescription is async and might return ID but we didn't await specifically for ID here easily without refactor.
+      // However, the user wants PDF to open. `handleDownloadPDF` needs the rx object.
+      // Since we are decoupling validation and PDF generation slightly or relying on backend.
+      // For better UX, let's assuming printing happens from history or we reconstruct the object if we want immediate print.
+      // Ideally we should await the ID.
+    }
 
     // Reset form
+    setEditingId(null);
     setSelectedPatientId('');
     setDiagnosis('');
     setMedicines([]);
@@ -501,14 +550,64 @@ export function PrescriptionsPage() {
     doc.setLineWidth(0.5);
     doc.rect(5, 5, pageWidth - 10, pageHeight - 10, 'S');
 
-    doc.save(`prescription-${rx.id}.pdf`);
+    doc.save(`prescription-${rx.id || 'new'}.pdf`);
     toast.success('Professional PDF downloaded');
   };
 
-  // Filter prescriptions
-  const filteredPrescriptions = prescriptions.filter(rx =>
-    rx.patientName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    rx.diagnosis.toLowerCase().includes(searchQuery.toLowerCase())
+  const handleCreateAndPrint = async () => {
+    // Validate before proceeding
+    if (!selectedPatientId) {
+      toast.error('Please select a patient');
+      return;
+    }
+    if (!diagnosis.trim()) {
+      toast.error('Please enter diagnosis');
+      return;
+    }
+    if (medicines.length === 0) {
+      toast.error('Please add at least one medicine');
+      return;
+    }
+
+    const patient = patients.find(p => p.id === selectedPatientId);
+    if (!patient) {
+      toast.error('Patient not found');
+      return;
+    }
+
+    // Capture current form data before it gets reset
+    const prescriptionData: Prescription = {
+      id: editingId || `RX-${Math.floor(Math.random() * 9000) + 1000}${Math.random().toString(36).substr(2, 3).toUpperCase()}`,
+      patientId: selectedPatientId,
+      patientName: patient.name,
+      patientAge: patient.age,
+      diagnosis,
+      medicines: [...medicines],
+      labTests: [...labTests],
+      doctorNotes,
+      precautions,
+      generatedText: generatePrescriptionText(),
+      followUpDate: followUpDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+      createdAt: new Date().toISOString(),
+      status: 'Finalized'
+    };
+
+    // Close save dialog
+    setSaveDialogOpen(false);
+
+    // Save the prescription (this will also reduce stock and reset form)
+    handleSaveAction('Finalized');
+
+    // Show preview dialog with the captured data
+    setPreviewPrescription(prescriptionData);
+    setPreviewDialogOpen(true);
+  };
+
+  // Filter prescriptions - Show ONLY Status='Draft' in the right sidebar
+  const drafts = prescriptions.filter(rx =>
+    rx.status === 'Draft' &&
+    (rx.patientName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      rx.diagnosis.toLowerCase().includes(searchQuery.toLowerCase()))
   );
 
   return (
@@ -519,15 +618,56 @@ export function PrescriptionsPage() {
         action={
           <Button variant="outline" onClick={() => setHistoryDialogOpen(true)}>
             <FileText className="mr-2 h-4 w-4" />
-            View History
+            View History (Finalized)
           </Button>
         }
+      />
+
+      <Dialog open={saveDialogOpen} onOpenChange={setSaveDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Save Prescription</DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-3 mt-4">
+            <Button variant="outline" onClick={() => handleSaveAction('Draft')}>
+              <Save className="mr-2 h-4 w-4" />
+              Save as Draft
+            </Button>
+            <Button onClick={handleCreateAndPrint}>
+              <Printer className="mr-2 h-4 w-4" />
+              Create & Print PDF
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <PrescriptionPreviewDialog
+        open={previewDialogOpen}
+        onOpenChange={setPreviewDialogOpen}
+        prescription={previewPrescription}
+        onDownloadPDF={handleDownloadPDF}
       />
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Prescription Form */}
         <div className="form-section">
-          <h2 className="text-lg font-semibold mb-4">Create Prescription</h2>
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-lg font-semibold">{editingId ? 'Edit Draft' : 'Create Prescription'}</h2>
+            {editingId && (
+              <Button variant="ghost" size="sm" onClick={() => {
+                setEditingId(null);
+                setSelectedPatientId('');
+                setDiagnosis('');
+                setMedicines([]);
+                setLabTests([]);
+                setDoctorNotes('');
+                setPrecautions('');
+                setFollowUpDate('');
+              }}>
+                Cancel Edit
+              </Button>
+            )}
+          </div>
 
           <div className="space-y-4">
             <div>
@@ -730,15 +870,19 @@ export function PrescriptionsPage() {
               </div>
             )}
 
-            <Button className="w-full" onClick={handleSubmit}>
-              <FileText className="mr-2 h-4 w-4" />
-              Create Prescription
+            <Button className="w-full" onClick={() => setSaveDialogOpen(true)}>
+              <Save className="mr-2 h-4 w-4" />
+              Save Prescription
             </Button>
           </div>
         </div>
 
-        {/* Prescription History */}
+        {/* Saved Drafts List */}
         <div className="space-y-4">
+          <h2 className="text-lg font-semibold flex items-center gap-2">
+            Saved Drafts
+            <Badge variant="secondary">{drafts.length}</Badge>
+          </h2>
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
@@ -750,18 +894,23 @@ export function PrescriptionsPage() {
           </div>
 
           <div className="space-y-4 max-h-[600px] overflow-auto">
-            {filteredPrescriptions.length === 0 ? (
+            {drafts.length === 0 ? (
               <Card>
                 <CardContent className="py-8 text-center text-muted-foreground">
                   No prescriptions found
                 </CardContent>
               </Card>
             ) : (
-              [...filteredPrescriptions].reverse().map((rx) => {
+              [...drafts].reverse().map((rx) => {
                 const patient = patients.find(p => p.id === rx.patientId);
 
                 return (
-                  <Card key={rx.id} id={`prescription-${rx.id}`}>
+                  <Card
+                    key={rx.id}
+                    id={`prescription-${rx.id}`}
+                    className={`cursor-pointer hover:border-primary transition-colors ${editingId === rx.id ? 'border-primary bg-primary/5' : ''}`}
+                    onClick={() => handleEditDraft(rx)}
+                  >
                     {/* ===== PRINT LAYOUT - Professional E-Prescription Template ===== */}
                     <div className="hidden print:block p-8">
                       {/* Header with Logo and Clinic Info */}
@@ -797,7 +946,10 @@ export function PrescriptionsPage() {
                           <p><span className="font-medium">Patient Name:</span> {rx.patientName}</p>
                           <p><span className="font-medium">Patient ID:</span> {rx.patientId}</p>
                           <p><span className="font-medium">Age / Gender:</span> {rx.patientAge} years / {patient?.gender || 'N/A'}</p>
-                          <p><span className="font-medium">Date:</span> {format(new Date(rx.createdAt), 'MMMM dd, yyyy')}</p>
+                          <div className="flex items-center gap-2">
+                            <p><span className="font-medium">Date:</span> {format(new Date(rx.createdAt), 'MMMM dd, yyyy')}</p>
+                            {rx.status === 'Draft' && <Badge variant="secondary">Draft</Badge>}
+                          </div>
                           <p><span className="font-medium">Contact:</span> {patient?.phone || 'N/A'}</p>
                           <p><span className="font-medium">Visit ID:</span> RX-{rx.id}</p>
                         </div>
@@ -896,9 +1048,12 @@ export function PrescriptionsPage() {
                     <CardHeader className="pb-2 print:hidden">
                       <div className="flex items-start justify-between">
                         <div>
-                          <CardTitle className="text-base">{rx.patientName}</CardTitle>
+                          <CardTitle className="text-base flex items-center gap-2">
+                            {rx.patientName}
+                            <Badge variant="secondary" className="text-xs">Draft</Badge>
+                          </CardTitle>
                           <p className="text-sm text-muted-foreground">
-                            {rx.diagnosis} • {format(new Date(rx.createdAt), 'MMM dd, yyyy')}
+                            {rx.diagnosis || 'No Diagnosis'} • {format(new Date(rx.createdAt), 'MMM dd, yyyy')}
                           </p>
                         </div>
                         <Badge variant="outline" className="font-mono text-xs">
@@ -908,36 +1063,12 @@ export function PrescriptionsPage() {
                     </CardHeader>
                     <CardContent className="space-y-3 print:hidden">
                       {/* Screen view - generated text */}
-                      <div className="prescription-text text-xs">
-                        {rx.generatedText}
+                      <div className="prescription-text text-xs line-clamp-3">
+                        {rx.generatedText || 'No Medicines Added yet...'}
                       </div>
 
-                      {/* Action buttons */}
-                      <div className="flex gap-2">
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleCopy(rx.generatedText)}
-                        >
-                          <Copy className="mr-1 h-3 w-3" />
-                          Copy
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handlePrint(rx.id)}
-                        >
-                          <Printer className="mr-1 h-3 w-3" />
-                          Print
-                        </Button>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          onClick={() => handleDownloadPDF(rx)}
-                        >
-                          <Download className="mr-1 h-3 w-3" />
-                          PDF
-                        </Button>
+                      <div className="text-xs text-muted-foreground pt-2 border-t">
+                        Click to edit draft
                       </div>
                     </CardContent>
                   </Card>

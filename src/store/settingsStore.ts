@@ -24,13 +24,13 @@ export interface ClinicSettings {
 
 const defaultSettings: ClinicSettings = {
   clinicName: 'Salamaat Medicare',
-  address: '123 Healthcare Avenue, Medical District',
-  city: 'City, State - 400001',
+  address: 'Qabarastan Road Wah Cantt',
+  city: 'Wah Cantt',
   phone: '+91 98765 43210',
-  email: 'care@medicare.com',
-  doctorName: 'Dr. Rajesh Kumar',
-  doctorQualification: 'MBBS, MD (General Medicine)',
-  doctorRegNo: 'MCI-12345-2020',
+  email: 'care@salamaat.com',
+  doctorName: 'Dr.Aqsa Safdar',
+  doctorQualification: 'MBBS(Gyanecologist)',
+  doctorRegNo: '',
   consultationHours: '10 AM - 6 PM',
   logo: null,
   pdfSettings: {
@@ -38,7 +38,7 @@ const defaultSettings: ClinicSettings = {
     secondaryColor: '#64748b', // Slate-500
     footerText: 'Please consult your doctor before taking any medicine. Self-medication can be harmful.',
     showLogo: true,
-    showWatermark: false,
+    showWatermark: true,
   },
   themeColor: '221 83% 53%', // Default Blue
 };

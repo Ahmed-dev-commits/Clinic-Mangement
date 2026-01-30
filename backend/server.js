@@ -149,6 +149,21 @@ async function initializeDatabase() {
       )
     `);
 
+    // PrescriptionMedicines table - For doctor prescriptions (clinical records)
+    // This is separate from MedicineStock (pharmacy inventory)
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS PrescriptionMedicines (
+        ID INT AUTO_INCREMENT PRIMARY KEY,
+        PrescriptionID VARCHAR(50) NOT NULL,
+        MedicineName VARCHAR(255) NOT NULL,
+        Dosage VARCHAR(50),
+        Frequency VARCHAR(100),
+        Duration VARCHAR(50),
+        Quantity INT DEFAULT 1,
+        FOREIGN KEY (PrescriptionID) REFERENCES Prescriptions(ID) ON DELETE CASCADE
+      )
+    `);
+
     // LabResults table
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS LabResults (
@@ -211,6 +226,19 @@ async function initializeDatabase() {
         PaymentMethod VARCHAR(50),
         CreatedBy VARCHAR(100),
         CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Stock table (Medicine Inventory - separate from prescriptions)
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS stock (
+        ID VARCHAR(50) PRIMARY KEY,
+        Name VARCHAR(255) NOT NULL,
+        Category VARCHAR(100),
+        Quantity INT DEFAULT 0,
+        Price DECIMAL(10, 2) DEFAULT 0,
+        LowStockThreshold INT DEFAULT 10,
+        CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
@@ -420,8 +448,34 @@ app.post('/api/payments', async (req, res) => {
 
 app.get('/api/prescriptions', async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT * FROM Prescriptions ORDER BY CreatedAt DESC');
-    res.json(rows.map(convertRowDates));
+    const [prescriptions] = await pool.execute('SELECT * FROM Prescriptions ORDER BY CreatedAt DESC');
+
+    // Fetch medicines for each prescription from junction table
+    const prescriptionsWithMedicines = await Promise.all(
+      prescriptions.map(async (prescription) => {
+        const [medicines] = await pool.execute(
+          'SELECT MedicineName, Dosage, Frequency, Duration, Quantity FROM PrescriptionMedicines WHERE PrescriptionID = ?',
+          [prescription.ID]
+        );
+
+        // Convert medicines to the format expected by frontend
+        const formattedMedicines = medicines.map(med => ({
+          name: med.MedicineName,
+          dosage: med.Dosage,
+          frequency: med.Frequency,
+          duration: med.Duration,
+          quantity: med.Quantity
+        }));
+
+        return {
+          ...convertRowDates(prescription),
+          medicines: formattedMedicines,
+          labTests: prescription.LabTests ? JSON.parse(prescription.LabTests) : []
+        };
+      })
+    );
+
+    res.json(prescriptionsWithMedicines);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -429,15 +483,115 @@ app.get('/api/prescriptions', async (req, res) => {
 
 app.post('/api/prescriptions', async (req, res) => {
   try {
-    const { id, patientId, patientName, patientAge, diagnosis, medicines, labTests, doctorNotes, precautions, generatedText, followUpDate } = req.body;
+    const { id, patientId, patientName, patientAge, diagnosis, medicines, labTests, doctorNotes, precautions, generatedText, followUpDate, status } = req.body;
+    const createdAt = new Date().toISOString();
+
+    console.log('Creating prescription:', { id, patientId, status: status || 'Finalized' });
+
+    // Insert prescription (without medicines in JSON)
+    await pool.execute(
+      'INSERT INTO Prescriptions (ID, PatientID, PatientName, PatientAge, Diagnosis, Medicines, LabTests, DoctorNotes, Precautions, GeneratedText, FollowUpDate, Status, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, patientId, patientName, patientAge, diagnosis, JSON.stringify([]), JSON.stringify(labTests), doctorNotes, precautions, generatedText, followUpDate, status || 'Finalized', createdAt]
+    );
+
+    // Insert medicines into junction table
+    if (medicines && medicines.length > 0) {
+      for (const medicine of medicines) {
+        await pool.execute(
+          'INSERT INTO PrescriptionMedicines (PrescriptionID, MedicineName, Dosage, Frequency, Duration, Quantity) VALUES (?, ?, ?, ?, ?, ?)',
+          [id, medicine.name, medicine.dosage, medicine.frequency, medicine.duration, medicine.quantity || 1]
+        );
+      }
+    }
+
+    console.log('✅ Prescription created successfully:', id);
+    res.json({ success: true, id });
+  } catch (error) {
+    console.error('❌ Error creating prescription:', error.message);
+    console.error('Error details:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/prescriptions/:id', async (req, res) => {
+  try {
+    const { patientId, patientName, patientAge, diagnosis, medicines, labTests, doctorNotes, precautions, generatedText, followUpDate, status } = req.body;
+
+    console.log('Updating prescription:', req.params.id, 'status:', status);
+
+    // Update prescription
+    await pool.execute(
+      'UPDATE Prescriptions SET PatientID=?, PatientName=?, PatientAge=?, Diagnosis=?, LabTests=?, DoctorNotes=?, Precautions=?, GeneratedText=?, FollowUpDate=?, Status=? WHERE ID=?',
+      [patientId, patientName, patientAge, diagnosis, JSON.stringify(labTests), doctorNotes, precautions, generatedText, followUpDate, status, req.params.id]
+    );
+
+    // Delete existing medicines for this prescription
+    await pool.execute('DELETE FROM PrescriptionMedicines WHERE PrescriptionID = ?', [req.params.id]);
+
+    // Insert updated medicines
+    if (medicines && medicines.length > 0) {
+      for (const medicine of medicines) {
+        await pool.execute(
+          'INSERT INTO PrescriptionMedicines (PrescriptionID, MedicineName, Dosage, Frequency, Duration, Quantity) VALUES (?, ?, ?, ?, ?, ?)',
+          [req.params.id, medicine.name, medicine.dosage, medicine.frequency, medicine.duration, medicine.quantity || 1]
+        );
+      }
+    }
+
+    console.log('✅ Prescription updated successfully:', req.params.id);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Error updating prescription:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ STOCK API (Medicine Inventory) ============
+
+app.get('/api/stock', async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM stock ORDER BY Name ASC');
+    res.json(rows.map(convertRowDates));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/stock', async (req, res) => {
+  try {
+    const { id, name, category, quantity, price, lowStockThreshold } = req.body;
     const createdAt = new Date().toISOString();
 
     await pool.execute(
-      'INSERT INTO Prescriptions (ID, PatientID, PatientName, PatientAge, Diagnosis, Medicines, LabTests, DoctorNotes, Precautions, GeneratedText, FollowUpDate, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, patientId, patientName, patientAge, diagnosis, JSON.stringify(medicines), JSON.stringify(labTests), doctorNotes, precautions, generatedText, followUpDate, createdAt]
+      'INSERT INTO stock (ID, Name, Category, Quantity, Price, LowStockThreshold, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id, name, category, quantity, price, lowStockThreshold || 10, createdAt]
     );
 
     res.json({ success: true, id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/stock/:id', async (req, res) => {
+  try {
+    const { name, category, quantity, price, lowStockThreshold } = req.body;
+
+    await pool.execute(
+      'UPDATE stock SET Name=?, Category=?, Quantity=?, Price=?, LowStockThreshold=? WHERE ID=?',
+      [name, category, quantity, price, lowStockThreshold, req.params.id]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/stock/:id', async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM stock WHERE ID = ?', [req.params.id]);
+    res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

@@ -56,6 +56,7 @@ export interface Prescription {
   precautions: string;
   generatedText: string;
   followUpDate: string;
+  status?: 'Draft' | 'Finalized';
   createdAt: string;
 }
 

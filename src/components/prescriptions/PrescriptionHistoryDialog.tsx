@@ -57,8 +57,11 @@ export function PrescriptionHistoryDialog({
     return patient ? { id, name: patient.name } : { id, name: prescriptions.find(p => p.patientId === id)?.patientName || 'Unknown' };
   });
 
-  // Filter prescriptions
+  // Filter prescriptions - Only show Finalized (and exclude Drafts)
   const filteredPrescriptions = prescriptions.filter(rx => {
+    // Treat undefined status as 'Finalized' for backward compatibility
+    if (rx.status === 'Draft') return false;
+
     const matchesSearch =
       rx.patientName.toLowerCase().includes(searchQuery.toLowerCase()) ||
       rx.diagnosis.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -106,7 +109,7 @@ export function PrescriptionHistoryDialog({
     const contentWidth = pageWidth - 2 * margin;
 
     // Colors
-    const primaryColorHex = settings.pdfSettings?.primaryColor || '#1a56db';
+    const primaryColorHex = settings.pdfSettings?.primaryColor || '#db671aff';
     const r = parseInt(primaryColorHex.slice(1, 3), 16);
     const g = parseInt(primaryColorHex.slice(3, 5), 16);
     const b = parseInt(primaryColorHex.slice(5, 7), 16);
@@ -499,9 +502,12 @@ export function PrescriptionHistoryDialog({
                               {rx.medicines.length} medicine{rx.medicines.length !== 1 ? 's' : ''}
                             </div>
                           </div>
-                          <Badge variant="outline" className="font-mono text-[10px]">
-                            {rx.id}
-                          </Badge>
+                          <div className="flex flex-col items-end gap-1">
+                            {rx.status === 'Draft' && <Badge variant="secondary" className="text-[10px]">Draft</Badge>}
+                            <Badge variant="outline" className="font-mono text-[10px]">
+                              {rx.id}
+                            </Badge>
+                          </div>
                         </div>
                       </CardContent>
                     </Card>

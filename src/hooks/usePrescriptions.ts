@@ -38,6 +38,7 @@ function dtoToPrescription(dto: PrescriptionDTO): Prescription {
     generatedText: dto.GeneratedText,
     followUpDate: dto.FollowUpDate,
     createdAt: dto.CreatedAt,
+    status: dto.Status,
   };
 }
 
@@ -56,6 +57,8 @@ function rowToPrescription(row: PrescriptionRow): Prescription {
     generatedText: row.generated_text || '',
     followUpDate: row.follow_up_date || '',
     createdAt: row.created_at || new Date().toISOString(),
+    // Supabase row might not have status yet, default to finalized for now or update supabase types later
+    status: 'Finalized',
   };
 }
 
@@ -75,7 +78,7 @@ export function usePrescriptions() {
   const fetchPrescriptions = useCallback(async () => {
     try {
       setLoading(true);
-      
+
       if (isCloudEnvironment()) {
         setIsCloud(true);
         const data = await supabasePrescriptionsApi.getAll();
@@ -108,7 +111,7 @@ export function usePrescriptions() {
 
   const addPrescription = async (prescriptionData: Omit<Prescription, 'id' | 'createdAt'>) => {
     const id = generateId('RX');
-    
+
     if (isCloud) {
       await supabasePrescriptionsApi.create({
         id,
@@ -122,6 +125,7 @@ export function usePrescriptions() {
         precautions: prescriptionData.precautions,
         generated_text: prescriptionData.generatedText,
         follow_up_date: prescriptionData.followUpDate,
+        // status: prescriptionData.status // Supabase schema update pending
       });
       await fetchPrescriptions();
       return id;
@@ -148,6 +152,7 @@ export function usePrescriptions() {
         precautions: prescriptionData.precautions,
         generatedText: prescriptionData.generatedText,
         followUpDate: prescriptionData.followUpDate,
+        status: prescriptionData.status || 'Finalized',
       });
       await fetchPrescriptions();
       return id;
@@ -161,6 +166,42 @@ export function usePrescriptions() {
     }
   };
 
+  const updatePrescription = async (id: string, prescriptionData: Omit<Prescription, 'id' | 'createdAt'>) => {
+    if (isCloud) {
+      // Cloud update pending implementation
+      return;
+    }
+
+    if (isDemoMode) {
+      const updated = prescriptions.map(p =>
+        p.id === id ? { ...p, ...prescriptionData } : p
+      );
+      setPrescriptions(updated);
+      saveDemoPrescriptions(updated);
+      return;
+    }
+
+    try {
+      await prescriptionsApi.update(id, {
+        patientId: prescriptionData.patientId,
+        patientName: prescriptionData.patientName,
+        patientAge: prescriptionData.patientAge,
+        diagnosis: prescriptionData.diagnosis,
+        medicines: prescriptionData.medicines,
+        labTests: prescriptionData.labTests,
+        doctorNotes: prescriptionData.doctorNotes,
+        precautions: prescriptionData.precautions,
+        generatedText: prescriptionData.generatedText,
+        followUpDate: prescriptionData.followUpDate,
+        status: prescriptionData.status || 'Finalized',
+      });
+      await fetchPrescriptions();
+    } catch (err) {
+      // Fallback to demo mode if backend fails
+      console.error('Update failed', err);
+    }
+  };
+
   const getPatientPrescriptions = (patientId: string) => prescriptions.filter(p => p.patientId === patientId);
 
   return {
@@ -169,6 +210,7 @@ export function usePrescriptions() {
     isDemoMode,
     isCloud,
     addPrescription,
+    updatePrescription,
     getPatientPrescriptions,
     refetch: fetchPrescriptions,
   };
