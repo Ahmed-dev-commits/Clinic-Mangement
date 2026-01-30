@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useStock } from '@/hooks/useStock';
+import { useClinicalMedicines, ClinicalMedicine } from '@/hooks/useClinicalMedicines';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -29,45 +29,34 @@ import {
 import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Search, Pill, RefreshCw, Loader2, Plus, Edit } from 'lucide-react';
-import { StockItem } from '@/types/hospital';
+import { Search, Pill, RefreshCw, Loader2, Plus, Edit, Trash2 } from 'lucide-react';
 import { ConnectionStatus } from '@/components/ConnectionStatus';
 import { toast } from 'sonner';
 
-const CATEGORIES = ['All', 'Tablet', 'Capsule', 'Syrup', 'Injection', 'Liquid', 'Cream', 'Supplies', 'Equipment', 'Other'];
-const FORM_CATEGORIES = ['Tablet', 'Capsule', 'Syrup', 'Injection', 'Liquid', 'Cream', 'Supplies', 'Equipment', 'Other'];
+const CATEGORIES = ['Tablet', 'Capsule', 'Syrup', 'Injection', 'Liquid', 'Cream', 'Supplies', 'Equipment', 'Other'];
 
 export function MedicinesPage() {
-  const { stock, loading, refetch, addStockItem, updateStockItem } = useStock();
+  const { medicines, loading, refetch, addMedicine, updateMedicine, deleteMedicine } = useClinicalMedicines();
   const [searchQuery, setSearchQuery] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState<string>('All');
-  const [selectedMedicine, setSelectedMedicine] = useState<StockItem | null>(null);
-  
+  const [selectedMedicine, setSelectedMedicine] = useState<ClinicalMedicine | null>(null);
+
   // Dialog state
   const [isDialogOpen, setIsDialogOpen] = useState(false);
-  const [editingItem, setEditingItem] = useState<StockItem | null>(null);
+  const [editingItem, setEditingItem] = useState<ClinicalMedicine | null>(null);
   const [formData, setFormData] = useState({
     name: '',
     category: 'Tablet',
   });
 
-  // Filter medicines - only show when 3+ characters typed or no search
-  const filteredMedicines = stock.filter((item) => {
-    const matchesSearch = searchQuery.length < 3 || 
+  // Filter medicines
+  const filteredMedicines = medicines.filter((item) => {
+    return searchQuery.length < 3 ||
       item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       item.category.toLowerCase().includes(searchQuery.toLowerCase());
-
-    const matchesCategory = categoryFilter === 'All' || item.category === categoryFilter;
-
-    return matchesSearch && matchesCategory;
   });
 
   // Show hint when typing less than 3 characters
   const showSearchHint = searchQuery.length > 0 && searchQuery.length < 3;
-
-  // Stats
-  const totalMedicines = stock.length;
-  const totalCategories = new Set(stock.map(s => s.category)).size;
 
   const resetForm = () => {
     setFormData({
@@ -77,12 +66,12 @@ export function MedicinesPage() {
     setEditingItem(null);
   };
 
-  const handleOpenDialog = (item?: StockItem) => {
+  const handleOpenDialog = (item?: ClinicalMedicine) => {
     if (item) {
       setEditingItem(item);
       setFormData({
         name: item.name,
-        category: item.category,
+        category: item.category || 'Tablet',
       });
     } else {
       resetForm();
@@ -103,20 +92,21 @@ export function MedicinesPage() {
       return;
     }
 
+    // Default values for fields not in the simplified form
     const itemData = {
       name: formData.name.trim(),
       category: formData.category,
-      quantity: editingItem?.quantity ?? 0,
-      price: editingItem?.price ?? 0,
-      lowStockThreshold: editingItem?.lowStockThreshold ?? 20,
+      dosage: '', // Default empty
+      frequency: '', // Default empty
+      duration: '', // Default empty
     };
 
     try {
       if (editingItem) {
-        await updateStockItem(editingItem.id, itemData);
+        await updateMedicine(editingItem.id, itemData);
         toast.success('Medicine updated successfully');
       } else {
-        await addStockItem(itemData);
+        await addMedicine(itemData);
         toast.success('Medicine added successfully');
       }
       handleCloseDialog();
@@ -125,11 +115,19 @@ export function MedicinesPage() {
     }
   };
 
+  const handleDelete = async (id: number) => {
+    if (confirm('Are you sure you want to delete this medicine?')) {
+      await deleteMedicine(id);
+      toast.success('Medicine deleted from master list');
+      if (selectedMedicine?.id === id) setSelectedMedicine(null);
+    }
+  };
+
   return (
     <div>
       <PageHeader
-        title="Medicines"
-        description="Add, update, and manage medicines for prescriptions"
+        title="Clinical Medicines"
+        description="Manage the master list of medicines for prescriptions"
         action={
           <div className="flex items-center gap-3">
             <ConnectionStatus />
@@ -138,35 +136,26 @@ export function MedicinesPage() {
             </Button>
             <Button onClick={() => handleOpenDialog()}>
               <Plus className="mr-2 h-4 w-4" />
-              Add Medicine
+              Add Clinical Medicine
             </Button>
           </div>
         }
       />
 
       {/* Stats Cards */}
-      <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 mb-6">
+      <div className="grid gap-4 grid-cols-1 mb-6">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Total Medicines</CardTitle>
+            <CardTitle className="text-sm font-medium">Total Clinical Medicines</CardTitle>
             <Pill className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{totalMedicines}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Categories</CardTitle>
-            <Pill className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{totalCategories}</div>
+            <div className="text-2xl font-bold">{medicines.length}</div>
           </CardContent>
         </Card>
       </div>
 
-      {/* Search and Filter */}
+      {/* Search */}
       <div className="flex flex-col sm:flex-row gap-4 mb-6">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -180,16 +169,6 @@ export function MedicinesPage() {
             <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground animate-spin" />
           )}
         </div>
-        <Select value={categoryFilter} onValueChange={setCategoryFilter}>
-          <SelectTrigger className="w-full sm:w-48">
-            <SelectValue placeholder="Filter by category" />
-          </SelectTrigger>
-          <SelectContent>
-            {CATEGORIES.map((cat) => (
-              <SelectItem key={cat} value={cat}>{cat}</SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
       </div>
 
       {/* Search hint */}
@@ -221,7 +200,7 @@ export function MedicinesPage() {
                 ) : filteredMedicines.length === 0 ? (
                   <TableRow>
                     <TableCell colSpan={3} className="text-center py-8 text-muted-foreground">
-                      {searchQuery.length >= 3 
+                      {searchQuery.length >= 3
                         ? `No medicines found for "${searchQuery}"`
                         : 'No medicines available'
                       }
@@ -231,7 +210,7 @@ export function MedicinesPage() {
                   filteredMedicines.map((item) => {
                     const isSelected = selectedMedicine?.id === item.id;
                     return (
-                      <TableRow 
+                      <TableRow
                         key={item.id}
                         className={`cursor-pointer transition-colors ${isSelected ? 'bg-primary/5' : 'hover:bg-muted/50'}`}
                         onClick={() => setSelectedMedicine(item)}
@@ -255,6 +234,17 @@ export function MedicinesPage() {
                             }}
                           >
                             <Edit className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="text-destructive hover:text-destructive"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDelete(item.id);
+                            }}
+                          >
+                            <Trash2 className="h-4 w-4" />
                           </Button>
                         </TableCell>
                       </TableRow>
@@ -285,25 +275,16 @@ export function MedicinesPage() {
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 gap-4">
-                    <div>
-                      <p className="text-xs text-muted-foreground uppercase tracking-wide">Item ID</p>
-                      <p className="font-mono text-sm">{selectedMedicine.id}</p>
-                    </div>
-                    <div>
-                      <p className="text-xs text-muted-foreground uppercase tracking-wide">Category</p>
-                      <p className="text-sm font-medium">{selectedMedicine.category}</p>
-                    </div>
+                  <div className="flex gap-2 mt-4">
+                    <Button
+                      className="flex-1"
+                      variant="outline"
+                      onClick={() => handleOpenDialog(selectedMedicine)}
+                    >
+                      <Edit className="mr-2 h-4 w-4" />
+                      Edit
+                    </Button>
                   </div>
-
-                  <Button 
-                    className="w-full mt-4" 
-                    variant="outline"
-                    onClick={() => handleOpenDialog(selectedMedicine)}
-                  >
-                    <Edit className="mr-2 h-4 w-4" />
-                    Edit Medicine
-                  </Button>
                 </div>
               ) : (
                 <div className="text-center py-8 text-muted-foreground">
@@ -322,12 +303,12 @@ export function MedicinesPage() {
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>
-              {editingItem ? 'Edit Medicine' : 'Add New Medicine'}
+              {editingItem ? 'Edit Medicine' : 'Add Clinical Medicine'}
             </DialogTitle>
             <DialogDescription>
               {editingItem
-                ? 'Update medicine details below.'
-                : 'Add a new medicine to the inventory.'}
+                ? 'Update medicine details.'
+                : 'Add a new medicine to the master clinical list.'}
             </DialogDescription>
           </DialogHeader>
 
@@ -338,27 +319,28 @@ export function MedicinesPage() {
                 id="name"
                 value={formData.name}
                 onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                placeholder="e.g., Paracetamol 500mg"
+                placeholder="e.g., Paracetamol"
               />
             </div>
 
             <div>
               <Label htmlFor="category">Category *</Label>
               <Select
-                value={formData.category}
+                value={formData.category} // Use category from state
                 onValueChange={(value) => setFormData({ ...formData, category: value })}
               >
                 <SelectTrigger>
-                  <SelectValue />
+                  <SelectValue placeholder="Select Category" />
                 </SelectTrigger>
                 <SelectContent>
-                  {FORM_CATEGORIES.map((cat) => (
-                    <SelectItem key={cat} value={cat}>{cat}</SelectItem>
+                  {CATEGORIES.map((cat) => (
+                    <SelectItem key={cat} value={cat}>
+                      {cat}
+                    </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
-
 
             <DialogFooter>
               <Button type="button" variant="outline" onClick={handleCloseDialog}>

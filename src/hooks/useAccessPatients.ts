@@ -82,7 +82,7 @@ function rowToPatient(row: PatientRow): Patient {
   };
 }
 
-export function useAccessPatients() {
+export function useAccessPatients(createdTodayOnly = false) {
   const [patients, setPatients] = useState<Patient[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -104,7 +104,7 @@ export function useAccessPatients() {
       // Check if running in cloud environment
       if (isCloudEnvironment()) {
         setIsCloud(true);
-        // Note: Supabase implementation pending pagination update, fetching all for now
+        // Note: Supabase implementation pending filtering update
         const data = await supabasePatientsApi.getAll();
         setPatients(data.map(rowToPatient));
         setTotal(data.length);
@@ -114,7 +114,7 @@ export function useAccessPatients() {
         // Try local SQLite backend
         setIsCloud(false);
         try {
-          const response = await patientsApi.getAll({ page, limit, search });
+          const response = await patientsApi.getAll({ page, limit, search, createdToday: createdTodayOnly });
           // Check if response has data/meta structure (new backend) or array (old/fallback)
           if ('data' in response && 'meta' in response) {
             setPatients(response.data.map(dtoToPatient));
@@ -123,8 +123,16 @@ export function useAccessPatients() {
           } else if (Array.isArray(response)) {
             // Fallback if backend is old
             const allPatients = (response as PatientDTO[]).map(dtoToPatient);
-            setPatients(allPatients);
-            setTotal(allPatients.length);
+
+            // Client side filter fallback
+            let filtered = allPatients;
+            if (createdTodayOnly) {
+              const today = new Date().toISOString().split('T')[0];
+              filtered = allPatients.filter(p => p.createdAt && p.createdAt.startsWith(today));
+            }
+
+            setPatients(filtered);
+            setTotal(filtered.length);
             setTotalPages(1);
           }
           setIsDemoMode(false);
@@ -134,9 +142,15 @@ export function useAccessPatients() {
           const allDemo = getDemoPatients();
           // Implement client-side search/pagination for demo
           let filtered = allDemo;
+
+          if (createdTodayOnly) {
+            const today = new Date().toISOString().split('T')[0];
+            filtered = filtered.filter(p => p.createdAt && p.createdAt.startsWith(today));
+          }
+
           if (search) {
             const lowerSearch = search.toLowerCase();
-            filtered = allDemo.filter(p =>
+            filtered = filtered.filter(p =>
               p.name.toLowerCase().includes(lowerSearch) ||
               p.id.toLowerCase().includes(lowerSearch) ||
               p.phone.includes(lowerSearch)
@@ -159,7 +173,7 @@ export function useAccessPatients() {
     } finally {
       setLoading(false);
     }
-  }, [page, limit, search]);
+  }, [page, limit, search, createdTodayOnly]);
 
   useEffect(() => {
     fetchPatients();

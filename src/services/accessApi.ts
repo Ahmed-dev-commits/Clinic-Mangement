@@ -41,6 +41,7 @@ async function apiCall<T>(endpoint: string, options?: RequestInit): Promise<T> {
 
 export interface PatientDTO {
   ID: string;
+  MRN?: string;
   Name: string;
   Age: number;
   Gender: string;
@@ -54,13 +55,14 @@ export interface PatientDTO {
 }
 
 export const patientsApi = {
-  getAll: (params?: { page?: number; limit?: number; search?: string }) => {
+  getAll: (params?: { page?: number; limit?: number; search?: string; createdToday?: boolean }) => {
     const queryParams = new URLSearchParams();
     if (params?.page) queryParams.append('page', params.page.toString());
     if (params?.limit) queryParams.append('limit', params.limit.toString());
     if (params?.search) queryParams.append('search', params.search);
+    if (params?.createdToday) queryParams.append('createdToday', 'true');
     const queryString = queryParams.toString();
-    return apiCall<{ data: PatientDTO[]; meta: { total: number; page: number; limit: number; totalPages: number } }>(`/patients?${queryString ? `&${queryString}` : ''}`); // Note: ? is usually enough, but handling empty search
+    return apiCall<{ data: PatientDTO[]; meta: { total: number; page: number; limit: number; totalPages: number } }>(`/patients?${queryString ? `&${queryString}` : ''}`);
   },
 
   getById: (id: string) => apiCall<PatientDTO | null>(`/patients/${id}`),
@@ -144,6 +146,37 @@ export const stockApi = {
     apiCall<{ success: boolean }>(`/stock/${id}`, { method: 'DELETE' }),
 };
 
+// ============ CLINICAL MEDICINES API (Master List) ============
+
+export interface ClinicalMedicineDTO {
+  ID: number;
+  PrescriptionID: string | null;
+  MedicineName: string;
+  Category: string;
+  Dosage: string;
+  Frequency: string;
+  Duration: string;
+  Quantity: number;
+}
+
+export const clinicalMedicinesApi = {
+  getAll: () => apiCall<ClinicalMedicineDTO[]>('/clinical-medicines'),
+
+  create: (item: { name: string; category: string; dosage: string; frequency: string; duration: string }) =>
+    apiCall<{ success: boolean }>('/clinical-medicines', {
+      method: 'POST',
+      body: JSON.stringify(item),
+    }),
+
+  update: (id: number, item: { name: string; category: string; dosage: string; frequency: string; duration: string }) =>
+    apiCall<{ success: boolean }>(`/clinical-medicines/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(item),
+    }),
+
+  delete: (id: number) =>
+    apiCall<{ success: boolean }>(`/clinical-medicines/${id}`, { method: 'DELETE' }),
+};
 // ============ PAYMENTS API ============
 
 export interface PaymentMedicineDTO {

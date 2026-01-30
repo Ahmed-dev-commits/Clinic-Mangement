@@ -2,18 +2,18 @@ import { useState, useEffect, useRef } from 'react';
 import { Input } from '@/components/ui/input';
 import { Search, Pill, Loader2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { StockItem } from '@/types/hospital';
+import { ClinicalMedicine } from '@/hooks/useClinicalMedicines';
 
 interface MedicineSearchProps {
-  stock: StockItem[];
-  onSelect: (medicine: StockItem) => void;
+  medicines: ClinicalMedicine[];
+  onSelect: (medicine: ClinicalMedicine) => void;
   placeholder?: string;
   value?: string;
   disabled?: boolean;
 }
 
 export function MedicineSearch({
-  stock,
+  medicines,
   onSelect,
   placeholder = "Search medicine (type 3+ characters)...",
   value = "",
@@ -22,7 +22,7 @@ export function MedicineSearch({
   const [searchQuery, setSearchQuery] = useState(value);
   const [isOpen, setIsOpen] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
-  const [filteredMedicines, setFilteredMedicines] = useState<StockItem[]>([]);
+  const [filteredMedicines, setFilteredMedicines] = useState<ClinicalMedicine[]>([]);
   const [justSelected, setJustSelected] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -33,13 +33,12 @@ export function MedicineSearch({
       setJustSelected(false);
       return;
     }
-    
+
     if (searchQuery.length >= 3) {
       setIsSearching(true);
       const timer = setTimeout(() => {
-        const filtered = stock.filter(item =>
-          item.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          item.category.toLowerCase().includes(searchQuery.toLowerCase())
+        const filtered = medicines.filter(item =>
+          item.name.toLowerCase().includes(searchQuery.toLowerCase())
         );
         setFilteredMedicines(filtered);
         setIsSearching(false);
@@ -50,7 +49,7 @@ export function MedicineSearch({
       setFilteredMedicines([]);
       setIsOpen(false);
     }
-  }, [searchQuery, stock, justSelected]);
+  }, [searchQuery, medicines, justSelected]);
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -63,7 +62,7 @@ export function MedicineSearch({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const handleSelect = (medicine: StockItem) => {
+  const handleSelect = (medicine: ClinicalMedicine) => {
     setJustSelected(true);
     setIsOpen(false);
     setSearchQuery(medicine.name);
@@ -105,11 +104,10 @@ export function MedicineSearch({
               type="button"
               onClick={() => handleSelect(medicine)}
               className={cn(
-                "w-full px-3 py-2 text-left hover:bg-accent flex items-center gap-3 transition-colors",
-                medicine.quantity <= medicine.lowStockThreshold && "bg-destructive/5"
+                "w-full px-3 py-2 text-left hover:bg-accent flex items-center gap-3 transition-colors"
               )}
             >
-            <Pill className="h-4 w-4 text-primary flex-shrink-0" />
+              <Pill className="h-4 w-4 text-primary flex-shrink-0" />
               <div className="flex-1 min-w-0">
                 <p className="font-medium text-sm truncate">{medicine.name}</p>
                 <p className="text-xs text-muted-foreground">{medicine.category}</p>

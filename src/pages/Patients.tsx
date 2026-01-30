@@ -130,6 +130,33 @@ export function PatientsPage() {
     symptoms: '',
   });
 
+  // Lookup state
+  const [lookupResults, setLookupResults] = useState<Patient[]>([]);
+
+  const handleLookupPatient = async (query: string) => {
+    try {
+      // We use the patientsApi directly to avoid messing with the main table state
+      const response = await import('@/services/accessApi').then(m => m.patientsApi.getAll({ search: query, limit: 5 }));
+      if ('data' in response) {
+        // Map DTO to Patient using a local helper or duplicate logic (simplest here to map manually for just required fields)
+        const results: Patient[] = response.data.map((dto: any) => ({
+          id: dto.ID,
+          name: dto.Name,
+          age: dto.Age,
+          gender: dto.Gender,
+          phone: dto.Phone,
+          address: dto.Address,
+          visitDate: dto.VisitDate,
+          symptoms: dto.Symptoms,
+          createdAt: dto.CreatedAt
+        }));
+        setLookupResults(results);
+      }
+    } catch (e) {
+      console.error("Lookup failed", e);
+    }
+  };
+
   const resetForm = () => {
     setFormData({
       name: '',
@@ -141,6 +168,7 @@ export function PatientsPage() {
       symptoms: '',
     });
     setEditingPatient(null);
+    setLookupResults([]);
   };
 
   const handleOpenDialog = (patient?: Patient) => {
@@ -527,102 +555,161 @@ export function PatientsPage() {
             </DialogDescription>
           </DialogHeader>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="col-span-2">
-                <Label htmlFor="name">Patient Name *</Label>
-                <Input
-                  id="name"
-                  value={formData.name}
-                  onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                  placeholder="Enter full name"
-                />
+          <div className="space-y-4">
+            {/* Patient Lookup for Revisit */}
+            {!editingPatient && (
+              <div className="bg-muted/30 p-4 rounded-lg border mb-4">
+                <Label className="mb-2 block text-xs font-semibold uppercase text-muted-foreground">
+                  Returning Patient? Search to Auto-fill
+                </Label>
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    placeholder="Search by name or phone..."
+                    className="pl-9"
+                    onChange={(e) => {
+                      const query = e.target.value;
+                      if (query.length >= 3) {
+                        // Quick lookup (using existing patients list if available, or we could add a dedicated lookup api call)
+                        // For now, let's filter the already loaded patients as a quick hint, 
+                        // but ideally we should fetch from backend if list is huge.
+                        // Triggering a search here might be complex without a dedicated hook method.
+                        // Simple approach: Use a new effect or function to fetch lookup results.
+                        handleLookupPatient(query);
+                      } else {
+                        setLookupResults([]);
+                      }
+                    }}
+                  />
+                  {lookupResults.length > 0 && (
+                    <div className="absolute z-10 w-full mt-1 bg-popover border rounded-md shadow-lg max-h-40 overflow-y-auto">
+                      {lookupResults.map(p => (
+                        <div
+                          key={p.id}
+                          className="p-2 hover:bg-accent cursor-pointer text-sm"
+                          onClick={() => {
+                            setFormData({
+                              ...formData,
+                              name: p.name,
+                              age: p.age.toString(),
+                              gender: p.gender,
+                              phone: p.phone,
+                              address: p.address,
+                              // Keep visitDate as today
+                              // Clear symptoms
+                              symptoms: ''
+                            });
+                            setLookupResults([]);
+                            toast.success("Patient details loaded!");
+                          }}
+                        >
+                          <div className="font-medium">{p.name}</div>
+                          <div className="text-xs text-muted-foreground">{p.phone} • Age: {p.age}</div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <form onSubmit={handleSubmit} className="space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div className="col-span-2">
+                  <Label htmlFor="name">Patient Name *</Label>
+                  <Input
+                    id="name"
+                    value={formData.name}
+                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                    placeholder="Enter full name"
+                  />
+                </div>
+
+                <div>
+                  <Label htmlFor="age">Age *</Label>
+                  <Input
+                    id="age"
+                    type="number"
+                    min="0"
+                    max="150"
+                    value={formData.age}
+                    onChange={(e) => setFormData({ ...formData, age: e.target.value })}
+                    placeholder="Age"
+                  />
+                </div>
+
+                <div>
+                  <Label htmlFor="gender">Gender *</Label>
+                  <Select
+                    value={formData.gender}
+                    onValueChange={(value: 'Male' | 'Female' | 'Other') =>
+                      setFormData({ ...formData, gender: value })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="Male">Male</SelectItem>
+                      <SelectItem value="Female">Female</SelectItem>
+                      <SelectItem value="Other">Other</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div>
+                  <Label htmlFor="phone">Phone Number *</Label>
+                  <Input
+                    id="phone"
+                    value={formData.phone}
+                    onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
+                    placeholder="03001234567"
+                  />
+                </div>
+
+                <div>
+                  <Label htmlFor="visitDate">Visit Date</Label>
+                  <Input
+                    id="visitDate"
+                    type="date"
+                    value={formData.visitDate}
+                    onChange={(e) => setFormData({ ...formData, visitDate: e.target.value })}
+                  />
+                </div>
+
+                <div className="col-span-2">
+                  <Label htmlFor="address">Address</Label>
+                  <Input
+                    id="address"
+                    value={formData.address}
+                    onChange={(e) => setFormData({ ...formData, address: e.target.value })}
+                    placeholder="Enter address"
+                  />
+                </div>
+
+                <div className="col-span-2">
+                  <Label htmlFor="symptoms">Symptoms</Label>
+                  <Textarea
+                    id="symptoms"
+                    value={formData.symptoms}
+                    onChange={(e) => setFormData({ ...formData, symptoms: e.target.value })}
+                    placeholder="Describe symptoms..."
+                    rows={3}
+                  />
+                </div>
               </div>
 
-              <div>
-                <Label htmlFor="age">Age *</Label>
-                <Input
-                  id="age"
-                  type="number"
-                  min="0"
-                  max="150"
-                  value={formData.age}
-                  onChange={(e) => setFormData({ ...formData, age: e.target.value })}
-                  placeholder="Age"
-                />
-              </div>
-
-              <div>
-                <Label htmlFor="gender">Gender *</Label>
-                <Select
-                  value={formData.gender}
-                  onValueChange={(value: 'Male' | 'Female' | 'Other') =>
-                    setFormData({ ...formData, gender: value })
-                  }
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="Male">Male</SelectItem>
-                    <SelectItem value="Female">Female</SelectItem>
-                    <SelectItem value="Other">Other</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div>
-                <Label htmlFor="phone">Phone Number *</Label>
-                <Input
-                  id="phone"
-                  value={formData.phone}
-                  onChange={(e) => setFormData({ ...formData, phone: e.target.value })}
-                  placeholder="03001234567"
-                />
-              </div>
-
-              <div>
-                <Label htmlFor="visitDate">Visit Date</Label>
-                <Input
-                  id="visitDate"
-                  type="date"
-                  value={formData.visitDate}
-                  onChange={(e) => setFormData({ ...formData, visitDate: e.target.value })}
-                />
-              </div>
-
-              <div className="col-span-2">
-                <Label htmlFor="address">Address</Label>
-                <Input
-                  id="address"
-                  value={formData.address}
-                  onChange={(e) => setFormData({ ...formData, address: e.target.value })}
-                  placeholder="Enter address"
-                />
-              </div>
-
-              <div className="col-span-2">
-                <Label htmlFor="symptoms">Symptoms</Label>
-                <Textarea
-                  id="symptoms"
-                  value={formData.symptoms}
-                  onChange={(e) => setFormData({ ...formData, symptoms: e.target.value })}
-                  placeholder="Describe symptoms..."
-                  rows={3}
-                />
-              </div>
-            </div>
-
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={handleCloseDialog} disabled={isSubmitting}>
-                Cancel
-              </Button>
-              <Button type="submit" disabled={isSubmitting}>
-                {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                {editingPatient ? 'Update' : 'Register'}
-              </Button>
-            </DialogFooter>
-          </form>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={handleCloseDialog} disabled={isSubmitting}>
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={isSubmitting}>
+                  {isSubmitting && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  {editingPatient ? 'Update' : 'Register'}
+                </Button>
+              </DialogFooter>
+            </form>
+          </div>
         </DialogContent>
       </Dialog>
 

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useAccessPatients } from '@/hooks/useAccessPatients';
 import { usePrescriptions } from '@/hooks/usePrescriptions';
 import { useStock } from '@/hooks/useStock';
+import { useClinicalMedicines } from '@/hooks/useClinicalMedicines';
 import { useSettingsStore } from '@/store/settingsStore';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { Button } from '@/components/ui/button';
@@ -34,9 +35,10 @@ import { PrescriptionHistoryDialog } from '@/components/prescriptions/Prescripti
 import { PrescriptionPreviewDialog } from '@/components/prescriptions/PrescriptionPreviewDialog';
 
 export function PrescriptionsPage() {
-  const { patients } = useAccessPatients();
+  const { patients } = useAccessPatients(true);
   const { prescriptions, loading, addPrescription, updatePrescription, refetch } = usePrescriptions();
   const { stock, reduceStock } = useStock();
+  const { medicines: clinicalMedicines } = useClinicalMedicines();
   const { settings } = useSettingsStore();
 
   const [selectedPatientId, setSelectedPatientId] = useState('');
@@ -700,8 +702,16 @@ export function PrescriptionsPage() {
               <Label className="text-sm font-medium">Add Medicine (Search with 3+ characters)</Label>
               <div className="grid grid-cols-1 gap-2">
                 <MedicineSearch
-                  stock={stock}
-                  onSelect={(medicine) => setNewMedicine({ ...newMedicine, name: medicine.name })}
+                  medicines={clinicalMedicines}
+                  onSelect={(medicine) => {
+                    setNewMedicine({
+                      ...newMedicine,
+                      name: medicine.name,
+                      dosage: medicine.dosage || '',
+                      frequency: medicine.frequency || '',
+                      duration: medicine.duration || ''
+                    });
+                  }}
                   value={newMedicine.name}
                   placeholder="Search medicine by name..."
                 />

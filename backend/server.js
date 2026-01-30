@@ -149,13 +149,14 @@ async function initializeDatabase() {
       )
     `);
 
-    // PrescriptionMedicines table - For doctor prescriptions (clinical records)
-    // This is separate from MedicineStock (pharmacy inventory)
+    // PrescriptionMedicines table - For doctor prescriptions AND master clinical list
+    // If PrescriptionID is NULL, it's a master clinical medicine
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS PrescriptionMedicines (
         ID INT AUTO_INCREMENT PRIMARY KEY,
-        PrescriptionID VARCHAR(50) NOT NULL,
+        PrescriptionID VARCHAR(50),
         MedicineName VARCHAR(255) NOT NULL,
+        Category VARCHAR(100),
         Dosage VARCHAR(50),
         Frequency VARCHAR(100),
         Duration VARCHAR(50),
@@ -280,9 +281,18 @@ app.get('/api/patients', async (req, res) => {
     let params = [];
 
     if (search) {
-      whereClause = 'WHERE Name LIKE ? OR ID LIKE ? OR Phone LIKE ?';
+      whereClause = 'WHERE (Name LIKE ? OR ID LIKE ? OR Phone LIKE ? OR MRN LIKE ?)';
       const searchParam = `%${search}%`;
-      params = [searchParam, searchParam, searchParam];
+      params = [searchParam, searchParam, searchParam, searchParam];
+    }
+
+    // Filter by CreatedToday if requested
+    if (req.query.createdToday === 'true') {
+      if (whereClause) {
+        whereClause += ' AND DATE(CreatedAt) = CURDATE()';
+      } else {
+        whereClause = 'WHERE DATE(CreatedAt) = CURDATE()';
+      }
     }
 
     // 1. Get Total Count
@@ -327,12 +337,14 @@ app.get('/api/patients/:id', async (req, res) => {
 
 app.post('/api/patients', async (req, res) => {
   try {
-    const { id, name, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole } = req.body;
+    const { id, name, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, mrn } = req.body;
     const createdAt = new Date().toISOString();
+    // If mrn is provided use it, otherwise use id (for new patients without history)
+    const patientMrn = mrn || id;
 
     await pool.execute(
-      'INSERT INTO Patients (ID, Name, Age, Gender, Phone, Address, VisitDate, Symptoms, CreatedBy, CreatedByRole, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, name, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, createdAt]
+      'INSERT INTO Patients (ID, MRN, Name, Age, Gender, Phone, Address, VisitDate, Symptoms, CreatedBy, CreatedByRole, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, patientMrn, name, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, createdAt]
     );
 
     res.json({ success: true, id });
@@ -591,6 +603,58 @@ app.put('/api/stock/:id', async (req, res) => {
 app.delete('/api/stock/:id', async (req, res) => {
   try {
     await pool.execute('DELETE FROM stock WHERE ID = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ CLINICAL MEDICINES API (Master List) ============
+
+app.get('/api/clinical-medicines', async (req, res) => {
+  try {
+    // Fetch only master medicines (where PrescriptionID is NULL)
+    const [rows] = await pool.execute('SELECT * FROM PrescriptionMedicines WHERE PrescriptionID IS NULL ORDER BY MedicineName ASC');
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/clinical-medicines', async (req, res) => {
+  try {
+    const { name, category, dosage, frequency, duration } = req.body;
+
+    // Insert new master medicine (PrescriptionID is NULL)
+    await pool.execute(
+      'INSERT INTO PrescriptionMedicines (PrescriptionID, MedicineName, Category, Dosage, Frequency, Duration) VALUES (NULL, ?, ?, ?, ?, ?)',
+      [name, category || 'Tablet', dosage, frequency, duration]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/clinical-medicines/:id', async (req, res) => {
+  try {
+    const { name, category, dosage, frequency, duration } = req.body;
+
+    await pool.execute(
+      'UPDATE PrescriptionMedicines SET MedicineName=?, Category=?, Dosage=?, Frequency=?, Duration=? WHERE ID=? AND PrescriptionID IS NULL',
+      [name, category, dosage, frequency, duration, req.params.id]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/clinical-medicines/:id', async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM PrescriptionMedicines WHERE ID=? AND PrescriptionID IS NULL', [req.params.id]);
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });

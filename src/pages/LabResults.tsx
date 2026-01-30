@@ -60,7 +60,7 @@ const commonLabTests = [
 ];
 
 export function LabResultsPage() {
-  const { patients } = useAccessPatients();
+  const { patients } = useAccessPatients(true);
   const { labResults, loading, addLabResult, updateLabResultStatus, notifyPatient, markAsCollected, refetch } = useLabResults();
   const { settings } = useSettingsStore();
 
