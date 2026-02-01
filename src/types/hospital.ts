@@ -2,6 +2,7 @@
 
 export interface Patient {
   id: string;
+  mrn?: string;
   name: string;
   age: number;
   gender: 'Male' | 'Female' | 'Other';

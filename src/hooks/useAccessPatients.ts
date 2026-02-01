@@ -52,6 +52,7 @@ function saveDemoPatients(patients: Patient[]) {
 function dtoToPatient(dto: PatientDTO): Patient {
   return {
     id: dto.ID,
+    mrn: dto.MRN,
     name: dto.Name,
     age: dto.Age,
     gender: dto.Gender as 'Male' | 'Female' | 'Other',
@@ -221,6 +222,7 @@ export function useAccessPatients(createdTodayOnly = false) {
     try {
       await patientsApi.create({
         ID: id,
+        MRN: patientData.mrn,
         Name: patientData.name,
         Age: patientData.age,
         Gender: patientData.gender,

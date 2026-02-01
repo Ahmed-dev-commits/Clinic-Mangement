@@ -8,6 +8,7 @@ import { MainLayout } from "@/components/layout/MainLayout";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
 import { DashboardPage } from "./pages/Dashboard";
 import { PatientsPage } from "./pages/Patients";
+import { PatientProfilePage } from "./pages/PatientProfile";
 import { FeesPage } from "./pages/Fees";
 import { StockPage } from "./pages/Stock";
 import { MedicinesPage } from "./pages/Medicines";
@@ -62,6 +63,15 @@ const App = () => {
                           element={
                             <ProtectedRoute allowedRoles={['Receptionist', 'Doctor', 'Admin']}>
                               <PatientsPage />
+                            </ProtectedRoute>
+                          }
+                        />
+
+                        <Route
+                          path="/profile/:id"
+                          element={
+                            <ProtectedRoute allowedRoles={['Receptionist', 'Doctor', 'Admin']}>
+                              <PatientProfilePage />
                             </ProtectedRoute>
                           }
                         />

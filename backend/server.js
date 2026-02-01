@@ -326,6 +326,80 @@ app.get('/api/patients', async (req, res) => {
   }
 });
 
+
+// ============ PATIENT PROFILE API ============
+app.get('/api/profile/:identifier', async (req, res) => {
+  try {
+    const { identifier } = req.params; // Can be MRN or PatientID
+
+    // 1. Resolve Identifier to MRN
+    // First check if identifier matches an MRN directly
+    let [rows] = await pool.execute('SELECT * FROM Patients WHERE MRN = ?', [identifier]);
+
+    // If no match by MRN, check if it's a PatientID and get that patient's MRN
+    if (rows.length === 0) {
+      const [idRows] = await pool.execute('SELECT * FROM Patients WHERE ID = ?', [identifier]);
+      if (idRows.length > 0) {
+        const patient = idRows[0];
+        // Use the MRN if present, otherwise fall back to ID (for unlinked records)
+        const targetMrn = patient.MRN || patient.ID;
+        // Now fetch all records with this MRN
+        [rows] = await pool.execute('SELECT * FROM Patients WHERE MRN = ? OR ID = ?', [targetMrn, targetMrn]);
+      } else {
+        return res.status(404).json({ error: 'Patient not found' });
+      }
+    }
+
+    // Master Profile is the latest visit (or the first created? Latest visit is usually best for current info)
+    // We'll sort by VisitDate (or CreatedAt) DESC
+    rows.sort((a, b) => new Date(b.VisitDate || b.CreatedAt).getTime() - new Date(a.VisitDate || a.CreatedAt).getTime());
+
+    const masterProfile = convertRowDates(rows[0]); // Latest record
+    const allVisits = rows.map(convertRowDates);
+    const allPatientIds = rows.map(r => r.ID);
+
+    if (allPatientIds.length === 0) {
+      return res.json({ profile: masterProfile, visits: [], history: { prescriptions: [], labResults: [], payments: [], services: [] } });
+    }
+
+    // 2. Fetch History based on Patient IDs
+    const placeholders = allPatientIds.map(() => '?').join(',');
+
+    // Helper to fetch valid resources
+    const fetchResources = async (table) => {
+      try {
+        const [res] = await pool.execute(`SELECT * FROM ${table} WHERE PatientID IN (${placeholders}) ORDER BY CreatedAt DESC`, allPatientIds);
+        return res; // We'll convert dates later if needed or on frontend
+      } catch (e) {
+        console.warn(`Failed to fetch ${table} for profile:`, e.message);
+        return [];
+      }
+    };
+
+    const [prescriptions, labResults, services, payments] = await Promise.all([
+      fetchResources('Prescriptions'),
+      fetchResources('LabResults'),
+      fetchResources('PatientServices'),
+      fetchResources('Payments') // Assuming Payments table exists, handle error if not
+    ]);
+
+    res.json({
+      profile: masterProfile,
+      visits: allVisits,
+      history: {
+        prescriptions,
+        labResults,
+        services,
+        payments
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching patient profile:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/patients/:id', async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT * FROM Patients WHERE ID = ?', [req.params.id]);
@@ -1003,6 +1077,16 @@ process.on('SIGINT', async () => {
     await pool.end();
   }
   process.exit(0);
+});
+
+// ============ SERVE REACT FRONTEND ============
+const path = require('path');
+// Serve static files from the dist directory
+app.use(express.static(path.join(__dirname, '../dist')));
+
+// Handle React routing, return all requests to React app
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, '../dist/index.html'));
 });
 
 // Initialize database and start server

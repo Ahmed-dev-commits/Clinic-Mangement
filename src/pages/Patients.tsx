@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { useAccessPatients } from '@/hooks/useAccessPatients';
 import { usePatientServices } from '@/hooks/usePatientServices';
 import { usePayments } from '@/hooks/usePayments';
@@ -34,7 +35,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Plus, Search, Edit, Trash2, Loader2, RefreshCw, ClipboardPlus, History } from 'lucide-react';
+import { Plus, Search, Edit, Trash2, Loader2, RefreshCw, ClipboardPlus, History, User } from 'lucide-react';
 import { toast } from 'sonner';
 import { Patient } from '@/types/hospital';
 import { ServicesState } from '@/types/services';
@@ -98,6 +99,42 @@ export function PatientsPage() {
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [editingPatient, setEditingPatient] = useState<Patient | null>(null);
   const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
+
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const action = searchParams.get('action');
+    const mrn = searchParams.get('mrn');
+
+    if (action === 'new-visit' && mrn) {
+      // Fetch patient details to pre-fill
+      const loadPatientForVisit = async () => {
+        try {
+          const response = await import('@/services/accessApi').then(m => m.patientsApi.getAll({ search: mrn, limit: 1 }));
+          if (response.data && response.data.length > 0) {
+            const p = response.data[0];
+            // Pre-fill form
+            setFormData({
+              mrn: p.MRN || p.ID,
+              name: p.Name,
+              age: p.Age.toString(),
+              gender: p.Gender as any,
+              phone: p.Phone,
+              address: p.Address,
+              visitDate: new Date().toISOString().split('T')[0],
+              symptoms: ''
+            });
+            setIsDialogOpen(true);
+          }
+        } catch (e) {
+          console.error("Failed to load patient for new visit", e);
+          toast.error("Could not load patient details");
+        }
+      };
+      loadPatientForVisit();
+    }
+  }, [searchParams]);
   const [currentServices, setCurrentServices] = useState<ServicesState | null>(null);
   const [currentTotal, setCurrentTotal] = useState(0);
   const [searchQuery, setSearchQuery] = useState(''); // Local state for input
@@ -121,6 +158,7 @@ export function PatientsPage() {
 
   // Form state
   const [formData, setFormData] = useState({
+    mrn: '', // Medical Record Number (links visits)
     name: '',
     age: '',
     gender: 'Male' as 'Male' | 'Female' | 'Other',
@@ -159,6 +197,7 @@ export function PatientsPage() {
 
   const resetForm = () => {
     setFormData({
+      mrn: '',
       name: '',
       age: '',
       gender: 'Male',
@@ -175,6 +214,7 @@ export function PatientsPage() {
     if (patient) {
       setEditingPatient(patient);
       setFormData({
+        mrn: patient.mrn || patient.id,
         name: patient.name,
         age: patient.age.toString(),
         gender: patient.gender,
@@ -204,6 +244,7 @@ export function PatientsPage() {
     }
 
     const patientData = {
+      mrn: formData.mrn, // Pass the linked MRN
       name: formData.name.trim(),
       age: parseInt(formData.age),
       gender: formData.gender,
@@ -304,9 +345,39 @@ export function PatientsPage() {
     setIsSummaryOpen(true);
   };
 
-  const handleViewHistory = (patient: Patient) => {
-    setSelectedPatient(patient);
-    setIsHistoryOpen(true);
+  // History State
+  const [historyIds, setHistoryIds] = useState<string[]>([]);
+
+  const handleViewHistory = async (patient: Patient) => {
+    // 1. Identify Linking Key (MRN or fallback to ID)
+    const linkKey = patient.mrn || patient.id;
+
+    // 2. Fetch all visits for this patient (using MRN search if available, otherwise just ID)
+    // We use the search API with the unique key to find all related records
+    try {
+      const response = await import('@/services/accessApi').then(m => m.patientsApi.getAll({ search: linkKey }));
+      let relatedIds: string[] = [patient.id];
+
+      if ('data' in response && Array.isArray(response.data)) {
+        // Filter strictly by MRN matches or ID matches to avoid partial name match noise
+        relatedIds = response.data
+          .filter((p: any) => p.MRN === linkKey || p.ID === linkKey)
+          .map((p: any) => p.ID);
+      }
+
+      // Ensure current ID is included always
+      if (!relatedIds.includes(patient.id)) relatedIds.push(patient.id);
+
+      setHistoryIds(relatedIds);
+      setSelectedPatient(patient);
+      setIsHistoryOpen(true);
+    } catch (e) {
+      console.error("Failed to load history links", e);
+      // Fallback to single ID
+      setHistoryIds([patient.id]);
+      setSelectedPatient(patient);
+      setIsHistoryOpen(true);
+    }
   };
 
   const handleDelete = async (patient: Patient) => {
@@ -473,7 +544,15 @@ export function PatientsPage() {
                           <Button
                             variant="ghost"
                             size="icon"
-                            title="View History"
+                            title="View Profile (Full History)"
+                            onClick={() => navigate(`/profile/${patient.mrn || patient.id}`)}
+                          >
+                            <User className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Quick History"
                             onClick={() => handleViewHistory(patient)}
                           >
                             <History className="h-4 w-4" />
@@ -590,6 +669,7 @@ export function PatientsPage() {
                           onClick={() => {
                             setFormData({
                               ...formData,
+                              mrn: p.mrn || p.id, // CRITICAL: Link to existing MRN or use ID if first time
                               name: p.name,
                               age: p.age.toString(),
                               gender: p.gender,
@@ -600,7 +680,7 @@ export function PatientsPage() {
                               symptoms: ''
                             });
                             setLookupResults([]);
-                            toast.success("Patient details loaded!");
+                            toast.success("Details loaded! New visit will be linked to history.");
                           }}
                         >
                           <div className="font-medium">{p.name}</div>
@@ -754,10 +834,10 @@ export function PatientsPage() {
             open={isHistoryOpen}
             onOpenChange={setIsHistoryOpen}
             patient={selectedPatient}
-            payments={getPatientPayments(selectedPatient.id)}
-            prescriptions={getPatientPrescriptions(selectedPatient.id)}
-            labResults={getPatientLabResults(selectedPatient.id)}
-            services={patientServices.filter(s => s.patientId === selectedPatient.id)}
+            payments={payments.filter(p => historyIds.includes(p.patientId))}
+            prescriptions={prescriptions.filter(p => historyIds.includes(p.patientId))}
+            labResults={labResults.filter(l => historyIds.includes(l.patientId))}
+            services={patientServices.filter(s => historyIds.includes(s.patientId))}
           />
         )
       }

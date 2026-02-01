@@ -67,20 +67,44 @@ export const patientsApi = {
 
   getById: (id: string) => apiCall<PatientDTO | null>(`/patients/${id}`),
 
-  create: (patient: Omit<PatientDTO, 'CreatedAt'>) =>
+  getProfile: (identifier: string) => apiCall<{
+    profile: PatientDTO;
+    visits: PatientDTO[];
+    history: {
+      prescriptions: any[]; // Using any[] to avoid circular dependency or long imports for now, or define minimal
+      labResults: any[];
+      services: any[];
+      payments: any[];
+    }
+  }>(`/profile/${identifier}`),
+
+  create: (patientData: {
+    ID: string;
+    MRN?: string;
+    Name: string;
+    Age: number;
+    Gender: string;
+    Phone: string;
+    Address: string;
+    VisitDate: string;
+    Symptoms: string;
+    CreatedBy?: string;
+    CreatedByRole?: string;
+  }) =>
     apiCall<{ success: boolean; id: string }>('/patients', {
       method: 'POST',
       body: JSON.stringify({
-        id: patient.ID,
-        name: patient.Name,
-        age: patient.Age,
-        gender: patient.Gender,
-        phone: patient.Phone,
-        address: patient.Address,
-        visitDate: patient.VisitDate,
-        symptoms: patient.Symptoms,
-        createdBy: patient.CreatedBy,
-        createdByRole: patient.CreatedByRole,
+        id: patientData.ID,
+        mrn: patientData.MRN,
+        name: patientData.Name,
+        age: patientData.Age,
+        gender: patientData.Gender,
+        phone: patientData.Phone,
+        address: patientData.Address,
+        visitDate: patientData.VisitDate,
+        symptoms: patientData.Symptoms,
+        createdBy: patientData.CreatedBy,
+        createdByRole: patientData.CreatedByRole,
       }),
     }),
 
