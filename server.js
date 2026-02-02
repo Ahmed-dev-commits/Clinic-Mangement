@@ -25,6 +25,7 @@ app.use((req, res, next) => {
 
 // MySQL connection pool
 let pool;
+let dbConnected = false;
 
 async function createPool() {
   pool = mysql.createPool({
@@ -1081,6 +1082,59 @@ process.on('SIGINT', async () => {
 
 // ============ SERVE REACT FRONTEND ============
 const path = require('path');
+
+// Root Status Page (Overrides React Frontend on /)
+app.get('/', (req, res) => {
+  const statusColor = dbConnected ? '#dcfce7' : '#fee2e2';
+  const statusTextColor = dbConnected ? '#166534' : '#991b1b';
+  const statusText = dbConnected ? 'Connected' : 'Disconnected';
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <title>HMS Backend Status</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f8fafc; color: #334155; }
+          .card { background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); width: 90%; max-width: 400px; }
+          h1 { margin: 0 0 0.5rem 0; font-size: 1.5rem; color: #0f172a; text-align: center; }
+          .subtitle { text-align: center; color: #64748b; margin-bottom: 2rem; font-size: 0.9rem; }
+          .status-container { display: flex; flex-direction: column; gap: 1rem; }
+          .status-item { display: flex; justify-content: space-between; align-items: center; padding: 1rem; border: 1px solid #e2e8f0; border-radius: 8px; }
+          .badge { padding: 0.35rem 0.75rem; border-radius: 9999px; font-weight: 600; font-size: 0.875rem; }
+          .footer { margin-top: 2rem; text-align: center; font-size: 0.8rem; color: #94a3b8; }
+        </style>
+      </head>
+      <body>
+        <div class="card">
+          <h1>🏥 HMS Backend</h1>
+          <p class="subtitle">Hospital Management System API</p>
+          
+          <div class="status-container">
+            <div class="status-item">
+              <span>Server Status</span>
+              <span class="badge" style="background: #dcfce7; color: #166534">Online</span>
+            </div>
+            <div class="status-item">
+              <span>Database</span>
+              <span class="badge" style="background: ${statusColor}; color: ${statusTextColor}">
+                ${statusText}
+              </span>
+            </div>
+          </div>
+          
+          <div class="footer">
+            Deployed on Hostinger<br>
+            Time: ${new Date().toISOString()}
+          </div>
+        </div>
+      </body>
+    </html>
+  `;
+  res.send(html);
+});
+
 // Serve static files from the dist directory
 app.use(express.static(path.join(__dirname, '../dist')));
 
@@ -1093,8 +1147,10 @@ app.get('*', (req, res) => {
 // Initialize database
 initializeDatabase().then(() => {
   console.log('✅ Database connected and initialized');
+  dbConnected = true;
 }).catch(error => {
   console.error('❌ Failed to connect to database:', error);
+  dbConnected = false;
   // Do NOT exit process, keep server running to report error
 });
 
