@@ -1119,7 +1119,7 @@ app.get('/', (req, res) => {
       <body>
         <div class="card">
           <h1>🏥 HMS Backend</h1>
-          <p class="subtitle">Hospital Management System API</p>
+          <p class="subtitle">Hospital Management System API testing</p>
           
           <div class="status-container">
             <div class="status-item">
