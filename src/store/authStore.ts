@@ -22,7 +22,7 @@ interface AuthStore {
   hasPermission: (permission: Permission) => boolean;
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+const API_BASE_URL = import.meta.env.VITE_backend_server || 'http://localhost:3001/api';
 
 // Demo users for testing when backend is unavailable
 const DEMO_USERS: Record<string, { password: string; user: AuthUser }> = {

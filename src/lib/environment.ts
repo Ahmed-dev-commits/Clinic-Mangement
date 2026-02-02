@@ -16,7 +16,8 @@ export const isCloudEnvironment = (): boolean => {
 // Check if local SQLite backend is available
 export const checkLocalBackend = async (): Promise<boolean> => {
   try {
-    const response = await fetch('http://localhost:3001/api/health', {
+    const baseUrl = import.meta.env.VITE_backend_server || 'http://localhost:3001/api';
+    const response = await fetch(`${baseUrl}/health`, {
       method: 'GET',
       signal: AbortSignal.timeout(2000), // 2 second timeout
     });
@@ -34,7 +35,7 @@ export const getBackendType = async (): Promise<BackendType> => {
   if (isCloudEnvironment()) {
     return 'supabase';
   }
-  
+
   // If local, check if SQLite backend is available
   const localAvailable = await checkLocalBackend();
   return localAvailable ? 'sqlite' : 'demo';

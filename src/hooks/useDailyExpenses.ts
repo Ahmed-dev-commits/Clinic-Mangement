@@ -20,7 +20,7 @@ interface DailyExpensesStore {
     deleteExpense: (id: string) => Promise<void>;
 }
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001/api';
+const API_URL = import.meta.env.VITE_backend_server || 'http://localhost:3001/api';
 
 export const useDailyExpenses = create<DailyExpensesStore>((set, get) => ({
     expenses: [],
