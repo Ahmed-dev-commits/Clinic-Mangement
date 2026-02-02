@@ -15,6 +15,14 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
+// Global Error Handlers to prevent crash
+process.on('uncaughtException', (err) => {
+  console.error('🔥 Uncaught Exception:', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('🔥 Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 // Disable caching for all API routes
 app.use((req, res, next) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -263,9 +271,11 @@ async function initializeDatabase() {
     }
 
     console.log('✅ Database tables initialized');
+    dbConnected = true;
   } catch (error) {
-    console.error('❌ Database initialization error:', error);
-    process.exit(1);
+    console.error('❌ Failed to connect to database:', error);
+    dbConnected = false;
+    // Keep server running to serve status page
   }
 }
 
@@ -1143,20 +1153,29 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../dist/index.html'));
 });
 
-// Initialize database and start server
-// Initialize database
-initializeDatabase().then(() => {
-  console.log('✅ Database connected and initialized');
-  dbConnected = true;
-}).catch(error => {
-  console.error('❌ Failed to connect to database:', error);
+// Initialize database (catch any promise rejections)
+initializeDatabase().catch(err => {
+  console.error('🔥 Database initialization failed:', err.message);
   dbConnected = false;
-  // Do NOT exit process, keep server running to report error
 });
 
 // Start server immediately
-const server = app.listen(PORT, () => {
-  console.log(`🏥 Hospital Management Backend running on http://localhost:${PORT}`);
-  console.log(`📁 Database: MySQL - ${process.env.DB_NAME}`);
-  console.log(`🔗 Host: ${process.env.DB_HOST}:${process.env.DB_PORT}`);
-});
+try {
+  const server = app.listen(PORT, () => {
+    console.log(`🏥 Hospital Management Backend running on http://localhost:${PORT}`);
+    console.log(`📁 Database: MySQL - ${process.env.DB_NAME}`);
+    console.log(`🔗 Host: ${process.env.DB_HOST}:${process.env.DB_PORT}`);
+  });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`❌ Port ${PORT} is already in use. Please stop the existing process or use a different port.`);
+      process.exit(1);
+    } else {
+      console.error('❌ Server error:', err);
+    }
+  });
+} catch (error) {
+  console.error('❌ Failed to start server:', error);
+  process.exit(1);
+}
