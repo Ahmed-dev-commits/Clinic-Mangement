@@ -1,73 +1,77 @@
-# Welcome to your Lovable project
+# Hospital Management System - MS Access Backend
 
-## Project info
+## Prerequisites
 
-**URL**: https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID
+1. **Windows 10/11** (64-bit required)
+2. **Node.js v18+** - Download from https://nodejs.org
+3. **Microsoft Access Database Engine 2016** (64-bit)
+   - Download: https://www.microsoft.com/en-us/download/details.aspx?id=54920
+   - Choose `AccessDatabaseEngine_X64.exe`
 
-## How can I edit this code?
+## Setup Instructions
 
-There are several ways of editing your application.
+### Step 1: Create the Access Database
 
-**Use Lovable**
+1. Open **Microsoft Access**
+2. Create a **New Blank Database**
+3. Save as `HospitalDB.accdb` in the `backend/database/` folder
+4. Create the following tables (see `database/create-database.sql` for field details):
+   - **Patients** - Patient records
+   - **Stock** - Medicine/supplies inventory
+   - **Payments** - Fee collection records
+   - **Prescriptions** - Doctor prescriptions
+   - **LabResults** - Lab test results
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and start prompting.
+### Step 2: Install Dependencies
 
-Changes made via Lovable will be committed automatically to this repo.
-
-**Use your preferred IDE**
-
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
-
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
-
-Follow these steps:
-
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-npm i
-
-# Step 4: Start the development server with auto-reloading and an instant preview.
-npm run dev
+```bash
+cd backend
+npm install
 ```
 
-**Edit a file directly in GitHub**
+### Step 3: Start the Server
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+```bash
+# Development mode (auto-restart on changes)
+npm run dev
 
-**Use GitHub Codespaces**
+# Production mode
+npm start
+```
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+The server will run on `http://localhost:3001`
 
-## What technologies are used for this project?
+## API Endpoints
 
-This project is built with:
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/patients` | Get all patients |
+| POST | `/api/patients` | Add new patient |
+| PUT | `/api/patients/:id` | Update patient |
+| DELETE | `/api/patients/:id` | Delete patient |
+| GET | `/api/stock` | Get all stock items |
+| POST | `/api/stock` | Add stock item |
+| PUT | `/api/stock/:id` | Update stock item |
+| DELETE | `/api/stock/:id` | Delete stock item |
+| GET | `/api/payments` | Get all payments |
+| POST | `/api/payments` | Add payment |
+| GET | `/api/prescriptions` | Get all prescriptions |
+| POST | `/api/prescriptions` | Add prescription |
+| GET | `/api/lab-results` | Get all lab results |
+| POST | `/api/lab-results` | Add lab result |
+| PUT | `/api/lab-results/:id/status` | Update lab status |
+| GET | `/api/health` | Health check |
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+## Troubleshooting
 
-## How can I deploy this project?
+### "Provider not found" Error
+- Install Microsoft Access Database Engine 2016 (64-bit)
+- Ensure you're using 64-bit Node.js
 
-Simply open [Lovable](https://lovable.dev/projects/REPLACE_WITH_PROJECT_ID) and click on Share -> Publish.
+### "Database is locked" Error
+- Close Microsoft Access if the database is open
+- Only one application can write to Access at a time
 
-## Can I connect a custom domain to my Lovable project?
-
-Yes, you can!
-
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
-
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+### Connection Issues
+- Verify `HospitalDB.accdb` exists in `backend/database/`
+- Check the file path in `server.js`
