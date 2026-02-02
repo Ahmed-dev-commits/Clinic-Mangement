@@ -1090,13 +1090,17 @@ app.get('*', (req, res) => {
 });
 
 // Initialize database and start server
+// Initialize database
 initializeDatabase().then(() => {
-  app.listen(PORT, () => {
-    console.log(`🏥 Hospital Management Backend running on http://localhost:${PORT}`);
-    console.log(`📁 Database: MySQL - ${process.env.DB_NAME}`);
-    console.log(`🔗 Host: ${process.env.DB_HOST}:${process.env.DB_PORT}`);
-  });
+  console.log('✅ Database connected and initialized');
 }).catch(error => {
-  console.error('Failed to start server:', error);
-  process.exit(1);
+  console.error('❌ Failed to connect to database:', error);
+  // Do NOT exit process, keep server running to report error
+});
+
+// Start server immediately
+const server = app.listen(PORT, () => {
+  console.log(`🏥 Hospital Management Backend running on http://localhost:${PORT}`);
+  console.log(`📁 Database: MySQL - ${process.env.DB_NAME}`);
+  console.log(`🔗 Host: ${process.env.DB_HOST}:${process.env.DB_PORT}`);
 });
