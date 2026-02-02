@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { User, UserDTO, Permission } from '@/types/user';
 
-const API_BASE_URL = 'http://localhost:3001/api';
+const API_BASE_URL = import.meta.env.VITE_backend_server || 'http://localhost:3001/api';
 
 // Convert API DTO to local type
 function dtoToUser(dto: UserDTO | any): User {
