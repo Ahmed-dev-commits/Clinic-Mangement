@@ -411,7 +411,7 @@ app.get('/api/patients/:id', async (req, res) => {
 
 app.post('/api/patients', async (req, res) => {
   try {
-    const { id, name, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, mrn } = req.body;
+    const { id, name, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, mrn, consultationFee } = req.body;
     const createdAt = new Date().toISOString();
     // If mrn is provided use it, otherwise use id (for new patients without history)
     const patientMrn = mrn || id;
@@ -420,6 +420,17 @@ app.post('/api/patients', async (req, res) => {
       'INSERT INTO Patients (ID, MRN, Name, Age, Gender, Phone, Address, VisitDate, Symptoms, CreatedBy, CreatedByRole, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [id, patientMrn, name, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, createdAt]
     );
+
+    // Auto-create Consultation Fee Payment
+    if (consultationFee && Number(consultationFee) > 0) {
+      const paymentId = 'PAY-' + Date.now();
+      const fee = Number(consultationFee);
+      await pool.execute(
+        'INSERT INTO Payments (ID, PatientID, PatientName, ConsultationFee, LabFee, MedicineFee, TotalAmount, PaymentMode, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [paymentId, id, name, fee, 0, 0, fee, 'Cash', createdAt]
+      );
+      console.log('✅ Auto-created consultation payment:', paymentId);
+    }
 
     res.json({ success: true, id });
   } catch (error) {

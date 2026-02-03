@@ -166,6 +166,7 @@ export function PatientsPage() {
     address: '',
     visitDate: new Date().toISOString().split('T')[0],
     symptoms: '',
+    consultationFee: '500',
   });
 
   // Lookup state
@@ -205,6 +206,7 @@ export function PatientsPage() {
       address: '',
       visitDate: new Date().toISOString().split('T')[0],
       symptoms: '',
+      consultationFee: '500',
     });
     setEditingPatient(null);
     setLookupResults([]);
@@ -222,6 +224,7 @@ export function PatientsPage() {
         address: patient.address,
         visitDate: patient.visitDate,
         symptoms: patient.symptoms,
+        consultationFee: '0', // No fee for editing
       });
     } else {
       resetForm();
@@ -254,6 +257,7 @@ export function PatientsPage() {
       symptoms: formData.symptoms.trim(),
       registeredBy: user?.name,
       registeredByRole: user?.role,
+      consultationFee: parseInt(formData.consultationFee) || 0,
     };
 
     setIsSubmitting(true);
@@ -777,6 +781,25 @@ export function PatientsPage() {
                     rows={3}
                   />
                 </div>
+
+                {!editingPatient && (
+                  <div className="col-span-2 bg-blue-50/50 p-4 rounded-md border border-blue-100">
+                    <Label htmlFor="consultationFee" className="text-blue-900 font-semibold flex items-center gap-2">
+                      Consultation Fee
+                    </Label>
+                    <div className="flex items-center mt-2">
+                      <span className="bg-gray-100 border border-r-0 rounded-l-md px-3 py-2 text-gray-500 text-sm">PKR</span>
+                      <Input
+                        id="consultationFee"
+                        type="number"
+                        min="0"
+                        value={formData.consultationFee}
+                        onChange={(e) => setFormData({ ...formData, consultationFee: e.target.value })}
+                        className="rounded-l-none"
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
               <DialogFooter>

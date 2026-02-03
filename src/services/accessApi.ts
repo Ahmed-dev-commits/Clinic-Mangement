@@ -52,6 +52,7 @@ export interface PatientDTO {
   CreatedBy?: string;
   CreatedByRole?: string;
   CreatedAt: string;
+  consultationFee?: number; // Optional field for registration
 }
 
 export const patientsApi = {
@@ -90,6 +91,7 @@ export const patientsApi = {
     Symptoms: string;
     CreatedBy?: string;
     CreatedByRole?: string;
+    consultationFee?: number;
   }) =>
     apiCall<{ success: boolean; id: string }>('/patients', {
       method: 'POST',
@@ -105,6 +107,7 @@ export const patientsApi = {
         symptoms: patientData.Symptoms,
         createdBy: patientData.CreatedBy,
         createdByRole: patientData.CreatedByRole,
+        consultationFee: patientData.consultationFee,
       }),
     }),
 

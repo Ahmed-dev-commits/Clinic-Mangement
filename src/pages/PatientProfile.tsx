@@ -5,10 +5,11 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
-import { Loader2, User, Phone, MapPin, Calendar, Plus, ArrowLeft, History, FileText, Activity, CreditCard } from 'lucide-react';
+import { Loader2, User, Phone, MapPin, Calendar, Plus, ArrowLeft, History, FileText, Activity, CreditCard, Printer } from 'lucide-react';
 import { patientsApi, PatientDTO } from '@/services/accessApi';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
+import { generatePatientInvoice } from '@/components/fees/InvoiceGenerator';
 
 interface ProfileData {
     profile: PatientDTO;
@@ -44,6 +45,25 @@ export function PatientProfilePage() {
         };
         fetchProfile();
     }, [id, navigate]);
+
+    const handlePrintInvoice = () => {
+        if (!data) return;
+
+        const items = data.history.payments.map((p: any) => {
+            let desc = "Payment";
+            if (p.ConsultationFee > 0 && Number(p.LabFee || 0) === 0 && Number(p.MedicineFee || 0) === 0) desc = "Consultation Fee";
+            else if (p.TotalAmount > 0) desc = "Medical Services / Medicines";
+            if (p.Medicines && p.Medicines !== '[]') desc += " (Includes Medicines)";
+
+            return {
+                description: desc,
+                amount: Number(p.TotalAmount || 0),
+                date: format(new Date(p.CreatedAt), 'yyyy-MM-dd')
+            };
+        });
+
+        generatePatientInvoice(data.profile, items);
+    };
 
     if (loading) {
         return (
@@ -83,17 +103,22 @@ export function PatientProfilePage() {
                         </div>
                     </div>
                 </div>
-                <Button onClick={() => {
-                    // Initiate new visit flow
-                    // Could navigate to /patients?newVisit=true&mrn=...
-                    // For now, simpler to go back to patients and search
-                    // Or ideally, open the dialog directly?
-                    // Let's navigate to Patients page with query param to open dialog
-                    navigate(`/patients?action=new-visit&mrn=${profile.MRN || profile.ID}`);
-                }}>
-                    <Plus className="h-4 w-4 mr-2" />
-                    New Visit
-                </Button>
+                <div className="flex gap-2">
+                    <Button variant="outline" onClick={handlePrintInvoice}>
+                        <Printer className="mr-2 h-4 w-4" /> Print Invoice
+                    </Button>
+                    <Button onClick={() => {
+                        // Initiate new visit flow
+                        // Could navigate to /patients?newVisit=true&mrn=...
+                        // For now, simpler to go back to patients and search
+                        // Or ideally, open the dialog directly?
+                        // Let's navigate to Patients page with query param to open dialog
+                        navigate(`/patients?action=new-visit&mrn=${profile.MRN || profile.ID}`);
+                    }}>
+                        <Plus className="h-4 w-4 mr-2" />
+                        New Visit
+                    </Button>
+                </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
