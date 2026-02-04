@@ -1081,20 +1081,8 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', database: 'MySQL', timestamp: new Date().toISOString() });
 });
 
-// Graceful shutdown
-process.on('SIGINT', async () => {
-  console.log('\n🛑 Shutting down server...');
-  if (pool) {
-    await pool.end();
-  }
-  process.exit(0);
-});
-
-// ============ SERVE REACT FRONTEND ============
-const path = require('path');
-
-// Root Status Page (Overrides React Frontend on /)
-app.get('/', (req, res) => {
+// Status Page - accessible at /api/status
+app.get('/api/status', (req, res) => {
   const statusColor = dbConnected ? '#dcfce7' : '#fee2e2';
   const statusTextColor = dbConnected ? '#166534' : '#991b1b';
   const statusText = dbConnected ? 'Connected' : 'Disconnected';
@@ -1119,7 +1107,7 @@ app.get('/', (req, res) => {
       <body>
         <div class="card">
           <h1>🏥 HMS Backend</h1>
-          <p class="subtitle">Hospital Management System API testing</p>
+          <p class="subtitle">Hospital Management System API</p>
           
           <div class="status-container">
             <div class="status-item">
@@ -1145,12 +1133,24 @@ app.get('/', (req, res) => {
   res.send(html);
 });
 
+// ============ SERVE REACT FRONTEND ============
+const path = require('path');
+
 // Serve static files from the dist directory
 app.use(express.static(path.join(__dirname, 'dist')));
 
 // Handle React routing, return all requests to React app
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist/index.html'));
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('\n🛑 Shutting down server...');
+  if (pool) {
+    await pool.end();
+  }
+  process.exit(0);
 });
 
 // Initialize database (catch any promise rejections)
