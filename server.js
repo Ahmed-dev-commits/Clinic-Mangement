@@ -580,15 +580,15 @@ app.get('/api/prescriptions', async (req, res) => {
 
 app.post('/api/prescriptions', async (req, res) => {
   try {
-    const { id, patientId, patientName, patientAge, diagnosis, medicines, labTests, doctorNotes, precautions, generatedText, followUpDate, status } = req.body;
+    const { id, patientId, patientName, patientAge, diagnosis, complaint, history, examination, ultrasoundReport, examAtHospital, examAtHome, medicines, labTests, doctorNotes, precautions, generatedText, followUpDate, status } = req.body;
     const createdAt = new Date().toISOString();
 
     console.log('Creating prescription:', { id, patientId, status: status || 'Finalized' });
 
     // Insert prescription (without medicines in JSON)
     await pool.execute(
-      'INSERT INTO Prescriptions (ID, PatientID, PatientName, PatientAge, Diagnosis, Medicines, LabTests, DoctorNotes, Precautions, GeneratedText, FollowUpDate, Status, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, patientId, patientName, patientAge, diagnosis, JSON.stringify([]), JSON.stringify(labTests), doctorNotes, precautions, generatedText, followUpDate, status || 'Finalized', createdAt]
+      'INSERT INTO Prescriptions (ID, PatientID, PatientName, PatientAge, Diagnosis, Complaint, History, Examination, UltrasoundReport, ExamAtHospital, ExamAtHome, Medicines, LabTests, DoctorNotes, Precautions, GeneratedText, FollowUpDate, Status, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, patientId, patientName, patientAge, diagnosis, complaint || null, history || null, examination || null, ultrasoundReport || null, examAtHospital || null, examAtHome || null, JSON.stringify([]), JSON.stringify(labTests), doctorNotes, precautions, generatedText, followUpDate, status || 'Finalized', createdAt]
     );
 
     // Insert medicines into junction table
@@ -612,14 +612,14 @@ app.post('/api/prescriptions', async (req, res) => {
 
 app.put('/api/prescriptions/:id', async (req, res) => {
   try {
-    const { patientId, patientName, patientAge, diagnosis, medicines, labTests, doctorNotes, precautions, generatedText, followUpDate, status } = req.body;
+    const { patientId, patientName, patientAge, diagnosis, complaint, history, examination, ultrasoundReport, examAtHospital, examAtHome, medicines, labTests, doctorNotes, precautions, generatedText, followUpDate, status } = req.body;
 
     console.log('Updating prescription:', req.params.id, 'status:', status);
 
     // Update prescription
     await pool.execute(
-      'UPDATE Prescriptions SET PatientID=?, PatientName=?, PatientAge=?, Diagnosis=?, LabTests=?, DoctorNotes=?, Precautions=?, GeneratedText=?, FollowUpDate=?, Status=? WHERE ID=?',
-      [patientId, patientName, patientAge, diagnosis, JSON.stringify(labTests), doctorNotes, precautions, generatedText, followUpDate, status, req.params.id]
+      'UPDATE Prescriptions SET PatientID=?, PatientName=?, PatientAge=?, Diagnosis=?, Complaint=?, History=?, Examination=?, UltrasoundReport=?, ExamAtHospital=?, ExamAtHome=?, LabTests=?, DoctorNotes=?, Precautions=?, GeneratedText=?, FollowUpDate=?, Status=? WHERE ID=?',
+      [patientId, patientName, patientAge, diagnosis, complaint || null, history || null, examination || null, ultrasoundReport || null, examAtHospital || null, examAtHome || null, JSON.stringify(labTests), doctorNotes, precautions, generatedText, followUpDate, status, req.params.id]
     );
 
     // Delete existing medicines for this prescription
