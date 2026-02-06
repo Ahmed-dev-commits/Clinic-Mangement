@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { toast } from 'sonner';
+import { accessDatabase } from '@/services/accessApi';
 
 export interface Expense {
     id: string;
@@ -20,8 +21,6 @@ interface DailyExpensesStore {
     deleteExpense: (id: string) => Promise<void>;
 }
 
-const API_URL = import.meta.env.VITE_backend_server || 'http://localhost:3001/api';
-
 export const useDailyExpenses = create<DailyExpensesStore>((set, get) => ({
     expenses: [],
     loading: false,
@@ -29,17 +28,7 @@ export const useDailyExpenses = create<DailyExpensesStore>((set, get) => ({
     fetchExpenses: async () => {
         set({ loading: true });
         try {
-            const response = await fetch(`${API_URL}/daily-expenses`);
-            if (!response.ok) throw new Error('Failed to fetch expenses');
-            const data = await response.json();
-
-            // Transform keys to camelCase if needed, but backend uses ID, Date etc. upper/mixed?
-            // Server `convertRowDates` keeps original keys.
-            // My server code: `SELECT * FROM DailyExpenses`.
-            // Table cols: `ID`, `Date`, `Description`...
-            // So response objects will have `ID`, `Date`...
-            // I need to map them to lowercase for frontend consistency or update backend to return lowercase.
-            // Backend `res.json(rows.map(convertRowDates))` returns DB column names.
+            const data = await accessDatabase.dailyExpenses.getAll();
 
             const mappedData = data.map((item: any) => ({
                 id: item.ID,
@@ -55,7 +44,7 @@ export const useDailyExpenses = create<DailyExpensesStore>((set, get) => ({
             set({ expenses: mappedData });
         } catch (error) {
             console.error('Error fetching expenses:', error);
-            toast.error('Failed to load expenses');
+            // toast.error is already handled in apiCall, but we can add more context if needed
         } finally {
             set({ loading: false });
         }
@@ -63,35 +52,21 @@ export const useDailyExpenses = create<DailyExpensesStore>((set, get) => ({
 
     addExpense: async (expense) => {
         try {
-            const response = await fetch(`${API_URL}/daily-expenses`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(expense),
-            });
-
-            if (!response.ok) throw new Error('Failed to add expense');
-
+            await accessDatabase.dailyExpenses.create(expense);
             toast.success('Expense added successfully');
             get().fetchExpenses();
         } catch (error) {
             console.error('Error adding expense:', error);
-            toast.error('Failed to add expense');
         }
     },
 
     deleteExpense: async (id) => {
         try {
-            const response = await fetch(`${API_URL}/daily-expenses/${id}`, {
-                method: 'DELETE',
-            });
-
-            if (!response.ok) throw new Error('Failed to delete expense');
-
+            await accessDatabase.dailyExpenses.delete(id);
             toast.success('Expense deleted');
             get().fetchExpenses();
         } catch (error) {
             console.error('Error deleting expense:', error);
-            toast.error('Failed to delete expense');
         }
     },
 }));

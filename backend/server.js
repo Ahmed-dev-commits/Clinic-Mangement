@@ -7,6 +7,8 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2/promise');
+const jwt = require('jsonwebtoken');
+const auth = require('./middleware/auth');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -270,7 +272,7 @@ async function initializeDatabase() {
 
 // ============ PATIENTS API ============
 
-app.get('/api/patients', async (req, res) => {
+app.get('/api/patients', auth, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
@@ -328,7 +330,7 @@ app.get('/api/patients', async (req, res) => {
 
 
 // ============ PATIENT PROFILE API ============
-app.get('/api/profile/:identifier', async (req, res) => {
+app.get('/api/profile/:identifier', auth, async (req, res) => {
   try {
     const { identifier } = req.params; // Can be MRN or PatientID
 
@@ -400,7 +402,7 @@ app.get('/api/profile/:identifier', async (req, res) => {
   }
 });
 
-app.get('/api/patients/:id', async (req, res) => {
+app.get('/api/patients/:id', auth, async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT * FROM Patients WHERE ID = ?', [req.params.id]);
     res.json(rows[0] ? convertRowDates(rows[0]) : null);
@@ -409,7 +411,7 @@ app.get('/api/patients/:id', async (req, res) => {
   }
 });
 
-app.post('/api/patients', async (req, res) => {
+app.post('/api/patients', auth, async (req, res) => {
   try {
     const { id, name, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, mrn, consultationFee } = req.body;
     const createdAt = new Date().toISOString();
@@ -439,7 +441,7 @@ app.post('/api/patients', async (req, res) => {
   }
 });
 
-app.put('/api/patients/:id', async (req, res) => {
+app.put('/api/patients/:id', auth, async (req, res) => {
   try {
     const { name, age, gender, phone, address, visitDate, symptoms } = req.body;
 
@@ -454,7 +456,7 @@ app.put('/api/patients/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/patients/:id', async (req, res) => {
+app.delete('/api/patients/:id', auth, async (req, res) => {
   try {
     await pool.execute('DELETE FROM Patients WHERE ID = ?', [req.params.id]);
     res.json({ success: true });
@@ -465,7 +467,7 @@ app.delete('/api/patients/:id', async (req, res) => {
 
 // ============ STOCK API ============
 
-app.get('/api/stock', async (req, res) => {
+app.get('/api/stock', auth, async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT * FROM Stock ORDER BY Name');
     res.json(rows.map(convertRowDates));
@@ -474,7 +476,7 @@ app.get('/api/stock', async (req, res) => {
   }
 });
 
-app.post('/api/stock', async (req, res) => {
+app.post('/api/stock', auth, async (req, res) => {
   try {
     const { id, name, category, quantity, price, lowStockThreshold } = req.body;
     const createdAt = new Date().toISOString();
@@ -490,7 +492,7 @@ app.post('/api/stock', async (req, res) => {
   }
 });
 
-app.put('/api/stock/:id', async (req, res) => {
+app.put('/api/stock/:id', auth, async (req, res) => {
   try {
     const { name, category, quantity, price, lowStockThreshold } = req.body;
 
@@ -505,7 +507,7 @@ app.put('/api/stock/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/stock/:id', async (req, res) => {
+app.delete('/api/stock/:id', auth, async (req, res) => {
   try {
     await pool.execute('DELETE FROM Stock WHERE ID = ?', [req.params.id]);
     res.json({ success: true });
@@ -516,7 +518,7 @@ app.delete('/api/stock/:id', async (req, res) => {
 
 // ============ PAYMENTS API ============
 
-app.get('/api/payments', async (req, res) => {
+app.get('/api/payments', auth, async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT * FROM Payments ORDER BY CreatedAt DESC');
     res.json(rows.map(convertRowDates));
@@ -525,7 +527,7 @@ app.get('/api/payments', async (req, res) => {
   }
 });
 
-app.post('/api/payments', async (req, res) => {
+app.post('/api/payments', auth, async (req, res) => {
   try {
     const { id, patientId, patientName, consultationFee, labFee, medicineFee, totalAmount, paymentMode, medicines } = req.body;
     const createdAt = new Date().toISOString();
@@ -543,7 +545,7 @@ app.post('/api/payments', async (req, res) => {
 
 // ============ PRESCRIPTIONS API ============
 
-app.get('/api/prescriptions', async (req, res) => {
+app.get('/api/prescriptions', auth, async (req, res) => {
   try {
     const [prescriptions] = await pool.execute('SELECT * FROM Prescriptions ORDER BY CreatedAt DESC');
 
@@ -578,7 +580,7 @@ app.get('/api/prescriptions', async (req, res) => {
   }
 });
 
-app.post('/api/prescriptions', async (req, res) => {
+app.post('/api/prescriptions', auth, async (req, res) => {
   try {
     const { id, patientId, patientName, patientAge, diagnosis, medicines, labTests, doctorNotes, precautions, generatedText, followUpDate, status } = req.body;
     const createdAt = new Date().toISOString();
@@ -610,7 +612,7 @@ app.post('/api/prescriptions', async (req, res) => {
   }
 });
 
-app.put('/api/prescriptions/:id', async (req, res) => {
+app.put('/api/prescriptions/:id', auth, async (req, res) => {
   try {
     const { patientId, patientName, patientAge, diagnosis, medicines, labTests, doctorNotes, precautions, generatedText, followUpDate, status } = req.body;
 
@@ -645,7 +647,7 @@ app.put('/api/prescriptions/:id', async (req, res) => {
 
 // ============ STOCK API (Medicine Inventory) ============
 
-app.get('/api/stock', async (req, res) => {
+app.get('/api/stock', auth, async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT * FROM stock ORDER BY Name ASC');
     res.json(rows.map(convertRowDates));
@@ -654,7 +656,7 @@ app.get('/api/stock', async (req, res) => {
   }
 });
 
-app.post('/api/stock', async (req, res) => {
+app.post('/api/stock', auth, async (req, res) => {
   try {
     const { id, name, category, quantity, price, lowStockThreshold } = req.body;
     const createdAt = new Date().toISOString();
@@ -670,7 +672,7 @@ app.post('/api/stock', async (req, res) => {
   }
 });
 
-app.put('/api/stock/:id', async (req, res) => {
+app.put('/api/stock/:id', auth, async (req, res) => {
   try {
     const { name, category, quantity, price, lowStockThreshold } = req.body;
 
@@ -685,7 +687,7 @@ app.put('/api/stock/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/stock/:id', async (req, res) => {
+app.delete('/api/stock/:id', auth, async (req, res) => {
   try {
     await pool.execute('DELETE FROM stock WHERE ID = ?', [req.params.id]);
     res.json({ success: true });
@@ -696,7 +698,7 @@ app.delete('/api/stock/:id', async (req, res) => {
 
 // ============ CLINICAL MEDICINES API (Master List) ============
 
-app.get('/api/clinical-medicines', async (req, res) => {
+app.get('/api/clinical-medicines', auth, async (req, res) => {
   try {
     // Fetch only master medicines (where PrescriptionID is NULL)
     const [rows] = await pool.execute('SELECT * FROM PrescriptionMedicines WHERE PrescriptionID IS NULL ORDER BY MedicineName ASC');
@@ -706,7 +708,7 @@ app.get('/api/clinical-medicines', async (req, res) => {
   }
 });
 
-app.post('/api/clinical-medicines', async (req, res) => {
+app.post('/api/clinical-medicines', auth, async (req, res) => {
   try {
     const { name, category, dosage, frequency, duration } = req.body;
 
@@ -722,7 +724,7 @@ app.post('/api/clinical-medicines', async (req, res) => {
   }
 });
 
-app.put('/api/clinical-medicines/:id', async (req, res) => {
+app.put('/api/clinical-medicines/:id', auth, async (req, res) => {
   try {
     const { name, category, dosage, frequency, duration } = req.body;
 
@@ -737,7 +739,7 @@ app.put('/api/clinical-medicines/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/clinical-medicines/:id', async (req, res) => {
+app.delete('/api/clinical-medicines/:id', auth, async (req, res) => {
   try {
     await pool.execute('DELETE FROM PrescriptionMedicines WHERE ID=? AND PrescriptionID IS NULL', [req.params.id]);
     res.json({ success: true });
@@ -748,7 +750,7 @@ app.delete('/api/clinical-medicines/:id', async (req, res) => {
 
 // ============ LAB RESULTS API ============
 
-app.get('/api/lab-results', async (req, res) => {
+app.get('/api/lab-results', auth, async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT * FROM LabResults ORDER BY CreatedAt DESC');
     res.json(rows.map(convertRowDates));
@@ -757,7 +759,7 @@ app.get('/api/lab-results', async (req, res) => {
   }
 });
 
-app.post('/api/lab-results', async (req, res) => {
+app.post('/api/lab-results', auth, async (req, res) => {
   try {
     const { id, patientId, patientName, patientAge, testDate, reportDate, tests, notes, technician, status } = req.body;
     const createdAt = new Date().toISOString();
@@ -773,7 +775,7 @@ app.post('/api/lab-results', async (req, res) => {
   }
 });
 
-app.put('/api/lab-results/:id/status', async (req, res) => {
+app.put('/api/lab-results/:id/status', auth, async (req, res) => {
   try {
     const { status, notifiedAt, collectedAt } = req.body;
 
@@ -801,7 +803,7 @@ app.put('/api/lab-results/:id/status', async (req, res) => {
 
 // ============ PATIENT SERVICES API ============
 
-app.get('/api/patient-services', async (req, res) => {
+app.get('/api/patient-services', auth, async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT * FROM PatientServices ORDER BY CreatedAt DESC');
     res.json(rows.map(convertRowDates));
@@ -810,7 +812,7 @@ app.get('/api/patient-services', async (req, res) => {
   }
 });
 
-app.get('/api/patient-services/:patientId', async (req, res) => {
+app.get('/api/patient-services/:patientId', auth, async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT * FROM PatientServices WHERE PatientID = ? ORDER BY CreatedAt DESC', [req.params.patientId]);
     res.json(rows.map(convertRowDates));
@@ -819,7 +821,7 @@ app.get('/api/patient-services/:patientId', async (req, res) => {
   }
 });
 
-app.post('/api/patient-services', async (req, res) => {
+app.post('/api/patient-services', auth, async (req, res) => {
   try {
     const { id, patientId, services, grandTotal, status } = req.body;
     const now = new Date().toISOString();
@@ -835,7 +837,7 @@ app.post('/api/patient-services', async (req, res) => {
   }
 });
 
-app.put('/api/patient-services/:id', async (req, res) => {
+app.put('/api/patient-services/:id', auth, async (req, res) => {
   try {
     const { services, grandTotal, status } = req.body;
 
@@ -852,7 +854,7 @@ app.put('/api/patient-services/:id', async (req, res) => {
 
 // ============ DAILY EXPENSES API ============
 
-app.get('/api/daily-expenses', async (req, res) => {
+app.get('/api/daily-expenses', auth, async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT * FROM DailyExpenses ORDER BY CreatedAt DESC');
     res.json(rows.map(convertRowDates));
@@ -861,7 +863,7 @@ app.get('/api/daily-expenses', async (req, res) => {
   }
 });
 
-app.post('/api/daily-expenses', async (req, res) => {
+app.post('/api/daily-expenses', auth, async (req, res) => {
   try {
     const { id, date, description, category, amount, paymentMethod, createdBy } = req.body;
     const createdAt = new Date().toISOString();
@@ -877,7 +879,7 @@ app.post('/api/daily-expenses', async (req, res) => {
   }
 });
 
-app.put('/api/daily-expenses/:id', async (req, res) => {
+app.put('/api/daily-expenses/:id', auth, async (req, res) => {
   try {
     const { date, description, category, amount, paymentMethod } = req.body;
 
@@ -892,7 +894,7 @@ app.put('/api/daily-expenses/:id', async (req, res) => {
   }
 });
 
-app.delete('/api/daily-expenses/:id', async (req, res) => {
+app.delete('/api/daily-expenses/:id', auth, async (req, res) => {
   try {
     await pool.execute('DELETE FROM DailyExpenses WHERE ID = ?', [req.params.id]);
     res.json({ success: true });
@@ -904,7 +906,7 @@ app.delete('/api/daily-expenses/:id', async (req, res) => {
 // ============ USERS API ============
 
 // Get all users (excluding passwords)
-app.get('/api/users', async (req, res) => {
+app.get('/api/users', auth, async (req, res) => {
   try {
     const [rows] = await pool.execute(
       'SELECT ID, Username, Name, Email, Phone, Role, Permissions, IsActive, CreatedBy, CreatedAt, UpdatedAt, LastLogin FROM Users ORDER BY CreatedAt DESC'
@@ -916,7 +918,7 @@ app.get('/api/users', async (req, res) => {
 });
 
 // Get single user by ID
-app.get('/api/users/:id', async (req, res) => {
+app.get('/api/users/:id', auth, async (req, res) => {
   try {
     const [rows] = await pool.execute(
       'SELECT ID, Username, Name, Email, Phone, Role, Permissions, IsActive, CreatedBy, CreatedAt, UpdatedAt, LastLogin FROM Users WHERE ID = ?',
@@ -929,7 +931,7 @@ app.get('/api/users/:id', async (req, res) => {
 });
 
 // Create new user
-app.post('/api/users', async (req, res) => {
+app.post('/api/users', auth, async (req, res) => {
   try {
     const { id, username, password, name, email, phone, role, permissions, createdBy } = req.body;
     const createdAt = new Date().toISOString();
@@ -948,7 +950,7 @@ app.post('/api/users', async (req, res) => {
 });
 
 // Update user
-app.put('/api/users/:id', async (req, res) => {
+app.put('/api/users/:id', auth, async (req, res) => {
   try {
     const { username, name, email, phone, role, isActive } = req.body;
 
@@ -964,7 +966,7 @@ app.put('/api/users/:id', async (req, res) => {
 });
 
 // Update user permissions
-app.put('/api/users/:id/permissions', async (req, res) => {
+app.put('/api/users/:id/permissions', auth, async (req, res) => {
   try {
     const { permissions } = req.body;
     const permissionsJson = typeof permissions === 'string' ? permissions : JSON.stringify(permissions || []);
@@ -981,7 +983,7 @@ app.put('/api/users/:id/permissions', async (req, res) => {
 });
 
 // Update user password
-app.put('/api/users/:id/password', async (req, res) => {
+app.put('/api/users/:id/password', auth, async (req, res) => {
   try {
     const { password } = req.body;
 
@@ -997,7 +999,7 @@ app.put('/api/users/:id/password', async (req, res) => {
 });
 
 // Soft delete user (set IsActive to 0)
-app.delete('/api/users/:id', async (req, res) => {
+app.delete('/api/users/:id', auth, async (req, res) => {
   try {
     await pool.execute(
       'UPDATE Users SET IsActive = 0 WHERE ID = ?',
@@ -1019,13 +1021,21 @@ app.post('/api/users/login', async (req, res) => {
     );
 
     if (rows.length > 0) {
+      const user = rows[0];
+      // Generate JWT Token
+      const token = jwt.sign(
+        { id: user.ID, role: user.Role },
+        process.env.JWT_SECRET || 'your_super_secret_jwt_key_123!@#',
+        { expiresIn: '12h' }
+      );
+
       // Update last login timestamp
       await pool.execute(
         'UPDATE Users SET LastLogin = ? WHERE ID = ?',
-        [new Date().toISOString(), rows[0].ID]
+        [new Date().toISOString(), user.ID]
       );
 
-      res.json({ success: true, user: convertRowDates(rows[0]) });
+      res.json({ success: true, user: convertRowDates(user), token });
     } else {
       res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -1037,7 +1047,7 @@ app.post('/api/users/login', async (req, res) => {
 // ============ DAILY EXPENSES API ============
 
 // Get all expenses
-app.get('/api/daily-expenses', async (req, res) => {
+app.get('/api/daily-expenses', auth, async (req, res) => {
   try {
     const [rows] = await pool.execute(
       'SELECT * FROM DailyExpenses ORDER BY Date DESC, CreatedAt DESC'
@@ -1049,7 +1059,7 @@ app.get('/api/daily-expenses', async (req, res) => {
 });
 
 // Create new expense
-app.post('/api/daily-expenses', async (req, res) => {
+app.post('/api/daily-expenses', auth, async (req, res) => {
   try {
     const { id, date, description, category, amount, paymentMethod, createdBy } = req.body;
     const createdAt = new Date().toISOString();
@@ -1067,7 +1077,7 @@ app.post('/api/daily-expenses', async (req, res) => {
 });
 
 // Delete expense
-app.delete('/api/daily-expenses/:id', async (req, res) => {
+app.delete('/api/daily-expenses/:id', auth, async (req, res) => {
   try {
     await pool.execute('DELETE FROM DailyExpenses WHERE ID = ?', [req.params.id]);
     res.json({ success: true });

@@ -15,6 +15,7 @@ interface AuthUser {
 
 interface AuthStore {
   user: AuthUser | null;
+  token: string | null;
   isAuthenticated: boolean;
   login: (username: string, password: string) => Promise<boolean>;
   logout: () => void;
@@ -48,6 +49,7 @@ export const useAuthStore = create<AuthStore>()(
   persist(
     (set, get) => ({
       user: null,
+      token: null,
       isAuthenticated: false,
 
       login: async (username: string, password: string) => {
@@ -89,11 +91,13 @@ export const useAuthStore = create<AuthStore>()(
                   email: data.user.Email || data.user.email,
                   phone: data.user.Phone || data.user.phone,
                 },
+                token: data.token,
                 isAuthenticated: true,
               });
 
-              // Store user ID in localStorage for API calls
+              // Store user ID and token in localStorage for API calls
               localStorage.setItem('currentUserId', data.user.ID || data.user.id);
+              localStorage.setItem('authToken', data.token);
 
               return true;
             }
@@ -107,6 +111,7 @@ export const useAuthStore = create<AuthStore>()(
         if (demoUser && demoUser.password === password) {
           set({
             user: demoUser.user,
+            token: 'demo-token',
             isAuthenticated: true,
           });
           return true;
@@ -116,7 +121,9 @@ export const useAuthStore = create<AuthStore>()(
       },
 
       logout: () => {
-        set({ user: null, isAuthenticated: false });
+        localStorage.removeItem('authToken');
+        localStorage.removeItem('currentUserId');
+        set({ user: null, token: null, isAuthenticated: false });
       },
 
       hasRole: (roles: UserRole[]) => {

@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { User, UserDTO, Permission } from '@/types/user';
-
-const API_BASE_URL = import.meta.env.VITE_backend_server || 'http://localhost:3001/api';
+import { accessDatabase } from '@/services/accessApi';
 
 // Convert API DTO to local type
 function dtoToUser(dto: UserDTO | any): User {
@@ -42,13 +41,7 @@ export function useUsers() {
         try {
             setLoading(true);
             setError(null);
-            const response = await fetch(`${API_BASE_URL}/users`);
-
-            if (!response.ok) {
-                throw new Error('Failed to fetch users');
-            }
-
-            const data = await response.json();
+            const data = await accessDatabase.users.getAll();
             const usersArray = Array.isArray(data) ? data : [];
             setUsers(usersArray.map(dtoToUser));
         } catch (err) {
@@ -75,21 +68,12 @@ export function useUsers() {
     }): Promise<string> => {
         const id = `USR-${Date.now().toString(36).toUpperCase()}`;
 
-        const response = await fetch(`${API_BASE_URL}/users`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                id,
-                ...userData,
-                permissions: JSON.stringify(userData.permissions || []),
-                createdBy: localStorage.getItem('currentUserId') || 'SYSTEM',
-            }),
+        await accessDatabase.users.create({
+            id,
+            ...userData,
+            permissions: JSON.stringify(userData.permissions || []),
+            createdBy: localStorage.getItem('currentUserId') || 'SYSTEM',
         });
-
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error || 'Failed to create user');
-        }
 
         await fetchUsers();
         return id;
@@ -103,58 +87,21 @@ export function useUsers() {
         role: string;
         isActive?: boolean;
     }): Promise<void> => {
-        const response = await fetch(`${API_BASE_URL}/users/${id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(userData),
-        });
-
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error || 'Failed to update user');
-        }
-
+        await accessDatabase.users.update(id, userData);
         await fetchUsers();
     };
 
     const updatePermissions = async (id: string, permissions: Permission[]): Promise<void> => {
-        const response = await fetch(`${API_BASE_URL}/users/${id}/permissions`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ permissions: JSON.stringify(permissions) }),
-        });
-
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error || 'Failed to update permissions');
-        }
-
+        await accessDatabase.users.updatePermissions(id, JSON.stringify(permissions));
         await fetchUsers();
     };
 
     const updatePassword = async (id: string, password: string): Promise<void> => {
-        const response = await fetch(`${API_BASE_URL}/users/${id}/password`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ password }),
-        });
-
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error || 'Failed to update password');
-        }
+        await accessDatabase.users.updatePassword(id, password);
     };
 
     const deleteUser = async (id: string): Promise<void> => {
-        const response = await fetch(`${API_BASE_URL}/users/${id}`, {
-            method: 'DELETE',
-        });
-
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.error || 'Failed to delete user');
-        }
-
+        await accessDatabase.users.delete(id);
         await fetchUsers();
     };
 

@@ -10,11 +10,13 @@ const API_BASE_URL = import.meta.env.VITE_backend_server || 'http://localhost:30
 import { toast } from 'sonner';
 
 async function apiCall<T>(endpoint: string, options?: RequestInit): Promise<T> {
+  const token = localStorage.getItem('authToken');
   let response;
   try {
     response = await fetch(`${API_BASE_URL}${endpoint}`, {
       headers: {
         'Content-Type': 'application/json',
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
       },
       ...options,
     });
@@ -63,7 +65,7 @@ export const patientsApi = {
     if (params?.search) queryParams.append('search', params.search);
     if (params?.createdToday) queryParams.append('createdToday', 'true');
     const queryString = queryParams.toString();
-    return apiCall<{ data: PatientDTO[]; meta: { total: number; page: number; limit: number; totalPages: number } }>(`/patients?${queryString ? `&${queryString}` : ''}`);
+    return apiCall<{ data: PatientDTO[]; meta: { total: number; page: number; limit: number; totalPages: number } }>(`/patients?${queryString}`);
   },
 
   getById: (id: string) => apiCall<PatientDTO | null>(`/patients/${id}`),
@@ -422,10 +424,63 @@ export const usersApi = {
   getAll: () => apiCall<UserDTO[]>('/users'),
 
   login: (username: string, password: string) =>
-    apiCall<{ success: boolean; user: UserDTO }>('/users/login', {
+    apiCall<{ success: boolean; user: UserDTO; token: string }>('/users/login', {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     }),
+
+  delete: (id: string) =>
+    apiCall<{ success: boolean }>(`/users/${id}`, { method: 'DELETE' }),
+
+  update: (id: string, user: any) =>
+    apiCall<{ success: boolean }>(`/users/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(user),
+    }),
+
+  updatePermissions: (id: string, permissions: string) =>
+    apiCall<{ success: boolean }>(`/users/${id}/permissions`, {
+      method: 'PUT',
+      body: JSON.stringify({ permissions }),
+    }),
+
+  updatePassword: (id: string, password: string) =>
+    apiCall<{ success: boolean }>(`/users/${id}/password`, {
+      method: 'PUT',
+      body: JSON.stringify({ password }),
+    }),
+
+  create: (user: any) =>
+    apiCall<{ success: boolean; id: string }>('/users', {
+      method: 'POST',
+      body: JSON.stringify(user),
+    }),
+};
+
+// ============ DAILY EXPENSES API ============
+
+export interface DailyExpenseDTO {
+  ID: string;
+  Date: string;
+  Description: string;
+  Category: string;
+  Amount: number;
+  PaymentMethod: string;
+  CreatedBy: string;
+  CreatedAt: string;
+}
+
+export const dailyExpensesApi = {
+  getAll: () => apiCall<DailyExpenseDTO[]>('/daily-expenses'),
+
+  create: (expense: any) =>
+    apiCall<{ success: boolean; id: string }>('/daily-expenses', {
+      method: 'POST',
+      body: JSON.stringify(expense),
+    }),
+
+  delete: (id: string) =>
+    apiCall<{ success: boolean }>(`/daily-expenses/${id}`, { method: 'DELETE' }),
 };
 
 // Export all APIs
@@ -437,6 +492,7 @@ export const accessDatabase = {
   labResults: labResultsApi,
   patientServices: patientServicesApi,
   users: usersApi,
+  dailyExpenses: dailyExpensesApi,
   healthCheck,
 };
 
