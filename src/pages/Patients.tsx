@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { useAccessPatients } from '@/hooks/useAccessPatients';
+import { patientsApi, PatientDTO } from '@/services/accessApi';
 import { usePatientServices } from '@/hooks/usePatientServices';
 import { usePayments } from '@/hooks/usePayments';
 import { usePrescriptions } from '@/hooks/usePrescriptions';
@@ -119,11 +120,12 @@ export function PatientsPage() {
               mrn: p.MRN || p.ID,
               name: p.Name,
               age: p.Age.toString(),
-              gender: p.Gender as any,
+              gender: p.Gender as 'Male' | 'Female' | 'Other',
               phone: p.Phone,
               address: p.Address,
               visitDate: new Date().toISOString().split('T')[0],
-              symptoms: ''
+              symptoms: '',
+              consultationFee: '500'
             });
             setIsDialogOpen(true);
           }
@@ -178,16 +180,17 @@ export function PatientsPage() {
       const response = await import('@/services/accessApi').then(m => m.patientsApi.getAll({ search: query, limit: 5 }));
       if ('data' in response) {
         // Map DTO to Patient using a local helper or duplicate logic (simplest here to map manually for just required fields)
-        const results: Patient[] = response.data.map((dto: any) => ({
+        const results: Patient[] = response.data.map((dto: PatientDTO) => ({
           id: dto.ID,
           name: dto.Name,
           age: dto.Age,
-          gender: dto.Gender,
+          gender: dto.Gender as 'Male' | 'Female' | 'Other',
           phone: dto.Phone,
           address: dto.Address,
           visitDate: dto.VisitDate,
           symptoms: dto.Symptoms,
-          createdAt: dto.CreatedAt
+          createdAt: dto.CreatedAt,
+          mrn: dto.MRN
         }));
         setLookupResults(results);
       }
@@ -365,8 +368,8 @@ export function PatientsPage() {
       if ('data' in response && Array.isArray(response.data)) {
         // Filter strictly by MRN matches or ID matches to avoid partial name match noise
         relatedIds = response.data
-          .filter((p: any) => p.MRN === linkKey || p.ID === linkKey)
-          .map((p: any) => p.ID);
+          .filter((p: PatientDTO) => p.MRN === linkKey || p.ID === linkKey)
+          .map((p: PatientDTO) => p.ID);
       }
 
       // Ensure current ID is included always
