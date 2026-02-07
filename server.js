@@ -1136,6 +1136,9 @@ const getStatusPage = (req, res) => {
 app.get('/api/status', getStatusPage);
 app.get('/', getStatusPage);
 
+// Favicon Handler
+app.get('/favicon.ico', (req, res) => res.status(204).end());
+
 // ============ SERVE REACT FRONTEND ============
 const path = require('path');
 
@@ -1164,8 +1167,8 @@ initializeDatabase().catch(err => {
 
 // Start server immediately
 try {
-  const server = app.listen(PORT, () => {
-    console.log(`🏥 Hospital Management Backend running on http://localhost:${PORT}`);
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🏥 Hospital Management Backend running on http://0.0.0.0:${PORT}`);
     console.log(`📁 Database: MySQL - ${process.env.DB_NAME}`);
     console.log(`🔗 Host: ${process.env.DB_HOST}:${process.env.DB_PORT}`);
   });
