@@ -1081,8 +1081,8 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', database: 'MySQL', timestamp: new Date().toISOString() });
 });
 
-// Status Page - accessible at /api/status
-app.get('/api/status', (req, res) => {
+// Status Page - accessible at /api/status AND /
+const getStatusPage = (req, res) => {
   const statusColor = dbConnected ? '#dcfce7' : '#fee2e2';
   const statusTextColor = dbConnected ? '#166534' : '#991b1b';
   const statusText = dbConnected ? 'Connected' : 'Disconnected';
@@ -1131,7 +1131,10 @@ app.get('/api/status', (req, res) => {
     </html>
   `;
   res.send(html);
-});
+};
+
+app.get('/api/status', getStatusPage);
+app.get('/', getStatusPage);
 
 // ============ SERVE REACT FRONTEND ============
 const path = require('path');
