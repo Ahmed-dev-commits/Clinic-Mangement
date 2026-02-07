@@ -4,7 +4,7 @@
  * which communicates with Microsoft Access database
  */
 
-const API_BASE_URL = import.meta.env.VITE_backend_server || 'http://localhost:3001/api';
+const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || (import.meta.env.PROD ? '/api' : 'http://localhost:3001/api');
 
 // Helper function for API calls
 import { toast } from 'sonner';

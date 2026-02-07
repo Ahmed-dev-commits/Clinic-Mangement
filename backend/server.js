@@ -1111,6 +1111,14 @@ app.get('*', (req, res) => {
 });
 
 // Initialize database and start server
+console.log('--- SERVER STARTING ---');
+console.log('Current Time:', new Date().toISOString());
+console.log('DB Config Check:');
+console.log('DB_HOST:', process.env.DB_HOST);
+console.log('DB_USER:', process.env.DB_USER);
+console.log('DB_NAME:', process.env.DB_NAME);
+console.log('DB_PASSWORD:', process.env.DB_PASSWORD ? '****** (Set)' : 'NOT SET');
+
 initializeDatabase().then(() => {
   app.listen(PORT, () => {
     console.log(`🏥 Hospital Management Backend running on http://localhost:${PORT}`);
