@@ -208,17 +208,18 @@
     --sidebar-border: 222 47% 14%;
     --sidebar-ring: 221 83% 53%;
   }
+
+  --sidebar-ring: 221 83% 53%;
 }
 
-@layer base {
-  * {
-    @apply border-border;
-  }
+* {
+  @apply border-border;
+}
 
-  body {
-    @apply bg-background text-foreground font-sans antialiased;
-    font-family: 'Inter', sans-serif;
-  }
+body {
+  @apply bg-background text-foreground font-sans antialiased;
+  font-family: 'Inter', sans-serif;
+}
 }
 
 @layer components {
