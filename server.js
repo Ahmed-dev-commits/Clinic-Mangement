@@ -3,12 +3,56 @@
  * This server uses MySQL for reliable data storage
  */
 
-require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
+
+// 1. Try to load Production config first
+const prodEnvIds = path.join(__dirname, '.env.production');
+if (fs.existsSync(prodEnvIds)) {
+  console.log('✅ Loading Production Environment (.env.production)');
+  require('dotenv').config({ path: prodEnvIds });
+} else {
+  // 2. Fallback to default .env (Local)
+  const localEnvResult = require('dotenv').config();
+  if (localEnvResult.error) {
+    console.log('⚠️ No .env file found (Using system environment variables or defaults)');
+  } else {
+    console.log('✅ Loaded default .env file');
+  }
+}
+
 const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2/promise');
 
 const app = express();
+
+// ============ SIMPLE FILE LOGGER ============
+const logFile = path.join(__dirname, 'app.log');
+const originalConsoleLog = console.log;
+const originalConsoleError = console.error;
+
+function logToFile(type, args) {
+  const message = args.map(arg => (typeof arg === 'object' ? JSON.stringify(arg) : String(arg))).join(' ');
+  const timestamp = new Date().toISOString();
+  const logLine = `[${timestamp}] [${type}] ${message}\n`;
+
+  // Append to file asynchronously
+  fs.appendFile(logFile, logLine, (err) => {
+    // Fail silently to avoid infinite loops if logging fails
+  });
+}
+
+console.log = (...args) => {
+  originalConsoleLog.apply(console, args);
+  logToFile('INFO', args);
+};
+
+console.error = (...args) => {
+  originalConsoleError.apply(console, args);
+  logToFile('ERROR', args);
+};
+// ===========================================
 const PORT = process.env.PORT || 3001;
 
 // Middleware
@@ -36,17 +80,45 @@ let pool;
 let dbConnected = false;
 
 async function createPool() {
-  pool = mysql.createPool({
-    host: process.env.DB_HOST || 'localhost',
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || '',
-    database: process.env.DB_NAME || 'hospital_db',
-    port: process.env.DB_PORT || 3306,
+  const dbConfig = {
     waitForConnections: true,
-    connectionLimit: 10,
-    queueLimit: 0
-  });
+    connectionLimit: process.env.DB_CONNECTION_LIMIT || 10,
+    queueLimit: 0,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0
+  };
+
+  if (process.env.DATABASE_URL) {
+    console.log('🔗 Using DATABASE_URL for connection');
+    pool = mysql.createPool({
+      uri: process.env.DATABASE_URL,
+      ...dbConfig
+    });
+  } else {
+    console.log('🔗 Using Explicit Environment Variables for connection');
+    console.log(`   Host: ${process.env.DB_HOST || 'localhost'}`);
+    console.log(`   User: ${process.env.DB_USER || 'root'}`);
+    console.log(`   Database: ${process.env.DB_NAME || 'hospital_db'}`);
+
+    pool = mysql.createPool({
+      host: process.env.DB_HOST || 'localhost',
+      user: process.env.DB_USER || 'root',
+      password: process.env.DB_PASSWORD || '',
+      database: process.env.DB_NAME || 'hospital_db',
+      port: process.env.DB_PORT || 3306,
+      ...dbConfig
+    });
+  }
 }
+
+// Health Check Endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    database: dbConnected ? 'connected' : 'disconnected'
+  });
+});
 
 // Helper function to convert MySQL rows with dates to ISO format
 function convertRowDates(row) {
@@ -174,83 +246,109 @@ async function initializeDatabase() {
       )
     `);
 
+    // Visits table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS Visits (
+        ID INT AUTO_INCREMENT PRIMARY KEY,
+        PatientID VARCHAR(50),
+        VisitDate VARCHAR(50),
+        Symptoms TEXT,
+        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (PatientID) REFERENCES Patients(ID) ON DELETE CASCADE
+      )
+    `);
+
     // LabResults table
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS LabResults (
         ID VARCHAR(50) PRIMARY KEY,
         PatientID VARCHAR(50),
         PatientName VARCHAR(255),
-        PatientAge INT,
         TestDate VARCHAR(50),
-        ReportDate VARCHAR(50),
         Tests TEXT,
-        Notes TEXT,
-        Technician VARCHAR(255),
-        Status VARCHAR(50) DEFAULT 'Sample Collected',
-        NotifiedAt VARCHAR(50),
-        CollectedAt VARCHAR(50),
+        Status VARCHAR(50),
         CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    // Backfill Visits from Patients table
+    // Insert a visit record for any patient who doesn't have one yet (migration for existing data)
+    await pool.execute(`
+      INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt)
+      SELECT ID, VisitDate, Symptoms, CreatedAt FROM Patients
+      WHERE ID NOT IN (SELECT DISTINCT PatientID FROM Visits)
+    `);
+
+
+
+
+
+
+
+
+
+
+
+
 
     // PatientServices table
     await pool.execute(`
-      CREATE TABLE IF NOT EXISTS PatientServices (
-        ID VARCHAR(50) PRIMARY KEY,
-        PatientID VARCHAR(50) NOT NULL,
-        Services TEXT,
-        GrandTotal DECIMAL(10, 2) DEFAULT 0,
-        Status VARCHAR(50) DEFAULT 'Draft',
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UpdatedAt DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-      )
-    `);
+      CREATE TABLE IF NOT EXISTS PatientServices(
+  ID VARCHAR(50) PRIMARY KEY,
+  PatientID VARCHAR(50) NOT NULL,
+  Services TEXT,
+  GrandTotal DECIMAL(10, 2) DEFAULT 0,
+  Status VARCHAR(50) DEFAULT 'Draft',
+  CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UpdatedAt DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+)
+  `);
 
     // Users table
     await pool.execute(`
-      CREATE TABLE IF NOT EXISTS Users (
-        ID VARCHAR(50) PRIMARY KEY,
-        Username VARCHAR(100) UNIQUE NOT NULL,
-        Password VARCHAR(255) NOT NULL,
-        Name VARCHAR(255) NOT NULL,
-        Email VARCHAR(255),
-        Phone VARCHAR(50),
-        Role VARCHAR(50) DEFAULT 'Receptionist',
-        Permissions TEXT,
-        IsActive TINYINT DEFAULT 1,
-        CreatedBy VARCHAR(50),
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UpdatedAt DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        LastLogin DATETIME
-      )
-    `);
+      CREATE TABLE IF NOT EXISTS Users(
+    ID VARCHAR(50) PRIMARY KEY,
+    Username VARCHAR(100) UNIQUE NOT NULL,
+    Password VARCHAR(255) NOT NULL,
+    Name VARCHAR(255) NOT NULL,
+    Email VARCHAR(255),
+    Phone VARCHAR(50),
+    Role VARCHAR(50) DEFAULT 'Receptionist',
+    Permissions TEXT,
+    IsActive TINYINT DEFAULT 1,
+    CreatedBy VARCHAR(50),
+    CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UpdatedAt DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    LastLogin DATETIME
+  )
+  `);
 
     // Daily Expenses table
     await pool.execute(`
-      CREATE TABLE IF NOT EXISTS DailyExpenses (
-        ID VARCHAR(50) PRIMARY KEY,
-        Date VARCHAR(50),
-        Description TEXT,
-        Category VARCHAR(100),
-        Amount DECIMAL(10, 2) DEFAULT 0,
-        PaymentMethod VARCHAR(50),
-        CreatedBy VARCHAR(100),
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
+      CREATE TABLE IF NOT EXISTS DailyExpenses(
+    ID VARCHAR(50) PRIMARY KEY,
+    Date VARCHAR(50),
+    Description TEXT,
+    Category VARCHAR(100),
+    Amount DECIMAL(10, 2) DEFAULT 0,
+    PaymentMethod VARCHAR(50),
+    CreatedBy VARCHAR(100),
+    CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+  `);
 
     // Stock table (Medicine Inventory - separate from prescriptions)
     await pool.execute(`
-      CREATE TABLE IF NOT EXISTS stock (
-        ID VARCHAR(50) PRIMARY KEY,
-        Name VARCHAR(255) NOT NULL,
-        Category VARCHAR(100),
-        Quantity INT DEFAULT 0,
-        Price DECIMAL(10, 2) DEFAULT 0,
-        LowStockThreshold INT DEFAULT 10,
-        CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
+      CREATE TABLE IF NOT EXISTS stock(
+    ID VARCHAR(50) PRIMARY KEY,
+    Name VARCHAR(255) NOT NULL,
+    Category VARCHAR(100),
+    Quantity INT DEFAULT 0,
+    Price DECIMAL(10, 2) DEFAULT 0,
+    LowStockThreshold INT DEFAULT 10,
+    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )
+  `);
 
     // Insert default users if none exist
     const [users] = await pool.execute('SELECT COUNT(*) as count FROM Users');
@@ -293,7 +391,7 @@ app.get('/api/patients', async (req, res) => {
 
     if (search) {
       whereClause = 'WHERE (Name LIKE ? OR ID LIKE ? OR Phone LIKE ? OR MRN LIKE ?)';
-      const searchParam = `%${search}%`;
+      const searchParam = `% ${search}% `;
       params = [searchParam, searchParam, searchParam, searchParam];
     }
 
@@ -306,19 +404,19 @@ app.get('/api/patients', async (req, res) => {
       }
     }
 
+
+
     // 1. Get Total Count
     const [countResult] = await pool.execute(
-      `SELECT COUNT(*) as total FROM Patients ${whereClause}`,
+      `SELECT COUNT(*) as total FROM Patients ${whereClause} `,
       params
     );
     const total = countResult[0].total;
 
     // 2. Get Paginated Data
-    // Note: Using integers for LIMIT/OFFSET usually works with mysql2 execute, 
-    // but sometimes requires direct interpolation if ? fails. 
-    // We'll try parameterized first, but formatted as strings just in case.
+    // Sort by Last Activity (Latest of CreatedAt or UpdatedAt)
     const [rows] = await pool.execute(
-      `SELECT * FROM Patients ${whereClause} ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`,
+      `SELECT * FROM Patients ${whereClause} ORDER BY GREATEST(CreatedAt, COALESCE(UpdatedAt, CreatedAt)) DESC LIMIT ${limit} OFFSET ${offset} `,
       params
     );
 
@@ -337,6 +435,36 @@ app.get('/api/patients', async (req, res) => {
   }
 });
 
+app.get('/api/patients/lookup', async (req, res) => {
+  try {
+    const { phone } = req.query;
+    if (!phone) {
+      return res.status(400).json({ error: 'Phone number is required' });
+    }
+
+    const [rows] = await pool.execute('SELECT * FROM Patients WHERE Phone = ?', [phone]);
+
+    if (rows.length > 0) {
+      res.json(convertRowDates(rows[0]));
+    } else {
+      res.json(null); // Return null if not found, 200 OK
+    }
+  } catch (error) {
+    console.error('Error looking up patient:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+
+app.get('/api/patients/:id', async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM Patients WHERE ID = ?', [req.params.id]);
+    res.json(rows[0] ? convertRowDates(rows[0]) : null);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // ============ PATIENT PROFILE API ============
 app.get('/api/profile/:identifier', async (req, res) => {
@@ -379,10 +507,10 @@ app.get('/api/profile/:identifier', async (req, res) => {
     // Helper to fetch valid resources
     const fetchResources = async (table) => {
       try {
-        const [res] = await pool.execute(`SELECT * FROM ${table} WHERE PatientID IN (${placeholders}) ORDER BY CreatedAt DESC`, allPatientIds);
+        const [res] = await pool.execute(`SELECT * FROM ${table} WHERE PatientID IN(${placeholders}) ORDER BY CreatedAt DESC`, allPatientIds);
         return res; // We'll convert dates later if needed or on frontend
       } catch (e) {
-        console.warn(`Failed to fetch ${table} for profile:`, e.message);
+        console.warn(`Failed to fetch ${table} for profile: `, e.message);
         return [];
       }
     };
@@ -411,14 +539,7 @@ app.get('/api/profile/:identifier', async (req, res) => {
   }
 });
 
-app.get('/api/patients/:id', async (req, res) => {
-  try {
-    const [rows] = await pool.execute('SELECT * FROM Patients WHERE ID = ?', [req.params.id]);
-    res.json(rows[0] ? convertRowDates(rows[0]) : null);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+
 
 app.post('/api/patients', async (req, res) => {
   try {
@@ -427,9 +548,16 @@ app.post('/api/patients', async (req, res) => {
     // If mrn is provided use it, otherwise use id (for new patients without history)
     const patientMrn = mrn || id;
 
+    // Insert into Patients
     await pool.execute(
-      'INSERT INTO Patients (ID, MRN, Name, Age, Gender, Phone, Address, VisitDate, Symptoms, CreatedBy, CreatedByRole, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, patientMrn, name, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, createdAt]
+      'INSERT INTO Patients (ID, MRN, Name, Age, Gender, Phone, Address, VisitDate, Symptoms, CreatedBy, CreatedByRole, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, patientMrn, name, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, createdAt, createdAt]
+    );
+
+    // Insert into Visits
+    await pool.execute(
+      'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
+      [id, visitDate, symptoms, createdAt]
     );
 
     res.json({ success: true, id });
@@ -442,10 +570,18 @@ app.post('/api/patients', async (req, res) => {
 app.put('/api/patients/:id', async (req, res) => {
   try {
     const { name, age, gender, phone, address, visitDate, symptoms } = req.body;
+    const updatedAt = new Date().toISOString();
 
+    // Update Patient Profile
     await pool.execute(
-      'UPDATE Patients SET Name = ?, Age = ?, Gender = ?, Phone = ?, Address = ?, VisitDate = ?, Symptoms = ? WHERE ID = ?',
-      [name, age, gender, phone, address, visitDate, symptoms, req.params.id]
+      'UPDATE Patients SET Name = ?, Age = ?, Gender = ?, Phone = ?, Address = ?, VisitDate = ?, Symptoms = ?, UpdatedAt = ? WHERE ID = ?',
+      [name, age, gender, phone, address, visitDate, symptoms, updatedAt, req.params.id]
+    );
+
+    // Insert new Visit
+    await pool.execute(
+      'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
+      [req.params.id, visitDate, symptoms, updatedAt]
     );
 
     res.json({ success: true });
@@ -1088,27 +1224,27 @@ const getStatusPage = (req, res) => {
   const statusText = dbConnected ? 'Connected' : 'Disconnected';
 
   const html = `
-    <!DOCTYPE html>
+  < !DOCTYPE html >
     <html>
       <head>
         <title>HMS Backend Status</title>
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <style>
-          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f8fafc; color: #334155; }
-          .card { background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); width: 90%; max-width: 400px; }
-          h1 { margin: 0 0 0.5rem 0; font-size: 1.5rem; color: #0f172a; text-align: center; }
-          .subtitle { text-align: center; color: #64748b; margin-bottom: 2rem; font-size: 0.9rem; }
-          .status-container { display: flex; flex-direction: column; gap: 1rem; }
-          .status-item { display: flex; justify-content: space-between; align-items: center; padding: 1rem; border: 1px solid #e2e8f0; border-radius: 8px; }
-          .badge { padding: 0.35rem 0.75rem; border-radius: 9999px; font-weight: 600; font-size: 0.875rem; }
-          .footer { margin-top: 2rem; text-align: center; font-size: 0.8rem; color: #94a3b8; }
-        </style>
+          <style>
+            body {font - family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f8fafc; color: #334155; }
+            .card {background: white; padding: 2rem; border-radius: 12px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); width: 90%; max-width: 400px; }
+            h1 {margin: 0 0 0.5rem 0; font-size: 1.5rem; color: #0f172a; text-align: center; }
+            .subtitle {text - align: center; color: #64748b; margin-bottom: 2rem; font-size: 0.9rem; }
+            .status-container {display: flex; flex-direction: column; gap: 1rem; }
+            .status-item {display: flex; justify-content: space-between; align-items: center; padding: 1rem; border: 1px solid #e2e8f0; border-radius: 8px; }
+            .badge {padding: 0.35rem 0.75rem; border-radius: 9999px; font-weight: 600; font-size: 0.875rem; }
+            .footer {margin - top: 2rem; text-align: center; font-size: 0.8rem; color: #94a3b8; }
+          </style>
       </head>
       <body>
         <div class="card">
           <h1>🏥 HMS Backend</h1>
           <p class="subtitle">Hospital Management System API</p>
-          
+
           <div class="status-container">
             <div class="status-item">
               <span>Server Status</span>
@@ -1121,34 +1257,45 @@ const getStatusPage = (req, res) => {
               </span>
             </div>
           </div>
-          
+
           <div class="footer">
             Deployed on Hostinger<br>
-            Time: ${new Date().toISOString()}
+              Time: ${new Date().toISOString()}
           </div>
         </div>
       </body>
     </html>
-  `;
+`;
   res.send(html);
 };
 
 app.get('/api/status', getStatusPage);
-app.get('/', getStatusPage);
+// app.get('/', getStatusPage);
 
 // Favicon Handler
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 // ============ SERVE REACT FRONTEND ============
-const path = require('path');
+// Check if dist directory exists
+const distPath = path.join(__dirname, 'dist');
 
-// Serve static files from the dist directory
-app.use(express.static(path.join(__dirname, 'dist')));
-
-// Handle React routing, return all requests to React app
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'dist/index.html'));
-});
+if (fs.existsSync(distPath)) {
+  console.log('✅ Serving frontend from dist directory');
+  app.use(express.static(distPath));
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(distPath, 'index.html'));
+  });
+} else {
+  console.log('⚠️ Frontend build code (dist) not found. Running in API-only mode.');
+  // For unknown routes, show status page or 404
+  app.get('*', (req, res) => {
+    if (req.path.startsWith('/api')) {
+      return res.status(404).json({ error: 'API endpoint not found' });
+    }
+    // Fallback to status page
+    getStatusPage(req, res);
+  });
+}
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
