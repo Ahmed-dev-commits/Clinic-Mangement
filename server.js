@@ -6,20 +6,9 @@
 const fs = require('fs');
 const path = require('path');
 
-// 1. Try to load Production config first
-const prodEnvIds = path.join(__dirname, '.env.production');
-if (fs.existsSync(prodEnvIds)) {
-  console.log('✅ Loading Production Environment (.env.production)');
-  require('dotenv').config({ path: prodEnvIds });
-} else {
-  // 2. Fallback to default .env (Local)
-  const localEnvResult = require('dotenv').config();
-  if (localEnvResult.error) {
-    console.log('⚠️ No .env file found (Using system environment variables or defaults)');
-  } else {
-    console.log('✅ Loaded default .env file');
-  }
-}
+// Standard .env loading
+require('dotenv').config();
+console.log('✅ Loaded environment configuration');
 
 const express = require('express');
 const cors = require('cors');
@@ -182,6 +171,7 @@ async function initializeDatabase() {
     // Attempt to add new columns if they don't exist (migration)
     try { await pool.execute("ALTER TABLE Patients ADD COLUMN CreatedBy VARCHAR(100)"); } catch (e) { }
     try { await pool.execute("ALTER TABLE Patients ADD COLUMN CreatedByRole VARCHAR(50)"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Patients ADD COLUMN GuardianName VARCHAR(255)"); } catch (e) { }
 
     // Stock table
     await pool.execute(`
@@ -211,6 +201,9 @@ async function initializeDatabase() {
         CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    // Attempt to add Items column to Payments (Migration)
+    try { await pool.execute("ALTER TABLE Payments ADD COLUMN Items TEXT"); } catch (e) { }
 
     // Prescriptions table
     await pool.execute(`
@@ -543,15 +536,15 @@ app.get('/api/profile/:identifier', async (req, res) => {
 
 app.post('/api/patients', async (req, res) => {
   try {
-    const { id, name, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, mrn } = req.body;
+    const { id, name, guardianName, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, mrn } = req.body;
     const createdAt = new Date().toISOString();
     // If mrn is provided use it, otherwise use id (for new patients without history)
     const patientMrn = mrn || id;
 
     // Insert into Patients
     await pool.execute(
-      'INSERT INTO Patients (ID, MRN, Name, Age, Gender, Phone, Address, VisitDate, Symptoms, CreatedBy, CreatedByRole, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, patientMrn, name, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, createdAt, createdAt]
+      'INSERT INTO Patients (ID, MRN, Name, GuardianName, Age, Gender, Phone, Address, VisitDate, Symptoms, CreatedBy, CreatedByRole, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, patientMrn, name, guardianName || null, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, createdAt, createdAt]
     );
 
     // Insert into Visits
@@ -569,13 +562,13 @@ app.post('/api/patients', async (req, res) => {
 
 app.put('/api/patients/:id', async (req, res) => {
   try {
-    const { name, age, gender, phone, address, visitDate, symptoms } = req.body;
+    const { name, guardianName, age, gender, phone, address, visitDate, symptoms } = req.body;
     const updatedAt = new Date().toISOString();
 
     // Update Patient Profile
     await pool.execute(
-      'UPDATE Patients SET Name = ?, Age = ?, Gender = ?, Phone = ?, Address = ?, VisitDate = ?, Symptoms = ?, UpdatedAt = ? WHERE ID = ?',
-      [name, age, gender, phone, address, visitDate, symptoms, updatedAt, req.params.id]
+      'UPDATE Patients SET Name = ?, GuardianName = ?, Age = ?, Gender = ?, Phone = ?, Address = ?, VisitDate = ?, Symptoms = ?, UpdatedAt = ? WHERE ID = ?',
+      [name, guardianName || null, age, gender, phone, address, visitDate, symptoms, updatedAt, req.params.id]
     );
 
     // Insert new Visit
@@ -655,7 +648,18 @@ app.delete('/api/stock/:id', async (req, res) => {
 app.get('/api/payments', async (req, res) => {
   try {
     const [rows] = await pool.execute('SELECT * FROM Payments ORDER BY CreatedAt DESC');
-    res.json(rows.map(convertRowDates));
+
+    res.json(rows.map(row => {
+      // Parse Items and Medicines BEFORE spreading to preserve them
+      const items = row.Items ? JSON.parse(row.Items) : [];
+      const medicines = row.Medicines ? JSON.parse(row.Medicines) : [];
+
+      return {
+        ...convertRowDates(row),
+        items,
+        medicines
+      };
+    }));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -663,12 +667,12 @@ app.get('/api/payments', async (req, res) => {
 
 app.post('/api/payments', async (req, res) => {
   try {
-    const { id, patientId, patientName, consultationFee, labFee, medicineFee, totalAmount, paymentMode, medicines } = req.body;
+    const { id, patientId, patientName, consultationFee, labFee, medicineFee, totalAmount, paymentMode, medicines, items } = req.body;
     const createdAt = new Date().toISOString();
 
     await pool.execute(
-      'INSERT INTO Payments (ID, PatientID, PatientName, ConsultationFee, LabFee, MedicineFee, TotalAmount, PaymentMode, Medicines, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, patientId, patientName, consultationFee, labFee, medicineFee, totalAmount, paymentMode, JSON.stringify(medicines), createdAt]
+      'INSERT INTO Payments (ID, PatientID, PatientName, ConsultationFee, LabFee, MedicineFee, TotalAmount, PaymentMode, Medicines, Items, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, patientId, patientName, consultationFee, labFee, medicineFee, totalAmount, paymentMode, JSON.stringify(medicines || []), JSON.stringify(items || []), createdAt]
     );
 
     res.json({ success: true, id });
