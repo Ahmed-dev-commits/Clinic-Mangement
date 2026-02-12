@@ -171,7 +171,9 @@ async function initializeDatabase() {
     // Attempt to add new columns if they don't exist (migration)
     try { await pool.execute("ALTER TABLE Patients ADD COLUMN CreatedBy VARCHAR(100)"); } catch (e) { }
     try { await pool.execute("ALTER TABLE Patients ADD COLUMN CreatedByRole VARCHAR(50)"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Patients ADD COLUMN CreatedByRole VARCHAR(50)"); } catch (e) { }
     try { await pool.execute("ALTER TABLE Patients ADD COLUMN GuardianName VARCHAR(255)"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Patients ADD COLUMN CNIC VARCHAR(20)"); } catch (e) { }
 
     // Stock table
     await pool.execute(`
@@ -384,7 +386,7 @@ app.get('/api/patients', async (req, res) => {
 
     if (search) {
       whereClause = 'WHERE (Name LIKE ? OR ID LIKE ? OR Phone LIKE ? OR MRN LIKE ?)';
-      const searchParam = `% ${search}% `;
+      const searchParam = `%${search}%`;
       params = [searchParam, searchParam, searchParam, searchParam];
     }
 
@@ -428,6 +430,36 @@ app.get('/api/patients', async (req, res) => {
   }
 });
 
+app.get('/api/patients/check-duplicate', async (req, res) => {
+  try {
+    const { name, guardianName } = req.query;
+
+    console.log(`[CheckDuplicate] Request: Name='${name}', Guardian='${guardianName}'`);
+
+    if (name && guardianName) {
+      // Case-insensitive check for exact match on both fields, IGNORING WHITESPACE
+      // TRIM(LOWER(col)) = TRIM(LOWER(?))
+      const query = 'SELECT * FROM Patients WHERE TRIM(LOWER(Name)) = TRIM(LOWER(?)) AND TRIM(LOWER(GuardianName)) = TRIM(LOWER(?))';
+      const [rows] = await pool.execute(query, [name, guardianName]);
+
+      console.log(`[CheckDuplicate] Found ${rows.length} matches.`);
+
+      if (rows.length > 0) {
+        return res.json({ exists: true, patient: convertRowDates(rows[0]), matchType: 'Name+Guardian' });
+      }
+    } else {
+      // If Name/Guardian not provided, we don't check for duplicates (as per user request)
+      // We just return exists: false to allow registration to proceed
+      return res.json({ exists: false });
+    }
+
+    res.json({ exists: false });
+  } catch (error) {
+    console.error('Error checking duplicate:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/patients/lookup', async (req, res) => {
   try {
     const { phone } = req.query;
@@ -465,8 +497,8 @@ app.get('/api/profile/:identifier', async (req, res) => {
     const { identifier } = req.params; // Can be MRN or PatientID
 
     // 1. Resolve Identifier to MRN
-    // First check if identifier matches an MRN directly
-    let [rows] = await pool.execute('SELECT * FROM Patients WHERE MRN = ?', [identifier]);
+    // First check if identifier matches an MRN or CNIC directly
+    let [rows] = await pool.execute('SELECT * FROM Patients WHERE MRN = ? OR CNIC = ?', [identifier, identifier]);
 
     // If no match by MRN, check if it's a PatientID and get that patient's MRN
     if (rows.length === 0) {
@@ -536,21 +568,31 @@ app.get('/api/profile/:identifier', async (req, res) => {
 
 app.post('/api/patients', async (req, res) => {
   try {
-    const { id, name, guardianName, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, mrn } = req.body;
+    const { id, name, guardianName, cnic, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, mrn } = req.body;
+
+    // Check for duplicates before inserting (Double safety)
+    if (cnic) {
+      const [dupRows] = await pool.execute('SELECT * FROM Patients WHERE CNIC = ?', [cnic]);
+      if (dupRows.length > 0) {
+        return res.status(409).json({ error: 'Patient with this CNIC already exists', patient: dupRows[0] });
+      }
+    }
+
     const createdAt = new Date().toISOString();
     // If mrn is provided use it, otherwise use id (for new patients without history)
     const patientMrn = mrn || id;
 
     // Insert into Patients
+    // Insert into Patients
     await pool.execute(
-      'INSERT INTO Patients (ID, MRN, Name, GuardianName, Age, Gender, Phone, Address, VisitDate, Symptoms, CreatedBy, CreatedByRole, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, patientMrn, name, guardianName || null, age, gender, phone, address, visitDate, symptoms, createdBy, createdByRole, createdAt, createdAt]
+      'INSERT INTO Patients (ID, MRN, CNIC, Name, GuardianName, Age, Gender, Phone, Address, VisitDate, Symptoms, CreatedBy, CreatedByRole, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, patientMrn, cnic || null, name, guardianName || null, age, gender, phone, address || null, visitDate, symptoms || null, createdBy || null, createdByRole || null, createdAt, createdAt]
     );
 
     // Insert into Visits
     await pool.execute(
       'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
-      [id, visitDate, symptoms, createdAt]
+      [id, visitDate, symptoms || null, createdAt]
     );
 
     res.json({ success: true, id });
@@ -562,13 +604,13 @@ app.post('/api/patients', async (req, res) => {
 
 app.put('/api/patients/:id', async (req, res) => {
   try {
-    const { name, guardianName, age, gender, phone, address, visitDate, symptoms } = req.body;
+    const { name, guardianName, cnic, age, gender, phone, address, visitDate, symptoms } = req.body;
     const updatedAt = new Date().toISOString();
 
     // Update Patient Profile
     await pool.execute(
-      'UPDATE Patients SET Name = ?, GuardianName = ?, Age = ?, Gender = ?, Phone = ?, Address = ?, VisitDate = ?, Symptoms = ?, UpdatedAt = ? WHERE ID = ?',
-      [name, guardianName || null, age, gender, phone, address, visitDate, symptoms, updatedAt, req.params.id]
+      'UPDATE Patients SET Name = ?, GuardianName = ?, CNIC = ?, Age = ?, Gender = ?, Phone = ?, Address = ?, VisitDate = ?, Symptoms = ?, UpdatedAt = ? WHERE ID = ?',
+      [name, guardianName || null, cnic || null, age, gender, phone, address, visitDate, symptoms, updatedAt, req.params.id]
     );
 
     // Insert new Visit
@@ -584,11 +626,48 @@ app.put('/api/patients/:id', async (req, res) => {
 });
 
 app.delete('/api/patients/:id', async (req, res) => {
+  let connection;
   try {
-    await pool.execute('DELETE FROM Patients WHERE ID = ?', [req.params.id]);
-    res.json({ success: true });
+    connection = await pool.getConnection();
+    await connection.beginTransaction();
+
+    const patientId = req.params.id;
+    console.log(`[DELETE] Starting cascading delete for patient: ${patientId}`);
+
+    // 1. Delete Payments (updates Collection)
+    await connection.execute('DELETE FROM Payments WHERE PatientID = ?', [patientId]);
+
+    // 2. Delete Services
+    await connection.execute('DELETE FROM PatientServices WHERE PatientID = ?', [patientId]);
+
+    // 3. Delete Prescriptions & Medicines (Cascade on DB might handle medicines, but explicit is safer if not set)
+    // First get prescription IDs to delete from junction table if FK cascade isn't reliable
+    // But we defined FK ON DELETE CASCADE for PrescriptionMedicines, so deleting Prescriptions is enough
+    await connection.execute('DELETE FROM Prescriptions WHERE PatientID = ?', [patientId]);
+
+    // 4. Delete Lab Results
+    await connection.execute('DELETE FROM LabResults WHERE PatientID = ?', [patientId]);
+
+    // 5. Delete Visits
+    await connection.execute('DELETE FROM Visits WHERE PatientID = ?', [patientId]);
+
+    // 6. Delete Patient
+    const [result] = await connection.execute('DELETE FROM Patients WHERE ID = ?', [patientId]);
+
+    await connection.commit();
+    console.log(`[DELETE] Successfully deleted patient ${patientId} and all related records.`);
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Patient not found' });
+    }
+
+    res.json({ success: true, message: 'Patient and all related records deleted' });
   } catch (error) {
+    if (connection) await connection.rollback();
+    console.error('[DELETE] Error in cascading delete:', error);
     res.status(500).json({ error: error.message });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
@@ -672,7 +751,7 @@ app.post('/api/payments', async (req, res) => {
 
     await pool.execute(
       'INSERT INTO Payments (ID, PatientID, PatientName, ConsultationFee, LabFee, MedicineFee, TotalAmount, PaymentMode, Medicines, Items, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, patientId, patientName, consultationFee, labFee, medicineFee, totalAmount, paymentMode, JSON.stringify(medicines || []), JSON.stringify(items || []), createdAt]
+      [id, patientId, patientName, consultationFee || 0, labFee || 0, medicineFee || 0, totalAmount || 0, paymentMode, JSON.stringify(medicines || []), JSON.stringify(items || []), createdAt]
     );
 
     res.json({ success: true, id });
@@ -728,7 +807,7 @@ app.post('/api/prescriptions', async (req, res) => {
     // Insert prescription (without medicines in JSON)
     await pool.execute(
       'INSERT INTO Prescriptions (ID, PatientID, PatientName, PatientAge, Diagnosis, Complaint, History, Examination, UltrasoundReport, ExamAtHospital, ExamAtHome, Medicines, LabTests, DoctorNotes, Precautions, GeneratedText, FollowUpDate, Status, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, patientId, patientName, patientAge, diagnosis, complaint || null, history || null, examination || null, ultrasoundReport || null, examAtHospital || null, examAtHome || null, JSON.stringify([]), JSON.stringify(labTests), doctorNotes, precautions, generatedText, followUpDate, status || 'Finalized', createdAt]
+      [id, patientId, patientName, patientAge || null, diagnosis, complaint || null, history || null, examination || null, ultrasoundReport || null, examAtHospital || null, examAtHome || null, JSON.stringify([]), JSON.stringify(labTests || []), doctorNotes || null, precautions || null, generatedText || null, followUpDate || null, status || 'Finalized', createdAt]
     );
 
     // Insert medicines into junction table
@@ -961,13 +1040,23 @@ app.get('/api/patient-services/:patientId', async (req, res) => {
 
 app.post('/api/patient-services', async (req, res) => {
   try {
-    const { id, patientId, services, grandTotal, status } = req.body;
+    const { id, patientId, services, grandTotal, status, isRevisit } = req.body;
     const now = new Date().toISOString();
 
+    // 1. Insert Service Record
     await pool.execute(
       'INSERT INTO PatientServices (ID, PatientID, Services, GrandTotal, Status, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
       [id, patientId, JSON.stringify(services), grandTotal, status || 'Draft', now, now]
     );
+
+    // 2. Touch Patient UpdatedAt ONLY if it is a Revisit (explicit user action)
+    if (isRevisit === true) {
+      console.log(`[Revisit] Updating patient ${patientId} timestamp for badge.`);
+      await pool.execute(
+        'UPDATE Patients SET UpdatedAt = ? WHERE ID = ?',
+        [now, patientId]
+      );
+    }
 
     res.json({ success: true, id });
   } catch (error) {
@@ -1249,6 +1338,11 @@ const getStatusPage = (req, res) => {
           <h1>🏥 HMS Backend</h1>
           <p class="subtitle">Hospital Management System API</p>
 
+          <div style="background: #fffbeb; border: 1px solid #fef3c7; color: #92400e; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; font-size: 0.875rem; text-align: center; font-weight: 600; line-height: 1.5;">
+            🚧 Deployment is in progress.<br>
+            Please check back in 30 min - 1 hour.
+          </div>
+
           <div class="status-container">
             <div class="status-item">
               <span>Server Status</span>
@@ -1280,23 +1374,24 @@ app.get('/api/status', getStatusPage);
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 // ============ SERVE REACT FRONTEND ============
-// Check if dist directory exists
-const distPath = path.join(__dirname, 'dist');
+const publicHtmlDistPath = path.join(__dirname, '..', 'public_html', 'dist');
+const publicHtmlIndexPath = path.join(publicHtmlDistPath, 'index.html');
 
-if (fs.existsSync(distPath)) {
-  console.log('✅ Serving frontend from dist directory');
-  app.use(express.static(distPath));
+if (fs.existsSync(publicHtmlDistPath) && fs.existsSync(publicHtmlIndexPath)) {
+  console.log('✅ Serving frontend from public_html/dist directory:', publicHtmlDistPath);
+  app.use(express.static(publicHtmlDistPath));
   app.get('*', (req, res) => {
-    res.sendFile(path.join(distPath, 'index.html'));
+    if (req.path.startsWith('/api')) return res.status(404).json({ error: 'API endpoint not found' });
+    res.sendFile(publicHtmlIndexPath);
   });
 } else {
-  console.log('⚠️ Frontend build code (dist) not found. Running in API-only mode.');
-  // For unknown routes, show status page or 404
+  console.log('⚠️ Frontend build code NOT found in public_html/dist/index.html');
+  console.log('   Checked: ', publicHtmlDistPath);
+
   app.get('*', (req, res) => {
     if (req.path.startsWith('/api')) {
       return res.status(404).json({ error: 'API endpoint not found' });
     }
-    // Fallback to status page
     getStatusPage(req, res);
   });
 }
