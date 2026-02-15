@@ -363,6 +363,19 @@ async function initializeDatabase() {
       }
     }
 
+    // Check if Prescriptions table has new columns, if not add them
+    try {
+      await pool.execute('SELECT Complaints FROM Prescriptions LIMIT 1');
+    } catch (error) {
+      console.log('⚡ Adding new columns to Prescriptions table...');
+      try { await pool.execute('ALTER TABLE Prescriptions ADD COLUMN Complaints TEXT'); } catch (e) { }
+      try { await pool.execute('ALTER TABLE Prescriptions ADD COLUMN History TEXT'); } catch (e) { }
+      try { await pool.execute('ALTER TABLE Prescriptions ADD COLUMN OnExamination TEXT'); } catch (e) { }
+      try { await pool.execute('ALTER TABLE Prescriptions ADD COLUMN TreatmentInHospital TEXT'); } catch (e) { }
+      try { await pool.execute('ALTER TABLE Prescriptions ADD COLUMN TreatmentAtHome TEXT'); } catch (e) { }
+      console.log('✅ Prescriptions table schema updated');
+    }
+
     console.log('✅ Database tables initialized');
     dbConnected = true;
   } catch (error) {
@@ -540,16 +553,17 @@ app.get('/api/profile/:identifier', async (req, res) => {
       }
     };
 
-    const [prescriptions, labResults, services, payments] = await Promise.all([
+    const [prescriptions, labResults, services, payments, realVisits] = await Promise.all([
       fetchResources('Prescriptions'),
       fetchResources('LabResults'),
       fetchResources('PatientServices'),
-      fetchResources('Payments') // Assuming Payments table exists, handle error if not
+      fetchResources('Payments'),
+      pool.execute(`SELECT * FROM Visits WHERE PatientID IN(${placeholders}) ORDER BY VisitDate DESC, CreatedAt DESC`, allPatientIds).then(([rows]) => rows).catch(() => [])
     ]);
 
     res.json({
       profile: masterProfile,
-      visits: allVisits,
+      visits: realVisits.length > 0 ? realVisits.map(convertRowDates) : allVisits, // Use real visits, fallback to patient rows if empty (legacy)
       history: {
         prescriptions,
         labResults,
@@ -604,7 +618,7 @@ app.post('/api/patients', async (req, res) => {
 
 app.put('/api/patients/:id', async (req, res) => {
   try {
-    const { name, guardianName, cnic, age, gender, phone, address, visitDate, symptoms } = req.body;
+    const { name, guardianName, cnic, age, gender, phone, address, visitDate, symptoms, isRevisit } = req.body;
     const updatedAt = new Date().toISOString();
 
     // Update Patient Profile
@@ -613,11 +627,13 @@ app.put('/api/patients/:id', async (req, res) => {
       [name, guardianName || null, cnic || null, age, gender, phone, address, visitDate, symptoms, updatedAt, req.params.id]
     );
 
-    // Insert new Visit
-    await pool.execute(
-      'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
-      [req.params.id, visitDate, symptoms, updatedAt]
-    );
+    // Insert new Visit ONLY if explicitly requested (e.g. Revisit)
+    if (isRevisit === true) {
+      await pool.execute(
+        'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
+        [req.params.id, visitDate, symptoms, updatedAt]
+      );
+    }
 
     res.json({ success: true });
   } catch (error) {
@@ -760,6 +776,33 @@ app.post('/api/payments', async (req, res) => {
   }
 });
 
+app.put('/api/payments/:id', async (req, res) => {
+  try {
+    console.log('📝 Updating payment:', req.params.id);
+    console.log('📦 Payload:', JSON.stringify(req.body, null, 2));
+
+    const { consultationFee, labFee, medicineFee, totalAmount, paymentMode, items, medicines } = req.body;
+
+    await pool.execute(
+      'UPDATE Payments SET ConsultationFee=?, LabFee=?, MedicineFee=?, TotalAmount=?, PaymentMode=?, Items=?, Medicines=? WHERE ID=?',
+      [
+        consultationFee,
+        labFee,
+        medicineFee,
+        totalAmount,
+        paymentMode,
+        JSON.stringify(items || []),
+        JSON.stringify(medicines || []),
+        req.params.id
+      ]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============ PRESCRIPTIONS API ============
 
 app.get('/api/prescriptions', async (req, res) => {
@@ -799,15 +842,15 @@ app.get('/api/prescriptions', async (req, res) => {
 
 app.post('/api/prescriptions', async (req, res) => {
   try {
-    const { id, patientId, patientName, patientAge, diagnosis, complaint, history, examination, ultrasoundReport, examAtHospital, examAtHome, medicines, labTests, doctorNotes, precautions, generatedText, followUpDate, status } = req.body;
+    const { id, patientId, patientName, patientAge, diagnosis, complaints, history, onExamination, treatmentInHospital, treatmentAtHome, medicines, labTests, doctorNotes, precautions, generatedText, followUpDate, status } = req.body;
     const createdAt = new Date().toISOString();
 
     console.log('Creating prescription:', { id, patientId, status: status || 'Finalized' });
 
-    // Insert prescription (without medicines in JSON)
+    // Insert prescription
     await pool.execute(
-      'INSERT INTO Prescriptions (ID, PatientID, PatientName, PatientAge, Diagnosis, Complaint, History, Examination, UltrasoundReport, ExamAtHospital, ExamAtHome, Medicines, LabTests, DoctorNotes, Precautions, GeneratedText, FollowUpDate, Status, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, patientId, patientName, patientAge || null, diagnosis, complaint || null, history || null, examination || null, ultrasoundReport || null, examAtHospital || null, examAtHome || null, JSON.stringify([]), JSON.stringify(labTests || []), doctorNotes || null, precautions || null, generatedText || null, followUpDate || null, status || 'Finalized', createdAt]
+      'INSERT INTO Prescriptions (ID, PatientID, PatientName, PatientAge, Diagnosis, Complaints, History, OnExamination, TreatmentInHospital, TreatmentAtHome, Medicines, LabTests, DoctorNotes, Precautions, GeneratedText, FollowUpDate, Status, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, patientId, patientName, patientAge || null, diagnosis, complaints || null, history || null, onExamination || null, treatmentInHospital || null, treatmentAtHome || null, JSON.stringify([]), JSON.stringify(labTests || []), doctorNotes || null, precautions || null, generatedText || null, followUpDate || null, status || 'Finalized', createdAt]
     );
 
     // Insert medicines into junction table
@@ -824,21 +867,20 @@ app.post('/api/prescriptions', async (req, res) => {
     res.json({ success: true, id });
   } catch (error) {
     console.error('❌ Error creating prescription:', error.message);
-    console.error('Error details:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 app.put('/api/prescriptions/:id', async (req, res) => {
   try {
-    const { patientId, patientName, patientAge, diagnosis, complaint, history, examination, ultrasoundReport, examAtHospital, examAtHome, medicines, labTests, doctorNotes, precautions, generatedText, followUpDate, status } = req.body;
+    const { patientId, patientName, patientAge, diagnosis, complaints, history, onExamination, treatmentInHospital, treatmentAtHome, medicines, labTests, doctorNotes, precautions, generatedText, followUpDate, status } = req.body;
 
     console.log('Updating prescription:', req.params.id, 'status:', status);
 
     // Update prescription
     await pool.execute(
-      'UPDATE Prescriptions SET PatientID=?, PatientName=?, PatientAge=?, Diagnosis=?, Complaint=?, History=?, Examination=?, UltrasoundReport=?, ExamAtHospital=?, ExamAtHome=?, LabTests=?, DoctorNotes=?, Precautions=?, GeneratedText=?, FollowUpDate=?, Status=? WHERE ID=?',
-      [patientId, patientName, patientAge, diagnosis, complaint || null, history || null, examination || null, ultrasoundReport || null, examAtHospital || null, examAtHome || null, JSON.stringify(labTests), doctorNotes, precautions, generatedText, followUpDate, status, req.params.id]
+      'UPDATE Prescriptions SET PatientID=?, PatientName=?, PatientAge=?, Diagnosis=?, Complaints=?, History=?, OnExamination=?, TreatmentInHospital=?, TreatmentAtHome=?, LabTests=?, DoctorNotes=?, Precautions=?, GeneratedText=?, FollowUpDate=?, Status=? WHERE ID=?',
+      [patientId, patientName, patientAge, diagnosis, complaints || null, history || null, onExamination || null, treatmentInHospital || null, treatmentAtHome || null, JSON.stringify(labTests), doctorNotes, precautions, generatedText, followUpDate, status, req.params.id]
     );
 
     // Delete existing medicines for this prescription
@@ -1050,11 +1092,20 @@ app.post('/api/patient-services', async (req, res) => {
     );
 
     // 2. Touch Patient UpdatedAt ONLY if it is a Revisit (explicit user action)
+    // 2. Touch Patient UpdatedAt and VisitDate ONLY if it is a Revisit (explicit user action)
     if (isRevisit === true) {
-      console.log(`[Revisit] Updating patient ${patientId} timestamp for badge.`);
+      console.log(`[Revisit] Updating patient ${patientId} timestamp and creating visit record.`);
+
+      // Update Patient record
       await pool.execute(
-        'UPDATE Patients SET UpdatedAt = ? WHERE ID = ?',
-        [now, patientId]
+        'UPDATE Patients SET UpdatedAt = ?, VisitDate = ? WHERE ID = ?',
+        [now, now, patientId]
+      );
+
+      // Create new Visit record
+      await pool.execute(
+        'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
+        [patientId, now, 'Revisit - New Service', now]
       );
     }
 
@@ -1317,7 +1368,7 @@ const getStatusPage = (req, res) => {
   const statusText = dbConnected ? 'Connected' : 'Disconnected';
 
   const html = `
-  < !DOCTYPE html >
+  <!DOCTYPE html>
     <html>
       <head>
         <title>HMS Backend Status</title>
@@ -1340,7 +1391,7 @@ const getStatusPage = (req, res) => {
 
           <div style="background: #fffbeb; border: 1px solid #fef3c7; color: #92400e; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; font-size: 0.875rem; text-align: center; font-weight: 600; line-height: 1.5;">
             🚧 Deployment is in progress.<br>
-            Please check back in 30 min - 1 hour.
+            Please refresh this page in a few minutes.
           </div>
 
           <div class="status-container">
@@ -1377,24 +1428,30 @@ app.get('/favicon.ico', (req, res) => res.status(204).end());
 const publicHtmlDistPath = path.join(__dirname, '..', 'public_html', 'dist');
 const publicHtmlIndexPath = path.join(publicHtmlDistPath, 'index.html');
 
-if (fs.existsSync(publicHtmlDistPath) && fs.existsSync(publicHtmlIndexPath)) {
-  console.log('✅ Serving frontend from public_html/dist directory:', publicHtmlDistPath);
-  app.use(express.static(publicHtmlDistPath));
-  app.get('*', (req, res) => {
-    if (req.path.startsWith('/api')) return res.status(404).json({ error: 'API endpoint not found' });
-    res.sendFile(publicHtmlIndexPath);
-  });
-} else {
-  console.log('⚠️ Frontend build code NOT found in public_html/dist/index.html');
-  console.log('   Checked: ', publicHtmlDistPath);
+// Log the path we are looking for (for debugging)
+console.log('📂 Frontend Dist Path:', publicHtmlDistPath);
 
-  app.get('*', (req, res) => {
-    if (req.path.startsWith('/api')) {
-      return res.status(404).json({ error: 'API endpoint not found' });
-    }
+// 1. Serve Static Assets (JS, CSS, Images)
+// express.static will check for files on every request.
+// If file exists, it responds. If not, it calls next().
+app.use(express.static(publicHtmlDistPath));
+
+// 2. SPA Fallback / Status Page
+// For any other request (like /patients, /dashboard) we need to serve index.html
+// But if index.html is missing (deployment in progress), we serve the Status Page.
+app.get('*', (req, res) => {
+  if (req.path.startsWith('/api')) {
+    return res.status(404).json({ error: 'API endpoint not found' });
+  }
+
+  // Dynamic check: Does index.html exist RIGHT NOW?
+  if (fs.existsSync(publicHtmlIndexPath)) {
+    res.sendFile(publicHtmlIndexPath);
+  } else {
+    // If missing, show the "Deployment in Progress" status page
     getStatusPage(req, res);
-  });
-}
+  }
+});
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
