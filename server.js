@@ -225,6 +225,22 @@ async function initializeDatabase() {
       )
     `);
 
+    // Auto-migration: Add new columns if they don't exist
+    try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN Complaints TEXT"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN History TEXT"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN OnExamination TEXT"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN TreatmentInHospital TEXT"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN TreatmentAtHome TEXT"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN Status VARCHAR(20) DEFAULT 'Draft'"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN FinalizedAt DATETIME NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN LastUpdatedAt DATETIME NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN IsLocked TINYINT(1) DEFAULT 0"); } catch (e) { }
+
+    // Ensure Medicines and LabTests are JSON type (for MySQL 5.7+)
+    try { await pool.execute("ALTER TABLE Prescriptions MODIFY COLUMN Medicines JSON"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Prescriptions MODIFY COLUMN LabTests JSON"); } catch (e) { }
+
+
     // PrescriptionMedicines table - For doctor prescriptions AND master clinical list
     // If PrescriptionID is NULL, it's a master clinical medicine
     await pool.execute(`
@@ -619,7 +635,11 @@ app.post('/api/patients', async (req, res) => {
 app.put('/api/patients/:id', async (req, res) => {
   try {
     const { name, guardianName, cnic, age, gender, phone, address, visitDate, symptoms, isRevisit } = req.body;
-    const updatedAt = new Date().toISOString();
+
+    // CURRENT DATE IN PKT (UTC+5)
+    const now = new Date();
+    const pktDate = new Date(now.getTime() + (5 * 60 * 60 * 1000));
+    const updatedAt = pktDate.toISOString().replace('T', ' ').slice(0, 19);
 
     // Update Patient Profile
     await pool.execute(
@@ -807,29 +827,40 @@ app.put('/api/payments/:id', async (req, res) => {
 
 app.get('/api/prescriptions', async (req, res) => {
   try {
-    const [prescriptions] = await pool.execute('SELECT * FROM Prescriptions ORDER BY CreatedAt DESC');
+    const { patientId, status } = req.query;
+    let query = 'SELECT * FROM Prescriptions';
+    const params = [];
+    const conditions = [];
+
+    if (patientId) {
+      conditions.push('PatientID = ?');
+      params.push(patientId);
+    }
+
+    if (status) {
+      conditions.push('Status = ?');
+      params.push(status);
+    }
+
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ');
+    }
+
+    query += ' ORDER BY CreatedAt DESC';
+
+    const [prescriptions] = await pool.execute(query, params);
 
     // Fetch medicines for each prescription from junction table
     const prescriptionsWithMedicines = await Promise.all(
       prescriptions.map(async (prescription) => {
-        const [medicines] = await pool.execute(
-          'SELECT MedicineName, Dosage, Frequency, Duration, Quantity FROM PrescriptionMedicines WHERE PrescriptionID = ?',
-          [prescription.ID]
-        );
-
-        // Convert medicines to the format expected by frontend
-        const formattedMedicines = medicines.map(med => ({
-          name: med.MedicineName,
-          dosage: med.Dosage,
-          frequency: med.Frequency,
-          duration: med.Duration,
-          quantity: med.Quantity
-        }));
+        // Parse medicines from JSON column
+        const medicines = prescription.Medicines ? JSON.parse(prescription.Medicines) : [];
+        const labTests = prescription.LabTests ? JSON.parse(prescription.LabTests) : [];
 
         return {
           ...convertRowDates(prescription),
-          medicines: formattedMedicines,
-          labTests: prescription.LabTests ? JSON.parse(prescription.LabTests) : []
+          Medicines: medicines,
+          LabTests: labTests
         };
       })
     );
@@ -845,23 +876,22 @@ app.post('/api/prescriptions', async (req, res) => {
     const { id, patientId, patientName, patientAge, diagnosis, complaints, history, onExamination, treatmentInHospital, treatmentAtHome, medicines, labTests, doctorNotes, precautions, generatedText, followUpDate, status } = req.body;
     const createdAt = new Date().toISOString();
 
-    console.log('Creating prescription:', { id, patientId, status: status || 'Finalized' });
+    // Status Logic
+    const isFinalized = status === 'Finalized';
+    const isLocked = isFinalized ? 1 : 0;
+    const finalizedAt = isFinalized ? createdAt : null;
 
-    // Insert prescription
+    console.log('Creating prescription:', { id, patientId, status: status || 'Draft' });
+
+    // Insert prescription with medicines as JSON
     await pool.execute(
-      'INSERT INTO Prescriptions (ID, PatientID, PatientName, PatientAge, Diagnosis, Complaints, History, OnExamination, TreatmentInHospital, TreatmentAtHome, Medicines, LabTests, DoctorNotes, Precautions, GeneratedText, FollowUpDate, Status, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, patientId, patientName, patientAge || null, diagnosis, complaints || null, history || null, onExamination || null, treatmentInHospital || null, treatmentAtHome || null, JSON.stringify([]), JSON.stringify(labTests || []), doctorNotes || null, precautions || null, generatedText || null, followUpDate || null, status || 'Finalized', createdAt]
+      'INSERT INTO Prescriptions (ID, PatientID, PatientName, PatientAge, Diagnosis, Complaints, History, OnExamination, TreatmentInHospital, TreatmentAtHome, Medicines, LabTests, DoctorNotes, Precautions, GeneratedText, FollowUpDate, Status, CreatedAt, IsLocked, FinalizedAt, LastUpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, patientId, patientName, patientAge || null, diagnosis, complaints || null, history || null, onExamination || null, treatmentInHospital || null, treatmentAtHome || null, JSON.stringify(medicines || []), JSON.stringify(labTests || []), doctorNotes || null, precautions || null, generatedText || null, followUpDate || null, status || 'Draft', createdAt, isLocked, finalizedAt, createdAt]
     );
 
-    // Insert medicines into junction table
-    if (medicines && medicines.length > 0) {
-      for (const medicine of medicines) {
-        await pool.execute(
-          'INSERT INTO PrescriptionMedicines (PrescriptionID, MedicineName, Dosage, Frequency, Duration, Quantity) VALUES (?, ?, ?, ?, ?, ?)',
-          [id, medicine.name, medicine.dosage, medicine.frequency, medicine.duration, medicine.quantity || 1]
-        );
-      }
-    }
+    // Only deduce stock if finalized
+    // Note: Stock handling logic is currently separated (handled by frontend or separate call), 
+    // but typically should be here. For non-breaking changes we keep as is, but frontend must only call stock reduction if finalized.
 
     console.log('✅ Prescription created successfully:', id);
     res.json({ success: true, id });
@@ -874,32 +904,73 @@ app.post('/api/prescriptions', async (req, res) => {
 app.put('/api/prescriptions/:id', async (req, res) => {
   try {
     const { patientId, patientName, patientAge, diagnosis, complaints, history, onExamination, treatmentInHospital, treatmentAtHome, medicines, labTests, doctorNotes, precautions, generatedText, followUpDate, status } = req.body;
+    const prescriptionId = req.params.id;
 
-    console.log('Updating prescription:', req.params.id, 'status:', status);
+    console.log('Updating prescription:', prescriptionId, 'status:', status);
 
-    // Update prescription
-    await pool.execute(
-      'UPDATE Prescriptions SET PatientID=?, PatientName=?, PatientAge=?, Diagnosis=?, Complaints=?, History=?, OnExamination=?, TreatmentInHospital=?, TreatmentAtHome=?, LabTests=?, DoctorNotes=?, Precautions=?, GeneratedText=?, FollowUpDate=?, Status=? WHERE ID=?',
-      [patientId, patientName, patientAge, diagnosis, complaints || null, history || null, onExamination || null, treatmentInHospital || null, treatmentAtHome || null, JSON.stringify(labTests), doctorNotes, precautions, generatedText, followUpDate, status, req.params.id]
-    );
+    // 1. Check if Locked
+    const [existing] = await pool.execute('SELECT IsLocked, Status FROM Prescriptions WHERE ID = ?', [prescriptionId]);
 
-    // Delete existing medicines for this prescription
-    await pool.execute('DELETE FROM PrescriptionMedicines WHERE PrescriptionID = ?', [req.params.id]);
-
-    // Insert updated medicines
-    if (medicines && medicines.length > 0) {
-      for (const medicine of medicines) {
-        await pool.execute(
-          'INSERT INTO PrescriptionMedicines (PrescriptionID, MedicineName, Dosage, Frequency, Duration, Quantity) VALUES (?, ?, ?, ?, ?, ?)',
-          [req.params.id, medicine.name, medicine.dosage, medicine.frequency, medicine.duration, medicine.quantity || 1]
-        );
-      }
+    if (existing.length === 0) {
+      return res.status(404).json({ error: 'Prescription not found' });
     }
 
-    console.log('✅ Prescription updated successfully:', req.params.id);
+    if (existing[0].IsLocked || existing[0].Status === 'Finalized') {
+      return res.status(403).json({ error: 'Prescription is finalized and cannot be modified.' });
+    }
+
+    // 2. Determine new state
+    const isFinalized = status === 'Finalized';
+    const isLocked = isFinalized ? 1 : 0;
+    const finalizedAt = isFinalized ? new Date().toISOString() : null;
+    const lastUpdatedAt = new Date().toISOString();
+
+    // 3. Update prescription with medicines as JSON
+    let query = 'UPDATE Prescriptions SET PatientID=?, PatientName=?, PatientAge=?, Diagnosis=?, Complaints=?, History=?, OnExamination=?, TreatmentInHospital=?, TreatmentAtHome=?, Medicines=?, LabTests=?, DoctorNotes=?, Precautions=?, GeneratedText=?, FollowUpDate=?, Status=?, LastUpdatedAt=?';
+    const params = [patientId, patientName, patientAge, diagnosis, complaints || null, history || null, onExamination || null, treatmentInHospital || null, treatmentAtHome || null, JSON.stringify(medicines || []), JSON.stringify(labTests), doctorNotes, precautions, generatedText, followUpDate, status, lastUpdatedAt];
+
+    if (isFinalized) {
+      query += ', IsLocked=?, FinalizedAt=?';
+      params.push(isLocked, finalizedAt);
+    }
+
+    query += ' WHERE ID=?';
+    params.push(prescriptionId);
+
+    await pool.execute(query, params);
+
+    console.log('✅ Prescription updated successfully:', prescriptionId);
     res.json({ success: true });
   } catch (error) {
     console.error('❌ Error updating prescription:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/prescriptions/:id', async (req, res) => {
+  try {
+    const prescriptionId = req.params.id;
+    console.log('Attempting to delete prescription:', prescriptionId);
+
+    // 1. Check if Locked
+    const [existing] = await pool.execute('SELECT IsLocked, Status FROM Prescriptions WHERE ID = ?', [prescriptionId]);
+
+    if (existing.length === 0) {
+      return res.status(404).json({ error: 'Prescription not found' });
+    }
+
+    if (existing[0].IsLocked || existing[0].Status === 'Finalized') {
+      console.warn(`⚠️ Blocked deletion of finalized prescription: ${prescriptionId}`);
+      return res.status(403).json({ error: 'Prescription is finalized and cannot be deleted.' });
+    }
+
+    // 2. Delete prescription
+    await pool.execute('DELETE FROM Prescriptions WHERE ID = ?', [prescriptionId]);
+
+    console.log('✅ Prescription deleted successfully:', prescriptionId);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Error deleting prescription:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
