@@ -334,7 +334,78 @@ async function initializeDatabase() {
   )
   `);
 
-    // Daily Expenses table
+    // Roles table - dynamic roles managed by admin
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS Roles (
+        ID INT AUTO_INCREMENT PRIMARY KEY,
+        Name VARCHAR(100) UNIQUE NOT NULL,
+        Description TEXT,
+        IsSystem TINYINT(1) DEFAULT 0,
+        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // RolePermissions table - default permissions for each role
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS RolePermissions (
+        ID INT AUTO_INCREMENT PRIMARY KEY,
+        RoleName VARCHAR(100) NOT NULL,
+        Permission VARCHAR(100) NOT NULL,
+        UNIQUE KEY unique_role_perm (RoleName, Permission)
+      )
+    `);
+
+    // Seed default roles if none exist
+    const [roleCount] = await pool.execute('SELECT COUNT(*) as count FROM Roles');
+    if (roleCount[0].count === 0) {
+      const defaultRoles = [
+        { name: 'Admin', description: 'Full system access', isSystem: 1 },
+        { name: 'Doctor', description: 'Clinical operations access', isSystem: 1 },
+        { name: 'Receptionist', description: 'Front desk and patient registration', isSystem: 1 },
+        { name: 'LabTechnician', description: 'Lab results management', isSystem: 1 },
+      ];
+      for (const role of defaultRoles) {
+        await pool.execute(
+          'INSERT INTO Roles (Name, Description, IsSystem) VALUES (?, ?, ?)',
+          [role.name, role.description, role.isSystem]
+        );
+      }
+
+      // Seed default permissions per role
+      const defaultRolePermissions = {
+        Admin: ['page_dashboard', 'page_patients', 'page_fees', 'page_medicines', 'page_pharmacy', 'page_prescriptions', 'page_lab_results', 'page_users', 'page_expenses', 'page_settings'],
+        Doctor: ['page_dashboard', 'page_patients', 'page_medicines', 'page_prescriptions', 'page_settings'],
+        Receptionist: ['page_dashboard', 'page_patients', 'page_fees', 'page_pharmacy', 'page_expenses', 'page_settings'],
+        LabTechnician: ['page_dashboard', 'page_lab_results', 'page_settings'],
+      };
+      for (const [roleName, permissions] of Object.entries(defaultRolePermissions)) {
+        for (const perm of permissions) {
+          await pool.execute(
+            'INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES (?, ?)',
+            [roleName, perm]
+          );
+        }
+      }
+      console.log('✅ Default roles and permissions seeded');
+    }
+
+    // Insert default users if none exist
+    const [userCount] = await pool.execute('SELECT COUNT(*) as count FROM Users');
+    if (userCount[0].count === 0) {
+      const defaultUsers = [
+        { id: 'USR-000', username: 'admin', password: 'admin123', name: 'System Admin', role: 'Admin' },
+        { id: 'USR-001', username: 'receptionist', password: 'reception123', name: 'Front Desk', role: 'Receptionist' },
+        { id: 'USR-002', username: 'doctor', password: 'doctor123', name: 'Dr. Admin', role: 'Doctor' },
+        { id: 'USR-003', username: 'labtech', password: 'lab123', name: 'Lab Technician', role: 'LabTechnician' },
+      ];
+
+      for (const user of defaultUsers) {
+        await pool.execute(
+          'INSERT INTO Users (ID, Username, Password, Name, Role) VALUES (?, ?, ?, ?, ?)',
+          [user.id, user.username, user.password, user.name, user.role]
+        );
+      }
+    }
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS DailyExpenses(
     ID VARCHAR(50) PRIMARY KEY,
@@ -850,23 +921,26 @@ app.get('/api/prescriptions', async (req, res) => {
 
     const [prescriptions] = await pool.execute(query, params);
 
-    // Fetch medicines for each prescription from junction table
-    const prescriptionsWithMedicines = await Promise.all(
-      prescriptions.map(async (prescription) => {
-        // Parse medicines from JSON column
-        const medicines = prescription.Medicines ? JSON.parse(prescription.Medicines) : [];
-        const labTests = prescription.LabTests ? JSON.parse(prescription.LabTests) : [];
+    // MySQL2 auto-parses JSON columns into JS objects when using pool.execute.
+    // Guard against double-parsing: only call JSON.parse if the value is still a string.
+    const prescriptionsWithMedicines = prescriptions.map((prescription) => {
+      const medicines = Array.isArray(prescription.Medicines)
+        ? prescription.Medicines
+        : (typeof prescription.Medicines === 'string' ? JSON.parse(prescription.Medicines || '[]') : []);
+      const labTests = Array.isArray(prescription.LabTests)
+        ? prescription.LabTests
+        : (typeof prescription.LabTests === 'string' ? JSON.parse(prescription.LabTests || '[]') : []);
 
-        return {
-          ...convertRowDates(prescription),
-          Medicines: medicines,
-          LabTests: labTests
-        };
-      })
-    );
+      return {
+        ...convertRowDates(prescription),
+        Medicines: medicines,
+        LabTests: labTests
+      };
+    });
 
     res.json(prescriptionsWithMedicines);
   } catch (error) {
+    console.error('Error fetching prescriptions:', error.message);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1252,6 +1326,161 @@ app.delete('/api/daily-expenses/:id', async (req, res) => {
   }
 });
 
+// ============ ROLES API ============
+
+// All available permission keys in the system
+// Page-based + button-level permissions
+const ALL_PERMISSIONS = [
+  // ── Pages ──
+  { key: 'page_dashboard', label: 'Dashboard', group: 'Pages' },
+  { key: 'page_patients', label: 'Patients', group: 'Pages' },
+  { key: 'page_fees', label: 'Fee Collection', group: 'Pages' },
+  { key: 'page_medicines', label: 'Medicines', group: 'Pages' },
+  { key: 'page_pharmacy', label: 'Pharmacy', group: 'Pages' },
+  { key: 'page_prescriptions', label: 'Prescriptions', group: 'Pages' },
+  { key: 'page_lab_results', label: 'Lab Results', group: 'Pages' },
+  { key: 'page_users', label: 'User Management', group: 'Pages' },
+  { key: 'page_expenses', label: 'Daily Expenses', group: 'Pages' },
+  { key: 'page_settings', label: 'Settings', group: 'Pages' },
+  // ── Button actions ──
+  { key: 'btn_add_patient', label: 'Add Patient', group: 'Actions' },
+  { key: 'btn_edit_patient', label: 'Edit Patient', group: 'Actions' },
+  { key: 'btn_delete_patient', label: 'Delete Patient', group: 'Actions' },
+  { key: 'btn_manage_stock', label: 'Manage Stock', group: 'Actions' },
+];
+
+// GET /api/permissions - list all available permission keys
+app.get('/api/permissions', (req, res) => {
+  res.json(ALL_PERMISSIONS);
+});
+
+// GET /api/roles - list all roles with their permissions
+app.get('/api/roles', async (req, res) => {
+  try {
+    const [roles] = await pool.execute('SELECT * FROM Roles ORDER BY IsSystem DESC, Name ASC');
+    const [rolePerms] = await pool.execute('SELECT RoleName, Permission FROM RolePermissions');
+
+    const rolesWithPerms = roles.map(role => ({
+      id: role.ID,
+      name: role.Name,
+      description: role.Description,
+      isSystem: role.IsSystem === 1,
+      createdAt: role.CreatedAt,
+      permissions: rolePerms.filter(rp => rp.RoleName === role.Name).map(rp => rp.Permission),
+    }));
+
+    res.json(rolesWithPerms);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/roles - create a new role
+app.post('/api/roles', async (req, res) => {
+  try {
+    const { name, description, permissions = [] } = req.body;
+    if (!name) return res.status(400).json({ error: 'Role name is required' });
+
+    await pool.execute(
+      'INSERT INTO Roles (Name, Description, IsSystem) VALUES (?, ?, 0)',
+      [name, description || '']
+    );
+
+    // Insert permissions for this role
+    for (const perm of permissions) {
+      await pool.execute(
+        'INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES (?, ?)',
+        [name, perm]
+      );
+    }
+
+    res.json({ success: true, message: `Role '${name}' created` });
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'A role with this name already exists' });
+    }
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/roles/:name - update role name/description
+app.put('/api/roles/:name', async (req, res) => {
+  try {
+    const { name: oldName } = req.params;
+    const { name: newName, description } = req.body;
+
+    // Check if it's a system role (cannot rename)
+    const [existing] = await pool.execute('SELECT * FROM Roles WHERE Name = ?', [oldName]);
+    if (!existing[0]) return res.status(404).json({ error: 'Role not found' });
+    if (existing[0].IsSystem && newName && newName !== oldName) {
+      return res.status(403).json({ error: 'System roles cannot be renamed' });
+    }
+
+    await pool.execute(
+      'UPDATE Roles SET Name = ?, Description = ? WHERE Name = ?',
+      [newName || oldName, description ?? existing[0].Description, oldName]
+    );
+
+    // If name changed, update RolePermissions references
+    if (newName && newName !== oldName) {
+      await pool.execute('UPDATE RolePermissions SET RoleName = ? WHERE RoleName = ?', [newName, oldName]);
+      await pool.execute('UPDATE Users SET Role = ? WHERE Role = ?', [newName, oldName]);
+    }
+
+    res.json({ success: true, message: 'Role updated' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/roles/:name/permissions - update default permissions for a role
+app.put('/api/roles/:name/permissions', async (req, res) => {
+  try {
+    const { name } = req.params;
+    const { permissions = [] } = req.body;
+
+    // Delete existing permissions for this role
+    await pool.execute('DELETE FROM RolePermissions WHERE RoleName = ?', [name]);
+
+    // Insert new permissions
+    for (const perm of permissions) {
+      await pool.execute(
+        'INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES (?, ?)',
+        [name, perm]
+      );
+    }
+
+    res.json({ success: true, message: 'Permissions updated' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/roles/:name - delete a role (blocked if users are assigned)
+app.delete('/api/roles/:name', async (req, res) => {
+  try {
+    const { name } = req.params;
+
+    // Block deletion of system roles
+    const [existing] = await pool.execute('SELECT * FROM Roles WHERE Name = ?', [name]);
+    if (!existing[0]) return res.status(404).json({ error: 'Role not found' });
+    if (existing[0].IsSystem) return res.status(403).json({ error: 'System roles cannot be deleted' });
+
+    // Block if users are assigned to this role
+    const [assignedUsers] = await pool.execute('SELECT COUNT(*) as count FROM Users WHERE Role = ?', [name]);
+    if (assignedUsers[0].count > 0) {
+      return res.status(409).json({ error: `Cannot delete role: ${assignedUsers[0].count} user(s) are assigned to it` });
+    }
+
+    await pool.execute('DELETE FROM RolePermissions WHERE RoleName = ?', [name]);
+    await pool.execute('DELETE FROM Roles WHERE Name = ?', [name]);
+
+    res.json({ success: true, message: `Role '${name}' deleted` });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ============ USERS API ============
 
 // Get all users (excluding passwords)
@@ -1370,13 +1599,32 @@ app.post('/api/users/login', async (req, res) => {
     );
 
     if (rows.length > 0) {
+      const user = rows[0];
+
       // Update last login timestamp
       await pool.execute(
         'UPDATE Users SET LastLogin = ? WHERE ID = ?',
-        [new Date().toISOString(), rows[0].ID]
+        [new Date().toISOString(), user.ID]
       );
 
-      res.json({ success: true, user: convertRowDates(rows[0]) });
+      // Load user's own permissions first; fall back to role defaults if empty
+      let userPerms = [];
+      try {
+        const raw = user.Permissions;
+        userPerms = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
+      } catch { userPerms = []; }
+
+      if (!userPerms || userPerms.length === 0) {
+        // Fall back to role-level permissions
+        const [rolePerms] = await pool.execute(
+          'SELECT Permission FROM RolePermissions WHERE RoleName = ?',
+          [user.Role]
+        );
+        userPerms = rolePerms.map(rp => rp.Permission);
+      }
+
+      const permissions = JSON.stringify(userPerms);
+      res.json({ success: true, user: { ...convertRowDates(user), Permissions: permissions } });
     } else {
       res.status(401).json({ error: 'Invalid credentials' });
     }
