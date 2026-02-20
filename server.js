@@ -46,7 +46,8 @@ const PORT = process.env.PORT || 3001;
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Global Error Handlers to prevent crash
 process.on('uncaughtException', (err) => {
@@ -133,6 +134,21 @@ function convertRowDates(row) {
       const date = new Date(converted[field]);
       if (!isNaN(date.getTime())) {
         converted[field] = date.toISOString();
+      }
+    }
+  });
+
+  // Convert JSON fields if they are strings (some MySQL drivers don't auto-parse JSON columns)
+  ['Data', 'Medicines', 'LabTests', 'Tests', 'Services'].forEach(field => {
+    if (converted[field] && typeof converted[field] === 'string') {
+      try {
+        // Check if it's actually a JSON string (starts with { or [)
+        const trimmed = converted[field].trim();
+        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+          converted[field] = JSON.parse(converted[field]);
+        }
+      } catch (e) {
+        // Not a JSON string or already handled
       }
     }
   });
@@ -460,8 +476,44 @@ async function initializeDatabase() {
       try { await pool.execute('ALTER TABLE Prescriptions ADD COLUMN OnExamination TEXT'); } catch (e) { }
       try { await pool.execute('ALTER TABLE Prescriptions ADD COLUMN TreatmentInHospital TEXT'); } catch (e) { }
       try { await pool.execute('ALTER TABLE Prescriptions ADD COLUMN TreatmentAtHome TEXT'); } catch (e) { }
-      console.log('✅ Prescriptions table schema updated');
     }
+    // AppSettings table - For Global and User-specific settings
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS AppSettings (
+        ID VARCHAR(50) PRIMARY KEY, -- 'GLOBAL' or UserID
+        Category VARCHAR(50) NOT NULL, -- 'Global' or 'User'
+        Data JSON,
+        UpdatedAt DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Insert Default Global Settings if not exists
+    const [settingsCount] = await pool.execute("SELECT COUNT(*) as count FROM AppSettings WHERE ID = 'GLOBAL'");
+    if (settingsCount[0].count === 0) {
+      const defaultGlobalSettings = {
+        clinicName: 'Salamaat Medicare',
+        address: 'Qabarastan Road Wah Cantt',
+        city: 'Wah Cantt',
+        phone: '+91 98765 43210',
+        email: 'care@salamaat.com',
+        logo: null,
+        pdfSettings: {
+          primaryColor: '#1a56db',
+          secondaryColor: '#64748b',
+          footerText: 'Please consult your doctor before taking any medicine. Self-medication can be harmful.',
+          showLogo: true,
+          showWatermark: true,
+        },
+        themeColor: '221 83% 53%'
+      };
+      await pool.execute(
+        "INSERT INTO AppSettings (ID, Category, Data) VALUES (?, ?, ?)",
+        ['GLOBAL', 'Global', JSON.stringify(defaultGlobalSettings)]
+      );
+      console.log('✅ Default Global Settings initialized');
+    }
+
+    console.log('✅ Prescriptions table schema updated');
 
     console.log('✅ Database tables initialized');
     dbConnected = true;
@@ -471,6 +523,92 @@ async function initializeDatabase() {
     // Keep server running to serve status page
   }
 }
+
+// ============ SETTINGS API ============
+
+// Get Settings (Global or User)
+app.get('/api/settings/:id', async (req, res) => {
+  try {
+    const { id } = req.params; // 'GLOBAL' or UserID
+    let [rows] = await pool.execute('SELECT Data FROM AppSettings WHERE ID = ?', [id]);
+
+    if (rows.length > 0) {
+      res.json(convertRowDates(rows[0]).Data);
+    } else {
+      // Auto-seed GLOBAL settings if missing
+      if (id === 'GLOBAL') {
+        const defaultGlobalSettings = {
+          clinicName: 'Salamaat Medicare',
+          address: 'Qabarastan Road Wah Cantt',
+          city: 'Wah Cantt',
+          phone: '+91 98765 43210',
+          email: 'care@salamaat.com',
+          logo: null,
+          pdfSettings: {
+            primaryColor: '#1a56db',
+            secondaryColor: '#64748b',
+            footerText: 'Please consult your doctor before taking any medicine. Self-medication can be harmful.',
+            showLogo: true,
+            showWatermark: true,
+          },
+          themeColor: '221 83% 53%'
+        };
+
+        try {
+          await pool.execute(
+            "INSERT IGNORE INTO AppSettings (ID, Category, Data) VALUES (?, ?, ?)",
+            ['GLOBAL', 'Global', JSON.stringify(defaultGlobalSettings)]
+          );
+          return res.json(defaultGlobalSettings);
+        } catch (seedError) {
+          console.error('Failed to auto-seed global settings:', seedError);
+        }
+      }
+
+      // If user specific settings not found, return empty object (frontend handles defaults)
+      if (id !== 'GLOBAL') {
+        res.json({});
+      } else {
+        res.status(404).json({ error: 'Settings not found' });
+      }
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update Settings
+app.put('/api/settings/:id', async (req, res) => {
+  try {
+    const { id } = req.params; // 'GLOBAL' or UserID
+    let data = req.body;
+    const category = id === 'GLOBAL' ? 'Global' : 'User';
+
+    // SANITIZATION: If data has numeric keys (0, 1, 2...), it means it was polluted
+    // by a string-spread bug in the frontend. We strip those out.
+    if (data && typeof data === 'object') {
+      const sanitizedData = {};
+      Object.keys(data).forEach(key => {
+        // If key is NOT a number, keep it
+        if (isNaN(Number(key))) {
+          sanitizedData[key] = data[key];
+        }
+      });
+      data = sanitizedData;
+    }
+
+    // Upsert logic
+    await pool.execute(
+      `INSERT INTO AppSettings (ID, Category, Data) VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE Data = VALUES(Data), Category = VALUES(Category)`,
+      [id, category, JSON.stringify(data)]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // ============ PATIENTS API ============
 
