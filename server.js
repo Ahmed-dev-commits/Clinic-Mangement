@@ -285,18 +285,70 @@ async function initializeDatabase() {
       )
     `);
 
+    // LabTestsCatalog table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS LabTestsCatalog (
+        ID VARCHAR(50) PRIMARY KEY,
+        Name VARCHAR(255) NOT NULL,
+        Category VARCHAR(100),
+        Unit VARCHAR(50),
+        NormalRange VARCHAR(255),
+        Price DECIMAL(10, 2) DEFAULT 0,
+        ReferenceRangeMale VARCHAR(255),
+        ReferenceRangeFemale VARCHAR(255),
+        ReferenceRangeChild VARCHAR(255),
+        CriticalValueRange VARCHAR(255),
+        SampleType VARCHAR(100),
+        Method VARCHAR(255),
+        TurnaroundTime VARCHAR(100),
+        Status VARCHAR(50) DEFAULT 'Active',
+        IsProfile TINYINT(1) DEFAULT 0,
+        ProfileTests JSON,
+        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Migrations for LabTestsCatalog (if columns missing)
+    try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN ReferenceRangeMale VARCHAR(255)"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN ReferenceRangeFemale VARCHAR(255)"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN ReferenceRangeChild VARCHAR(255)"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN CriticalValueRange VARCHAR(255)"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN SampleType VARCHAR(100)"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN Method VARCHAR(255)"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN TurnaroundTime VARCHAR(100)"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN Status VARCHAR(50) DEFAULT 'Active'"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN IsProfile TINYINT(1) DEFAULT 0"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN ProfileTests JSON"); } catch (e) { }
+
+
     // LabResults table
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS LabResults (
         ID VARCHAR(50) PRIMARY KEY,
         PatientID VARCHAR(50),
         PatientName VARCHAR(255),
+        PatientAge INT,
         TestDate VARCHAR(50),
+        ReportDate VARCHAR(50),
         Tests TEXT,
+        Notes TEXT,
+        Technician VARCHAR(255),
         Status VARCHAR(50),
+        ReferredBy VARCHAR(255) DEFAULT 'Self',
+        NotifiedAt DATETIME NULL,
+        CollectedAt DATETIME NULL,
         CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    // Migrations for LabResults (if columns missing)
+    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN PatientAge INT"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN ReportDate VARCHAR(50)"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN Notes TEXT"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN Technician VARCHAR(255)"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN NotifiedAt DATETIME NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN CollectedAt DATETIME NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN ReferredBy VARCHAR(255) DEFAULT 'Self'"); } catch (e) { }
 
     // Backfill Visits from Patients table
     // Insert a visit record for any patient who doesn't have one yet (migration for existing data)
@@ -1034,6 +1086,29 @@ app.put('/api/payments/:id', async (req, res) => {
 
 // ============ PRESCRIPTIONS API ============
 
+async function createLabResultsFromPrescription(patientId, patientName, patientAge, labTests) {
+  if (!labTests || labTests.length === 0) return;
+
+  const id = `LAB-${Math.floor(Math.random() * 900000) + 100000}`;
+  const testDate = new Date().toISOString().split('T')[0];
+  const createdAt = new Date().toISOString();
+
+  // Create tests structure for LabResults table
+  const testsJson = labTests.map(testName => ({
+    name: testName,
+    result: '',
+    unit: '',
+    range: '',
+    status: 'Pending'
+  }));
+
+  await pool.execute(
+    'INSERT INTO LabResults (ID, PatientID, PatientName, PatientAge, TestDate, Tests, Status, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+    [id, patientId, patientName, patientAge || null, testDate, JSON.stringify(testsJson), 'Pending', createdAt]
+  );
+  console.log('🧪 Auto-generated Lab Order:', id, 'for patient:', patientName);
+}
+
 app.get('/api/prescriptions', async (req, res) => {
   try {
     const { patientId, status } = req.query;
@@ -1106,6 +1181,12 @@ app.post('/api/prescriptions', async (req, res) => {
     // but typically should be here. For non-breaking changes we keep as is, but frontend must only call stock reduction if finalized.
 
     console.log('✅ Prescription created successfully:', id);
+
+    // Auto-generation removed as per manual assignment requirement
+    // if (isFinalized && labTests && labTests.length > 0) {
+    //   await createLabResultsFromPrescription(patientId, patientName, patientAge, labTests);
+    // }
+
     res.json({ success: true, id });
   } catch (error) {
     console.error('❌ Error creating prescription:', error.message);
@@ -1150,6 +1231,12 @@ app.put('/api/prescriptions/:id', async (req, res) => {
     params.push(prescriptionId);
 
     await pool.execute(query, params);
+
+    // Auto-generation removed as per manual assignment requirement
+    // const wasAlreadyFinalized = existing[0].Status === 'Finalized';
+    // if (isFinalized && !wasAlreadyFinalized && labTests && labTests.length > 0) {
+    //   await createLabResultsFromPrescription(patientId, patientName, patientAge, labTests);
+    // }
 
     console.log('✅ Prescription updated successfully:', prescriptionId);
     res.json({ success: true });
@@ -1303,12 +1390,12 @@ app.get('/api/lab-results', async (req, res) => {
 
 app.post('/api/lab-results', async (req, res) => {
   try {
-    const { id, patientId, patientName, patientAge, testDate, reportDate, tests, notes, technician, status } = req.body;
+    const { id, patientId, patientName, patientAge, testDate, reportDate, tests, notes, technician, status, referredBy } = req.body;
     const createdAt = new Date().toISOString();
 
     await pool.execute(
-      'INSERT INTO LabResults (ID, PatientID, PatientName, PatientAge, TestDate, ReportDate, Tests, Notes, Technician, Status, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, patientId, patientName, patientAge, testDate, reportDate, JSON.stringify(tests), notes, technician, status, createdAt]
+      'INSERT INTO LabResults (ID, PatientID, PatientName, PatientAge, TestDate, ReportDate, Tests, Notes, Technician, Status, ReferredBy, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, patientId, patientName, patientAge, testDate, reportDate, JSON.stringify(tests), notes, technician, status, referredBy || 'Self', createdAt]
     );
 
     res.json({ success: true, id });
@@ -1343,7 +1430,100 @@ app.put('/api/lab-results/:id/status', async (req, res) => {
   }
 });
 
-// ============ PATIENT SERVICES API ============
+// Full update for lab results
+app.put('/api/lab-results/:id', async (req, res) => {
+  try {
+    const { testDate, reportDate, tests, notes, technician, status } = req.body;
+
+    await pool.execute(
+      'UPDATE LabResults SET TestDate = ?, ReportDate = ?, Tests = ?, Notes = ?, Technician = ?, Status = ? WHERE ID = ?',
+      [testDate, reportDate, JSON.stringify(tests), notes, technician, status, req.params.id]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ LAB TESTS CATALOG API (Master List) ============
+
+app.get('/api/lab-tests-catalog', async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM LabTestsCatalog ORDER BY Category ASC, Name ASC');
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/lab-tests-catalog', async (req, res) => {
+  try {
+    const {
+      id, name, category, unit, normalRange, price,
+      referenceRangeMale, referenceRangeFemale, referenceRangeChild,
+      criticalValueRange, sampleType, method, turnaroundTime,
+      status, isProfile, profileTests
+    } = req.body;
+
+    await pool.execute(
+      `INSERT INTO LabTestsCatalog (
+        ID, Name, Category, Unit, NormalRange, Price,
+        ReferenceRangeMale, ReferenceRangeFemale, ReferenceRangeChild,
+        CriticalValueRange, SampleType, Method, TurnaroundTime,
+        Status, IsProfile, ProfileTests
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id, name, category, unit, normalRange, price || 0,
+        referenceRangeMale || null, referenceRangeFemale || null, referenceRangeChild || null,
+        criticalValueRange || null, sampleType || null, method || null, turnaroundTime || null,
+        status || 'Active', isProfile ? 1 : 0, profileTests ? JSON.stringify(profileTests) : null
+      ]
+    );
+    res.json({ success: true, id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/lab-tests-catalog/:id', async (req, res) => {
+  try {
+    const {
+      name, category, unit, normalRange, price,
+      referenceRangeMale, referenceRangeFemale, referenceRangeChild,
+      criticalValueRange, sampleType, method, turnaroundTime,
+      status, isProfile, profileTests
+    } = req.body;
+
+    await pool.execute(
+      `UPDATE LabTestsCatalog SET 
+        Name = ?, Category = ?, Unit = ?, NormalRange = ?, Price = ?,
+        ReferenceRangeMale = ?, ReferenceRangeFemale = ?, ReferenceRangeChild = ?,
+        CriticalValueRange = ?, SampleType = ?, Method = ?, TurnaroundTime = ?,
+        Status = ?, IsProfile = ?, ProfileTests = ?
+       WHERE ID = ?`,
+      [
+        name, category, unit, normalRange, price || 0,
+        referenceRangeMale || null, referenceRangeFemale || null, referenceRangeChild || null,
+        criticalValueRange || null, sampleType || null, method || null, turnaroundTime || null,
+        status || 'Active', isProfile ? 1 : 0, profileTests ? JSON.stringify(profileTests) : null,
+        req.params.id
+      ]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/lab-tests-catalog/:id', async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM LabTestsCatalog WHERE ID = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 app.get('/api/patient-services', async (req, res) => {
   try {
@@ -1477,6 +1657,7 @@ const ALL_PERMISSIONS = [
   { key: 'page_pharmacy', label: 'Pharmacy', group: 'Pages' },
   { key: 'page_prescriptions', label: 'Prescriptions', group: 'Pages' },
   { key: 'page_lab_results', label: 'Lab Results', group: 'Pages' },
+  { key: 'page_lab_management', label: 'Lab Management', group: 'Pages' },
   { key: 'page_users', label: 'User Management', group: 'Pages' },
   { key: 'page_expenses', label: 'Daily Expenses', group: 'Pages' },
   { key: 'page_settings', label: 'Settings', group: 'Pages' },
@@ -1825,7 +2006,7 @@ const getStatusPage = (req, res) => {
   const statusText = dbConnected ? 'Connected' : 'Disconnected';
 
   const html = `
-  <!DOCTYPE html>
+    < !DOCTYPE html >
     <html>
       <head>
         <title>HMS Backend Status</title>
@@ -1848,7 +2029,7 @@ const getStatusPage = (req, res) => {
 
           <div style="background: #fffbeb; border: 1px solid #fef3c7; color: #92400e; padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; font-size: 0.875rem; text-align: center; font-weight: 600; line-height: 1.5;">
             🚧 Deployment is in progress.<br>
-            Please refresh this page in a few minutes.
+              Please refresh this page in a few minutes.
           </div>
 
           <div class="status-container">
