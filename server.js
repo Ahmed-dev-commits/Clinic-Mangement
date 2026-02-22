@@ -1666,6 +1666,9 @@ const ALL_PERMISSIONS = [
   { key: 'btn_edit_patient', label: 'Edit Patient', group: 'Actions' },
   { key: 'btn_delete_patient', label: 'Delete Patient', group: 'Actions' },
   { key: 'btn_manage_stock', label: 'Manage Stock', group: 'Actions' },
+  { key: 'btn_add_lab_test', label: 'Add Lab Test', group: 'Actions' },
+  { key: 'btn_edit_lab_test', label: 'Edit Lab Test', group: 'Actions' },
+  { key: 'btn_delete_lab_test', label: 'Delete Lab Test', group: 'Actions' },
 ];
 
 // GET /api/permissions - list all available permission keys
