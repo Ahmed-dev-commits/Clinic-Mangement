@@ -7,8 +7,16 @@ const fs = require('fs');
 const path = require('path');
 
 // Standard .env loading
+const envPath = path.join(__dirname, '.env');
+const envExists = fs.existsSync(envPath);
 require('dotenv').config();
-console.log('✅ Loaded environment configuration');
+
+console.log('-------------------------------------------');
+console.log('🚀 SERVER STARTING...');
+console.log(`📂 Current Directory: ${__dirname}`);
+console.log(`📄 .env file found: ${envExists ? 'YES' : 'NO'}`);
+console.log(`📡 PORT configured: ${process.env.PORT || '3001 (Default)'}`);
+console.log('-------------------------------------------');
 
 const express = require('express');
 const cors = require('cors');
@@ -22,14 +30,25 @@ const originalConsoleLog = console.log;
 const originalConsoleError = console.error;
 
 function logToFile(type, args) {
-  const message = args.map(arg => (typeof arg === 'object' ? JSON.stringify(arg) : String(arg))).join(' ');
-  const timestamp = new Date().toISOString();
-  const logLine = `[${timestamp}] [${type}] ${message}\n`;
+  try {
+    const message = args.map(arg => {
+      try {
+        return (typeof arg === 'object' ? JSON.stringify(arg) : String(arg));
+      } catch (e) {
+        return "[Unserializable Object]";
+      }
+    }).join(' ');
 
-  // Append to file asynchronously
-  fs.appendFile(logFile, logLine, (err) => {
-    // Fail silently to avoid infinite loops if logging fails
-  });
+    const timestamp = new Date().toISOString();
+    const logLine = `[${timestamp}] [${type}] ${message}\n`;
+
+    // Append to file asynchronously
+    fs.appendFile(logFile, logLine, (err) => {
+      // Fail silently to avoid infinite loops if logging fails
+    });
+  } catch (e) {
+    // Ultimate fallback if even the above fails
+  }
 }
 
 console.log = (...args) => {
@@ -57,13 +76,15 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('🔥 Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-// Disable caching for all API routes
-app.use((req, res, next) => {
+// 1. Strict No-Cache for API routes
+app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
   next();
 });
+
+// 2. Intelligent caching for Static Files (applied later)
 
 // MySQL connection pool
 let pool;
@@ -2174,18 +2195,17 @@ app.get('/api/status', getStatusPage);
 app.get('/favicon.ico', (req, res) => res.status(204).end());
 
 // ============ SERVE REACT FRONTEND ============
-// Check multiple possible locations for the frontend build to support various Hostinger setups
+// This hybrid logic ensures the frontend works regardless of whether backend is 
+// in the same folder as the build, or in a sibling nodejs/public_html structure.
 const possiblePaths = [
-  __dirname,                                                 // Flat deployment: index.html is right next to server.js
-  path.join(__dirname, 'dist'),                              // Flat deployment: dist folder is next to server.js
-  path.join(__dirname, 'build'),                             // Flat deployment: build folder is next to server.js
-  path.join(__dirname, 'public'),                            // Generic fallback
-  path.join(__dirname, '..', 'public_html'),                 // Backend in nodejs, frontend in public_html
-  path.join(__dirname, '..', 'public_html', 'dist'),         // Backend in nodejs, frontend in public_html/dist
-  path.join(__dirname, '..', 'public_html', 'build')         // Backend in nodejs, frontend in public_html/build
+  path.join(__dirname, '..', 'public_html', 'dist'),          // Sibling public_html (Previous structure)
+  path.join(__dirname, 'dist'),                              // Local dist folder (Flash/NodeJS folder)
+  path.join(__dirname, '..', 'public_html'),                 // Sibling public_html root
+  path.join(__dirname, 'build'),                             // Local build folder
+  __dirname                                                  // Flat in current folder
 ];
 
-let publicHtmlDistPath = path.join(__dirname, 'dist'); // Default fallback
+let publicHtmlDistPath = path.join(__dirname, '..', 'public_html', 'dist'); // Default fallback
 let publicHtmlIndexPath = path.join(publicHtmlDistPath, 'index.html');
 
 for (const p of possiblePaths) {
@@ -2193,15 +2213,24 @@ for (const p of possiblePaths) {
   if (fs.existsSync(indexPath)) {
     publicHtmlDistPath = p;
     publicHtmlIndexPath = indexPath;
+    console.log('📂 Frontend Dist Path found at:', p);
     break;
   }
 }
 
-// Log the path we found (for debugging)
-console.log('📂 Frontend Dist Path resolved to:', publicHtmlDistPath);
+// 1. Serve Static Assets (JS, CSS, Images, Fonts) with long-term caching
+// Since Vite uses content hashing, it's safe to cache these indefinitely.
+app.use('/assets', express.static(path.join(publicHtmlDistPath, 'assets'), {
+  immutable: true,
+  maxAge: '1y',
+  etag: true
+}));
 
-// 1. Serve Static Assets (JS, CSS, Images)
-app.use(express.static(publicHtmlDistPath));
+// 2. Serve other static files (robots.txt, etc.)
+app.use(express.static(publicHtmlDistPath, {
+  index: false, // We handle index.html manually below
+  etag: true
+}));
 
 // 2. SPA Fallback / Status Page
 app.get('*', (req, res) => {
@@ -2209,8 +2238,9 @@ app.get('*', (req, res) => {
     return res.status(404).json({ error: 'API endpoint not found' });
   }
 
-  // Dynamic check: Does index.html exist RIGHT NOW?
   if (fs.existsSync(publicHtmlIndexPath)) {
+    // ALWAYS set index.html to no-cache so the browser checks for updates
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
     res.sendFile(publicHtmlIndexPath);
   } else {
     // If missing, show the "Deployment in Progress" status page
