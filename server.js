@@ -567,6 +567,27 @@ async function initializeDatabase() {
 
     console.log('✅ Prescriptions table schema updated');
 
+    // GenericMedicines table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS GenericMedicines (
+        ID INT AUTO_INCREMENT PRIMARY KEY,
+        Name VARCHAR(255) NOT NULL,
+        Category VARCHAR(100),
+        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    
+    const [genericCount] = await pool.execute('SELECT COUNT(*) as count FROM GenericMedicines');
+    if (genericCount[0].count === 0) {
+      console.log('⚡ Auto-seeding 201 Generic Medicines...');
+      const meds = [{"Name":"Acefyl Syrup","Category":"Syrup"},{"Name":"Aldomet (Methyldopa) 250mg Tablet","Category":"Tablet"},{"Name":"Amaryl (Glimepiride) 1mg Tablet","Category":"Tablet"},{"Name":"Amaryl (Glimepiride) 2mg Tablet","Category":"Tablet"},{"Name":"Amaryl (Glimepiride) 3mg Tablet","Category":"Tablet"},{"Name":"Amikacin (Amikin) 500mg IV/IM","Category":"Injection"},{"Name":"Aminoplasmal (Amino Acids) Infusion 500ml (Drip)","Category":"Liquid"},{"Name":"Amoxil (Amoxicillin) 250mg Capsule","Category":"Capsule"},{"Name":"Amoxil (Amoxicillin) 500mg Capsule","Category":"Capsule"},{"Name":"Amoxil Drops (100mg/ml)","Category":"Syrup"},{"Name":"Atropine Sulphate 1mg/ml Ampoule","Category":"Injection"},{"Name":"Atrovent (Ipratropium) Nebulizer Solution","Category":"Liquid"},{"Name":"Augmentin (Amoxicillin/Clavulanate) 1g Tablet","Category":"Tablet"},{"Name":"Augmentin (Amoxicillin/Clavulanate) 375mg Tablet","Category":"Tablet"},{"Name":"Augmentin (Amoxicillin/Clavulanate) 625mg Tablet","Category":"Tablet"},{"Name":"Augmentin Suspension (156mg/5ml)","Category":"Syrup"},{"Name":"Augmentin Suspension (312mg/5ml)","Category":"Syrup"},{"Name":"Avil (Pheniramine) 22.7mg/2ml IM/IV","Category":"Injection"},{"Name":"Betnesol Eye/Ear Drops","Category":"Liquid"},{"Name":"Betnovate (Betamethasone) Cream","Category":"Cream"},{"Name":"Brufen (Ibuprofen) 400mg Tablet","Category":"Tablet"},{"Name":"Brufen Syrup (100mg/5ml)","Category":"Syrup"},{"Name":"Buscopan (Hyoscine) 10mg Tablet","Category":"Tablet"},{"Name":"Buscopan (Hyoscine) 20mg/ml IM/IV","Category":"Injection"},{"Name":"Cac-1000 Plus (Calcium) Effervescent Tablet","Category":"Tablet"},{"Name":"Calcium Gluconate 10% 10ml Ampoule","Category":"Injection"},{"Name":"Calpol Syrup (120mg/5ml)","Category":"Syrup"},{"Name":"Canesten (Clotrimazole) Vaginal Tablet","Category":"Tablet"},{"Name":"Cataflam (Diclofenac Potassium) 50mg Tablet","Category":"Tablet"},{"Name":"Ciproxin (Ciprofloxacin) 200mg/100ml Infusion (Drip)","Category":"Liquid"},{"Name":"Ciproxin (Ciprofloxacin) 250mg Tablet","Category":"Tablet"},{"Name":"Ciproxin (Ciprofloxacin) 500mg Tablet","Category":"Tablet"},{"Name":"Claforan (Cefotaxime) 1g IV","Category":"Injection"},{"Name":"Clenil (Beclomethasone) Inhaler","Category":"Liquid"},{"Name":"Clomid (Clomiphene Citrate) 50mg Tablet","Category":"Tablet"},{"Name":"Concor (Bisoprolol) 5mg Tablet","Category":"Tablet"},{"Name":"Cotton Roll 400g","Category":"Supplies"},{"Name":"Cranmax Sachet","Category":"Other"},{"Name":"Crepe Bandage 3-inch","Category":"Supplies"},{"Name":"Cyclogest (Progesterone) 200mg Pessary","Category":"Tablet"},{"Name":"Cyclogest (Progesterone) 400mg Pessary","Category":"Tablet"},{"Name":"Cytotec (Misoprostol) 200mcg Tablet","Category":"Tablet"},{"Name":"D-Watson (Vitamin D3) 200,000 IU Injection/Ampoule","Category":"Injection"},{"Name":"Daktarin (Miconazole) Oral Gel","Category":"Cream"},{"Name":"Dermovate (Clobetasol) Cream","Category":"Cream"},{"Name":"Dexacort (Dexamethasone) 4mg/ml IM/IV","Category":"Injection"},{"Name":"Dexacort (Dexamethasone) 4mg/ml Injection (Maturity)","Category":"Injection"},{"Name":"Dextrose 10% Water (D10W) 500ml (Drip)","Category":"Liquid"},{"Name":"Dextrose 25% Water (D25W) 20ml Ampoule","Category":"Liquid"},{"Name":"Dextrose 5% Water (D5W) 1000ml (Drip)","Category":"Liquid"},{"Name":"Dextrose 5% Water (D5W) 500ml (Drip)","Category":"Liquid"},{"Name":"Dextrose Saline (D5 1/2NS) 1000ml (Drip)","Category":"Liquid"},{"Name":"Diazepam (Valium) 10mg/2ml Injection","Category":"Injection"},{"Name":"Dicloran (Diclofenac) 50mg Suppository","Category":"Tablet"},{"Name":"Disprin (Aspirin) 300mg Soluble Tablet","Category":"Tablet"},{"Name":"Duphalac (Lactulose) Syrup","Category":"Syrup"},{"Name":"Duphaston (Dydrogesterone) 10mg Tablet","Category":"Tablet"},{"Name":"Epinephrine (Adrenaline) 1mg/ml Ampoule","Category":"Injection"},{"Name":"Erythrocin (Erythromycin) 250mg Tablet","Category":"Tablet"},{"Name":"Fasigyn (Tinidazole) 500mg Tablet","Category":"Tablet"},{"Name":"Fefol Vit Capsule","Category":"Capsule"},{"Name":"Feris (Iron) Syrup","Category":"Syrup"},{"Name":"Fexet (Fexofenadine) 120mg Tablet","Category":"Tablet"},{"Name":"Fexet (Fexofenadine) 60mg Tablet","Category":"Tablet"},{"Name":"Flagyl (Metronidazole) 200mg Tablet","Category":"Tablet"},{"Name":"Flagyl (Metronidazole) 400mg Tablet","Category":"Tablet"},{"Name":"Flagyl (Metronidazole) 500mg/100ml Infusion (Drip)","Category":"Liquid"},{"Name":"Flagyl Suspension (200mg/5ml)","Category":"Syrup"},{"Name":"Folgard Tablet","Category":"Tablet"},{"Name":"Folic Acid 5mg Tablet","Category":"Tablet"},{"Name":"Fucicort (Fusidic Acid/Betamethasone) Cream","Category":"Cream"},{"Name":"Fucidin (Fusidic Acid) Cream 2%","Category":"Cream"},{"Name":"Gauze Swab Pack","Category":"Supplies"},{"Name":"Gaviscon Syrup","Category":"Syrup"},{"Name":"Gelofusine Infusion 500ml (Drip)","Category":"Liquid"},{"Name":"Gentamicin (Garamycin) 80mg/2ml IV/IM","Category":"Injection"},{"Name":"Glucophage (Metformin) 500mg Tablet","Category":"Tablet"},{"Name":"Glucophage (Metformin) 850mg Tablet","Category":"Tablet"},{"Name":"Glucovance 500/5mg Tablet","Category":"Tablet"},{"Name":"Gravibinon Injection","Category":"Injection"},{"Name":"Gravinate (Dimenhydrinate) 50mg Tablet","Category":"Tablet"},{"Name":"Gravinate (Dimenhydrinate) 50mg/ml IM/IV","Category":"Injection"},{"Name":"Gravinate Syrup","Category":"Syrup"},{"Name":"Gyno-Daktarin (Miconazole) Vaginal Cream","Category":"Cream"},{"Name":"Haemaccel Infusion 500ml (Drip)","Category":"Liquid"},{"Name":"Humulin 70/30 (Insulin) 100IU/ml","Category":"Injection"},{"Name":"Hydrozole (Hydrocortisone/Clotrimazole) Cream","Category":"Cream"},{"Name":"Hydryllin Syrup","Category":"Syrup"},{"Name":"Iberet Folic 500 Tablet","Category":"Tablet"},{"Name":"Inderal (Propranolol) 10mg Tablet","Category":"Tablet"},{"Name":"Inderal (Propranolol) 40mg Tablet","Category":"Tablet"},{"Name":"IV Branula (Cannula) 20G (Pink)","Category":"Equipment"},{"Name":"IV Branula (Cannula) 22G (Blue)","Category":"Equipment"},{"Name":"IV Branula (Cannula) 24G (Yellow)","Category":"Equipment"},{"Name":"Ketanov (Ketorolac) 30mg/ml Injection","Category":"Injection"},{"Name":"Kytril (Granisetron) 1mg/1ml Injection","Category":"Injection"},{"Name":"Kytril (Granisetron) 3mg/3ml Injection","Category":"Injection"},{"Name":"Lantus (Insulin Glargine) 100IU/ml","Category":"Injection"},{"Name":"Lasix (Furosemide) 20mg/2ml Injection","Category":"Injection"},{"Name":"Leflox (Levofloxacin) 250mg Tablet","Category":"Tablet"},{"Name":"Leflox (Levofloxacin) 500mg Tablet","Category":"Tablet"},{"Name":"Leflox (Levofloxacin) 500mg/100ml Infusion (Drip)","Category":"Liquid"},{"Name":"Letrozole 2.5mg Tablet","Category":"Tablet"},{"Name":"Lilac (Lactulose) Syrup","Category":"Syrup"},{"Name":"Lipget (Atorvastatin) 10mg Tablet","Category":"Tablet"},{"Name":"Lipget (Atorvastatin) 20mg Tablet","Category":"Tablet"},{"Name":"Magnesium Sulphate 50% Injection","Category":"Injection"},{"Name":"Mannitol 20% Infusion 500ml (Drip)","Category":"Liquid"},{"Name":"Maxolon (Metoclopramide) 10mg/2ml Injection","Category":"Injection"},{"Name":"Meropenem (Meronem) 1g IV","Category":"Injection"},{"Name":"Meropenem (Meronem) 500mg IV","Category":"Injection"},{"Name":"Methergin (Methylergometrine) 0.125mg Tablet","Category":"Tablet"},{"Name":"Methergin (Methylergometrine) 0.2mg Injection","Category":"Injection"},{"Name":"Methopt Eye Drops","Category":"Liquid"},{"Name":"Methycobal (Mecobalamin) 500mcg Injection","Category":"Injection"},{"Name":"Midazolam (Dormicum) 15mg/3ml Injection","Category":"Injection"},{"Name":"Mixtard 30 (Insulin) 100IU/ml","Category":"Injection"},{"Name":"Monurol (Fosfomycin) 3g Sachet","Category":"Other"},{"Name":"Morphine Sulphate 15mg/ml Injection","Category":"Injection"},{"Name":"Motilium (Domperidone) 10mg Tablet","Category":"Tablet"},{"Name":"Motilium Suspension","Category":"Syrup"},{"Name":"Mucaine Gel Syrup","Category":"Syrup"},{"Name":"Nalbuphine (Nubain) 10mg/ml Injection","Category":"Injection"},{"Name":"Neo-Penotran Forte Vaginal Suppository","Category":"Tablet"},{"Name":"Neurobion Injection","Category":"Injection"},{"Name":"Nexum (Esomeprazole) 20mg Capsule","Category":"Capsule"},{"Name":"Nexum (Esomeprazole) 40mg Capsule","Category":"Capsule"},{"Name":"Nexum (Esomeprazole) 40mg IV","Category":"Injection"},{"Name":"Nifedipine (Adalat) 10mg Tablet","Category":"Tablet"},{"Name":"No-Spa 40mg Tablet","Category":"Tablet"},{"Name":"Normal Saline (0.9% NaCl) 1000ml (Drip)","Category":"Liquid"},{"Name":"Normal Saline (0.9% NaCl) 100ml (Drip)","Category":"Liquid"},{"Name":"Normal Saline (0.9% NaCl) 500ml (Drip)","Category":"Liquid"},{"Name":"Norvasc (Amlodipine) 10mg Tablet","Category":"Tablet"},{"Name":"Norvasc (Amlodipine) 5mg Tablet","Category":"Tablet"},{"Name":"ORS (Oral Rehydration Salts) Sachet","Category":"Other"},{"Name":"Ostocalcium Tablet","Category":"Tablet"},{"Name":"Panadol (Paracetamol) 500mg Tablet","Category":"Tablet"},{"Name":"Panadol CF Tablet","Category":"Tablet"},{"Name":"Panadol Extra 500/65mg Tablet","Category":"Tablet"},{"Name":"Panadol Syrup (120mg/5ml)","Category":"Syrup"},{"Name":"Paracetamol 1g/100ml Infusion (Drip)","Category":"Liquid"},{"Name":"Phenergan (Promethazine) 25mg/ml Injection","Category":"Injection"},{"Name":"Polyfax Eye Ointment","Category":"Cream"},{"Name":"Ponstan (Mefenamic Acid) 250mg Tablet","Category":"Tablet"},{"Name":"Ponstan Forte 500mg Tablet","Category":"Tablet"},{"Name":"Pregnacare Plus Tablet","Category":"Tablet"},{"Name":"Proluton Depot (Hydroxyprogesterone) 250mg Injection","Category":"Injection"},{"Name":"Proluton Depot (Hydroxyprogesterone) 500mg Injection","Category":"Injection"},{"Name":"Prostin E2 (Dinoprostone) Vaginal Tablet","Category":"Tablet"},{"Name":"Pulmonol Syrup","Category":"Syrup"},{"Name":"Pyodine (Povidone-Iodine) Solution 10%","Category":"Liquid"},{"Name":"Quench Cream","Category":"Cream"},{"Name":"Rabies Vaccine (ARV) 0.5ml IM","Category":"Injection"},{"Name":"Rigix (Cetirizine) 10mg Tablet","Category":"Tablet"},{"Name":"Rigix Syrup (5mg/5ml)","Category":"Syrup"},{"Name":"Ringer Lactate (RL) 1000ml (Drip)","Category":"Liquid"},{"Name":"Ringer Lactate (RL) 500ml (Drip)","Category":"Liquid"},{"Name":"Risek (Omeprazole) 20mg Capsule","Category":"Capsule"},{"Name":"Risek (Omeprazole) 40mg Capsule","Category":"Capsule"},{"Name":"Risek (Omeprazole) 40mg IV","Category":"Injection"},{"Name":"Rocephin (Ceftriaxone) 1g IV","Category":"Injection"},{"Name":"Rocephin (Ceftriaxone) 250mg IM","Category":"Injection"},{"Name":"Rocephin (Ceftriaxone) 500mg IM","Category":"Injection"},{"Name":"Sancos Syrup","Category":"Syrup"},{"Name":"Sangobion Capsule","Category":"Capsule"},{"Name":"Softin (Loratadine) 10mg Tablet","Category":"Tablet"},{"Name":"Solu-Cortef (Hydrocortisone) 100mg IV","Category":"Injection"},{"Name":"Solu-Cortef (Hydrocortisone) 250mg IV","Category":"Injection"},{"Name":"Spasler P Tablet","Category":"Tablet"},{"Name":"Sunny D (Vitamin D3) 200,000 IU Capsule","Category":"Capsule"},{"Name":"Surbex T Tablet","Category":"Tablet"},{"Name":"Surbex Z Syrup","Category":"Syrup"},{"Name":"Surgical Spirit (Rubbing Alcohol)","Category":"Liquid"},{"Name":"Syntocinon (Oxytocin) 5 IU Injection","Category":"Injection"},{"Name":"Syringe 3cc / 5cc","Category":"Equipment"},{"Name":"Tansin 0.4mg Capsule","Category":"Capsule"},{"Name":"Tazocin (Piperacillin/Tazobactam) 4.5g IV","Category":"Injection"},{"Name":"Tetanus Toxoid (TT) 0.5ml IM","Category":"Injection"},{"Name":"Theragram M Tablet","Category":"Tablet"},{"Name":"Tramal (Tramadol) 100mg/2ml Injection","Category":"Injection"},{"Name":"Tramal (Tramadol) 50mg/ml Injection","Category":"Injection"},{"Name":"Trandate (Labetalol) 200mg Tablet","Category":"Tablet"},{"Name":"Transamine (Tranexamic Acid) 250mg Injection","Category":"Injection"},{"Name":"Transamine (Tranexamic Acid) 500mg Capsule","Category":"Capsule"},{"Name":"Transamine 250mg/5ml IV","Category":"Injection"},{"Name":"Velosef (Cephradine) 250mg Capsule","Category":"Capsule"},{"Name":"Velosef (Cephradine) 500mg Capsule","Category":"Capsule"},{"Name":"Ventolin (Salbutamol) Respirator Solution","Category":"Liquid"},{"Name":"Voltral (Diclofenac Sodium) 50mg Tablet","Category":"Tablet"},{"Name":"Voltral (Diclofenac) 75mg/3ml IM","Category":"Injection"},{"Name":"Voltral (Diclofenac) Emulgel","Category":"Cream"},{"Name":"Voluven (HES) Infusion 500ml (Drip)","Category":"Liquid"},{"Name":"Xplended (Rosuvastatin) 10mg Tablet","Category":"Tablet"},{"Name":"Xylometazoline (Otrivin) Nasal Drops","Category":"Liquid"},{"Name":"Zantac (Ranitidine) 150mg Tablet","Category":"Tablet"},{"Name":"Zithromax (Azithromycin) 250mg Capsule","Category":"Capsule"},{"Name":"Zithromax (Azithromycin) 500mg Tablet","Category":"Tablet"},{"Name":"Zofran (Ondansetron) 4mg/2ml Injection","Category":"Injection"},{"Name":"Zofran (Ondansetron) 8mg/4ml Injection","Category":"Injection"},{"Name":"Zyrtec Syrup (5mg/5ml)","Category":"Syrup"}];
+      for(const med of meds) {
+        await pool.execute('INSERT IGNORE INTO GenericMedicines (Name, Category) VALUES (?, ?)', [med.Name, med.Category]);
+      }
+      console.log('✅ Generic Medicines seeded');
+    }
+
     console.log('✅ Database tables initialized');
     dbConnected = true;
   } catch (error) {
@@ -656,6 +677,87 @@ app.put('/api/settings/:id', async (req, res) => {
       [id, category, JSON.stringify(data)]
     );
 
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ GENERIC MEDICINES API ============
+
+// Get all generic medicines
+app.get('/api/generic-medicines', async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM GenericMedicines ORDER BY Name ASC');
+    res.json(rows.map(convertRowDates));
+  } catch (error) {
+    console.error('Error fetching generic medicines:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Add a single generic medicine
+app.post('/api/generic-medicines', async (req, res) => {
+  try {
+    const { name, category } = req.body;
+    const [result] = await pool.execute(
+      'INSERT INTO GenericMedicines (Name, Category) VALUES (?, ?)',
+      [name, category || 'Other']
+    );
+    res.json({ id: result.insertId, name, category, success: true });
+  } catch (error) {
+    console.error('Error adding generic medicine:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Add multiple generic medicines (for initial seeding)
+app.post('/api/generic-medicines/bulk', async (req, res) => {
+  try {
+    const { medicines } = req.body;
+    if (!Array.isArray(medicines) || medicines.length === 0) {
+      return res.status(400).json({ error: 'Invalid medicines array' });
+    }
+
+    let count = 0;
+    for (const med of medicines) {
+      // Check if exists
+      const [existing] = await pool.execute('SELECT ID FROM GenericMedicines WHERE Name = ?', [med.name]);
+      if (existing.length === 0) {
+        await pool.execute(
+          'INSERT INTO GenericMedicines (Name, Category) VALUES (?, ?)',
+          [med.name, med.category || 'Other']
+        );
+        count++;
+      }
+    }
+    res.json({ success: true, count, message: `Successfully seeded ${count} medicines.` });
+  } catch (error) {
+    console.error('Error bulk adding generic medicines:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete generic medicine
+app.delete('/api/generic-medicines/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    await pool.execute('DELETE FROM GenericMedicines WHERE ID = ?', [id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update generic medicine
+app.put('/api/generic-medicines/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { name, category } = req.body;
+    await pool.execute(
+      'UPDATE GenericMedicines SET Name = ?, Category = ? WHERE ID = ?',
+      [name, category, id]
+    );
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
