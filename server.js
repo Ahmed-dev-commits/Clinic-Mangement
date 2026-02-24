@@ -617,6 +617,35 @@ async function initializeDatabase() {
     }
 
     console.log('✅ Database tables initialized');
+
+    // ============ PERFORMANCE INDEXING (100K+ SCALING) ============
+    console.log('⚡ Optimizing database with performance indexes...');
+    const tablesToIndex = [
+      { name: 'Patients', indexes: ['Name', 'Phone', 'MRN', 'CreatedAt'] },
+      { name: 'Prescriptions', indexes: ['PatientID', 'CreatedAt', 'Status'] },
+      { name: 'LabResults', indexes: ['PatientID', 'CreatedAt', 'Status'] },
+      { name: 'Payments', indexes: ['PatientID', 'CreatedAt'] },
+      { name: 'DailyExpenses', indexes: ['Date', 'Category'] },
+      { name: 'PatientServices', indexes: ['PatientID', 'CreatedAt'] }
+    ];
+
+    for (const table of tablesToIndex) {
+      for (const col of table.indexes) {
+        try {
+          const indexName = `idx_${table.name.toLowerCase()}_${col.toLowerCase()}`;
+          // MySQL doesn't have CREATE INDEX IF NOT EXISTS, so we catch the error if it exists
+          await pool.execute(`CREATE INDEX ${indexName} ON ${table.name} (${col})`);
+          console.log(`🔹 Created index ${indexName} on ${table.name}(${col})`);
+        } catch (idxError) {
+          // Error 1061 is "Duplicate key name" (index already exists)
+          if (idxError.errno !== 1061) {
+            console.warn(`⚠️ Could not create index on ${table.name}.${col}:`, idxError.message);
+          }
+        }
+      }
+    }
+    console.log('✅ Performance indexing complete');
+
     dbConnected = true;
   } catch (error) {
     console.error('❌ Failed to connect to database:', error);
@@ -799,6 +828,11 @@ app.get('/api/patients', async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
     const search = req.query.search || '';
+    const hasPrescriptionsOnly = req.query.hasPrescriptionsOnly === 'true';
+    const hasFinalizedOnly = req.query.hasFinalizedOnly === 'true';
+    const fromDate = req.query.fromDate; // Expected format: YYYY-MM-DD
+    const toDate = req.query.toDate;     // Expected format: YYYY-MM-DD
+    const recent24h = req.query.recent24h === 'true';
     const offset = (page - 1) * limit;
 
     let whereClause = '';
@@ -810,12 +844,63 @@ app.get('/api/patients', async (req, res) => {
       params = [searchParam, searchParam, searchParam, searchParam];
     }
 
-    // Filter by CreatedToday if requested
-    if (req.query.createdToday === 'true') {
+    // Filter by CreatedToday or Recent24h if requested (and no custom range/search overrides it)
+    if (recent24h && !fromDate && !toDate && !search) {
       if (whereClause) {
-        whereClause += ' AND DATE(CreatedAt) = CURDATE()';
+        whereClause += ' AND GREATEST(CreatedAt, COALESCE(UpdatedAt, CreatedAt)) >= NOW() - INTERVAL 1 DAY';
       } else {
-        whereClause = 'WHERE DATE(CreatedAt) = CURDATE()';
+        whereClause = 'WHERE GREATEST(CreatedAt, COALESCE(UpdatedAt, CreatedAt)) >= NOW() - INTERVAL 1 DAY';
+      }
+    } else if (req.query.createdToday === 'true') {
+      if (whereClause) {
+        whereClause += ' AND (DATE(CreatedAt) = CURDATE() OR DATE(UpdatedAt) = CURDATE())';
+      } else {
+        whereClause = 'WHERE (DATE(CreatedAt) = CURDATE() OR DATE(UpdatedAt) = CURDATE())';
+      }
+    }
+
+    // Advanced Date Range Filter
+    if (fromDate && toDate) {
+      const condition = 'DATE(CreatedAt) BETWEEN ? AND ?';
+      if (whereClause) {
+        whereClause += ` AND ${condition}`;
+      } else {
+        whereClause = `WHERE ${condition}`;
+      }
+      params.push(fromDate, toDate);
+    } else if (fromDate) {
+      const condition = 'DATE(CreatedAt) >= ?';
+      if (whereClause) {
+        whereClause += ` AND ${condition}`;
+      } else {
+        whereClause = `WHERE ${condition}`;
+      }
+      params.push(fromDate);
+    } else if (toDate) {
+      const condition = 'DATE(CreatedAt) <= ?';
+      if (whereClause) {
+        whereClause += ` AND ${condition}`;
+      } else {
+        whereClause = `WHERE ${condition}`;
+      }
+      params.push(toDate);
+    }
+
+    if (hasPrescriptionsOnly) {
+      const condition = 'EXISTS (SELECT 1 FROM Prescriptions p WHERE p.PatientID = Patients.ID)';
+      if (whereClause) {
+        whereClause += ` AND ${condition}`;
+      } else {
+        whereClause = `WHERE ${condition}`;
+      }
+    }
+
+    if (hasFinalizedOnly) {
+      const condition = "EXISTS (SELECT 1 FROM Prescriptions p WHERE p.PatientID = Patients.ID AND p.Status = 'Finalized')";
+      if (whereClause) {
+        whereClause += ` AND ${condition}`;
+      } else {
+        whereClause = `WHERE ${condition}`;
       }
     }
 
@@ -1152,9 +1237,18 @@ app.delete('/api/stock/:id', async (req, res) => {
 
 app.get('/api/payments', async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT * FROM Payments ORDER BY CreatedAt DESC');
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
 
-    res.json(rows.map(row => {
+    // 1. Get total count
+    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM Payments');
+    const total = countResult[0].total;
+
+    // 2. Get paginated data
+    const [rows] = await pool.execute(`SELECT * FROM Payments ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`);
+
+    const data = rows.map(row => {
       // Parse Items and Medicines BEFORE spreading to preserve them
       const items = row.Items ? JSON.parse(row.Items) : [];
       const medicines = row.Medicines ? JSON.parse(row.Medicines) : [];
@@ -1164,7 +1258,17 @@ app.get('/api/payments', async (req, res) => {
         items,
         medicines
       };
-    }));
+    });
+
+    res.json({
+      data,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1240,8 +1344,12 @@ async function createLabResultsFromPrescription(patientId, patientName, patientA
 
 app.get('/api/prescriptions', async (req, res) => {
   try {
-    const { patientId, status } = req.query;
-    let query = 'SELECT * FROM Prescriptions';
+    const { patientId, status, recent24h } = req.query;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
+    let whereClause = '';
     const params = [];
     const conditions = [];
 
@@ -1255,13 +1363,28 @@ app.get('/api/prescriptions', async (req, res) => {
       params.push(status);
     }
 
-    if (conditions.length > 0) {
-      query += ' WHERE ' + conditions.join(' AND ');
+    if (recent24h === 'true') {
+      const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      conditions.push('CreatedAt >= ?');
+      params.push(dayAgo);
     }
 
-    query += ' ORDER BY CreatedAt DESC';
+    if (conditions.length > 0) {
+      whereClause = ' WHERE ' + conditions.join(' AND ');
+    }
 
-    const [prescriptions] = await pool.execute(query, params);
+    // 1. Get total count
+    const [countResult] = await pool.execute(
+      `SELECT COUNT(*) as total FROM Prescriptions ${whereClause}`,
+      params
+    );
+    const total = countResult[0].total;
+
+    // 2. Get paginated data
+    const [prescriptions] = await pool.execute(
+      `SELECT * FROM Prescriptions ${whereClause} ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`,
+      params
+    );
 
     // MySQL2 auto-parses JSON columns into JS objects when using pool.execute.
     // Guard against double-parsing: only call JSON.parse if the value is still a string.
@@ -1280,7 +1403,15 @@ app.get('/api/prescriptions', async (req, res) => {
       };
     });
 
-    res.json(prescriptionsWithMedicines);
+    res.json({
+      data: prescriptionsWithMedicines,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (error) {
     console.error('Error fetching prescriptions:', error.message);
     res.status(500).json({ error: error.message });
@@ -1510,8 +1641,26 @@ app.delete('/api/clinical-medicines/:id', async (req, res) => {
 
 app.get('/api/lab-results', async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT * FROM LabResults ORDER BY CreatedAt DESC');
-    res.json(rows.map(convertRowDates));
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
+    // 1. Get total count
+    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM LabResults');
+    const total = countResult[0].total;
+
+    // 2. Get paginated data
+    const [rows] = await pool.execute(`SELECT * FROM LabResults ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`);
+
+    res.json({
+      data: rows.map(convertRowDates),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -2089,10 +2238,28 @@ app.post('/api/users/login', async (req, res) => {
 // Get all expenses
 app.get('/api/daily-expenses', async (req, res) => {
   try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
+    // 1. Get total count
+    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM DailyExpenses');
+    const total = countResult[0].total;
+
+    // 2. Get paginated data
     const [rows] = await pool.execute(
-      'SELECT * FROM DailyExpenses ORDER BY Date DESC, CreatedAt DESC'
+      `SELECT * FROM DailyExpenses ORDER BY Date DESC, CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`
     );
-    res.json(rows.map(convertRowDates));
+
+    res.json({
+      data: rows.map(convertRowDates),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
