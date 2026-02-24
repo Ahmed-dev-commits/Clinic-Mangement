@@ -847,21 +847,21 @@ app.get('/api/patients', async (req, res) => {
     // Filter by CreatedToday or Recent24h if requested (and no custom range/search overrides it)
     if (recent24h && !fromDate && !toDate && !search) {
       if (whereClause) {
-        whereClause += ' AND GREATEST(CreatedAt, COALESCE(UpdatedAt, CreatedAt)) >= NOW() - INTERVAL 1 DAY';
+        whereClause += " AND GREATEST(CONVERT_TZ(CreatedAt, '+00:00', '+05:00'), COALESCE(CONVERT_TZ(UpdatedAt, '+00:00', '+05:00'), CONVERT_TZ(CreatedAt, '+00:00', '+05:00'))) >= CONVERT_TZ(NOW(), '+00:00', '+05:00') - INTERVAL 1 DAY";
       } else {
-        whereClause = 'WHERE GREATEST(CreatedAt, COALESCE(UpdatedAt, CreatedAt)) >= NOW() - INTERVAL 1 DAY';
+        whereClause = "WHERE GREATEST(CONVERT_TZ(CreatedAt, '+00:00', '+05:00'), COALESCE(CONVERT_TZ(UpdatedAt, '+00:00', '+05:00'), CONVERT_TZ(CreatedAt, '+00:00', '+05:00'))) >= CONVERT_TZ(NOW(), '+00:00', '+05:00') - INTERVAL 1 DAY";
       }
     } else if (req.query.createdToday === 'true') {
       if (whereClause) {
-        whereClause += ' AND (DATE(CreatedAt) = CURDATE() OR DATE(UpdatedAt) = CURDATE())';
+        whereClause += " AND (DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) = DATE(CONVERT_TZ(NOW(), '+00:00', '+05:00')) OR DATE(CONVERT_TZ(UpdatedAt, '+00:00', '+05:00')) = DATE(CONVERT_TZ(NOW(), '+00:00', '+05:00')))";
       } else {
-        whereClause = 'WHERE (DATE(CreatedAt) = CURDATE() OR DATE(UpdatedAt) = CURDATE())';
+        whereClause = "WHERE (DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) = DATE(CONVERT_TZ(NOW(), '+00:00', '+05:00')) OR DATE(CONVERT_TZ(UpdatedAt, '+00:00', '+05:00')) = DATE(CONVERT_TZ(NOW(), '+00:00', '+05:00')))";
       }
     }
 
     // Advanced Date Range Filter
     if (fromDate && toDate) {
-      const condition = 'DATE(CreatedAt) BETWEEN ? AND ?';
+      const condition = "DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) BETWEEN ? AND ?";
       if (whereClause) {
         whereClause += ` AND ${condition}`;
       } else {
@@ -869,7 +869,7 @@ app.get('/api/patients', async (req, res) => {
       }
       params.push(fromDate, toDate);
     } else if (fromDate) {
-      const condition = 'DATE(CreatedAt) >= ?';
+      const condition = "DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) >= ?";
       if (whereClause) {
         whereClause += ` AND ${condition}`;
       } else {
@@ -877,7 +877,7 @@ app.get('/api/patients', async (req, res) => {
       }
       params.push(fromDate);
     } else if (toDate) {
-      const condition = 'DATE(CreatedAt) <= ?';
+      const condition = "DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) <= ?";
       if (whereClause) {
         whereClause += ` AND ${condition}`;
       } else {
@@ -1390,9 +1390,7 @@ app.get('/api/prescriptions', async (req, res) => {
     }
 
     if (recent24h === 'true') {
-      const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-      conditions.push('CreatedAt >= ?');
-      params.push(dayAgo);
+      conditions.push("CreatedAt >= CONVERT_TZ(NOW(), '+00:00', '+05:00') - INTERVAL 1 DAY");
     }
 
     if (conditions.length > 0) {
@@ -1866,13 +1864,17 @@ app.post('/api/patient-services', async (req, res) => {
       // Update Patient record
       await pool.execute(
         'UPDATE Patients SET UpdatedAt = ?, VisitDate = ? WHERE ID = ?',
-        [now, now, patientId]
+        [now, pktVisitDate, patientId]
       );
 
       // Create new Visit record
+      // Get current date in PKT format YYYY-MM-DD
+      const [pktDateResult] = await pool.execute("SELECT DATE(CONVERT_TZ(NOW(), '+00:00', '+05:00')) as pktDate");
+      const pktVisitDate = pktDateResult[0].pktDate;
+
       await pool.execute(
         'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
-        [patientId, now, 'Revisit - New Service', now]
+        [patientId, pktVisitDate, 'Revisit - New Service', now]
       );
     }
 
