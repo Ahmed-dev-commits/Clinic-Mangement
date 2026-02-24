@@ -1252,13 +1252,13 @@ app.get('/api/payments', async (req, res) => {
     if (recent24h && !fromDate && !toDate) {
       whereClause = 'WHERE CreatedAt >= NOW() - INTERVAL 1 DAY';
     } else if (fromDate && toDate) {
-      whereClause = 'WHERE DATE(CreatedAt) BETWEEN ? AND ?';
+      whereClause = "WHERE DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) BETWEEN ? AND ?";
       params.push(fromDate, toDate);
     } else if (fromDate) {
-      whereClause = 'WHERE DATE(CreatedAt) >= ?';
+      whereClause = "WHERE DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) >= ?";
       params.push(fromDate);
     } else if (toDate) {
-      whereClause = 'WHERE DATE(CreatedAt) <= ?';
+      whereClause = "WHERE DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) <= ?";
       params.push(toDate);
     }
 
