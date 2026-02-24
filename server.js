@@ -1241,12 +1241,37 @@ app.get('/api/payments', async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
     const offset = (page - 1) * limit;
 
-    // 1. Get total count
-    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM Payments');
-    const total = countResult[0].total;
+    // Filters
+    const recent24h = req.query.recent24h === 'true';
+    const fromDate = req.query.fromDate; // Expected format: YYYY-MM-DD
+    const toDate = req.query.toDate;     // Expected format: YYYY-MM-DD
+
+    let whereClause = '';
+    let params = [];
+
+    if (recent24h && !fromDate && !toDate) {
+      whereClause = 'WHERE CreatedAt >= NOW() - INTERVAL 1 DAY';
+    } else if (fromDate && toDate) {
+      whereClause = 'WHERE DATE(CreatedAt) BETWEEN ? AND ?';
+      params.push(fromDate, toDate);
+    } else if (fromDate) {
+      whereClause = 'WHERE DATE(CreatedAt) >= ?';
+      params.push(fromDate);
+    } else if (toDate) {
+      whereClause = 'WHERE DATE(CreatedAt) <= ?';
+      params.push(toDate);
+    }
+
+    // 1. Get total count and sum of collections
+    const [summaryResult] = await pool.execute(`SELECT COUNT(*) as total, SUM(TotalAmount) as totalCollection FROM Payments ${whereClause}`, params);
+    const total = summaryResult[0].total;
+    const totalCollection = summaryResult[0].totalCollection || 0;
 
     // 2. Get paginated data
-    const [rows] = await pool.execute(`SELECT * FROM Payments ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`);
+    const [rows] = await pool.execute(
+      `SELECT * FROM Payments ${whereClause} ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`,
+      params
+    );
 
     const data = rows.map(row => {
       // Parse Items and Medicines BEFORE spreading to preserve them
@@ -1266,7 +1291,8 @@ app.get('/api/payments', async (req, res) => {
         total,
         page,
         limit,
-        totalPages: Math.ceil(total / limit)
+        totalPages: Math.ceil(total / limit),
+        totalCollection
       }
     });
   } catch (error) {
