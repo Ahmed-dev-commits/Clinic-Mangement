@@ -96,7 +96,8 @@ async function createPool() {
     connectionLimit: process.env.DB_CONNECTION_LIMIT || 10,
     queueLimit: 0,
     enableKeepAlive: true,
-    keepAliveInitialDelay: 0
+    keepAliveInitialDelay: 0,
+    timezone: 'Z'
   };
 
   if (process.env.DATABASE_URL) {
@@ -878,7 +879,7 @@ app.get('/api/patients', async (req, res) => {
 
     // Filter by CreatedToday or Recent24h if requested (and no custom range/search overrides it)
     if (recent24h && !fromDate && !toDate && !search) {
-      const condition = "CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)";
+      const condition = "(CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY) OR UpdatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY))";
       if (whereClause) {
         whereClause += ` AND ${condition}`;
       } else {
