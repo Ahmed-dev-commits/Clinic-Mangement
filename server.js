@@ -451,6 +451,30 @@ async function initializeDatabase() {
       )
     `);
 
+    // ==========================================
+    // DATABASE PERFORMANCE INDEXES (Phase 5)
+    // ==========================================
+    const createIndex = async (query) => {
+      try { await pool.execute(query); } catch (e) { /* ER_DUP_KEYNAME is expected */ }
+    };
+
+    // Patients
+    await createIndex('ALTER TABLE Patients ADD INDEX idx_patients_created_at (CreatedAt)');
+    await createIndex('ALTER TABLE Patients ADD INDEX idx_patients_search (Phone, CNIC)');
+    // Prescriptions
+    await createIndex('ALTER TABLE Prescriptions ADD INDEX idx_rx_created_at (CreatedAt)');
+    await createIndex('ALTER TABLE Prescriptions ADD INDEX idx_rx_patient_status (PatientID, Status)');
+    await createIndex('ALTER TABLE Prescriptions ADD INDEX idx_rx_follow_up (FollowUpDate)');
+    // Payments
+    await createIndex('ALTER TABLE Payments ADD INDEX idx_payments_created_at (CreatedAt)');
+    await createIndex('ALTER TABLE Payments ADD INDEX idx_payments_patient (PatientID)');
+    // LabResults
+    await createIndex('ALTER TABLE LabResults ADD INDEX idx_lab_created_at (CreatedAt)');
+    await createIndex('ALTER TABLE LabResults ADD INDEX idx_lab_patient_status (PatientID, Status)');
+    // Visits
+    await createIndex('ALTER TABLE Visits ADD INDEX idx_visits_date (VisitDate)');
+    await createIndex('ALTER TABLE Visits ADD INDEX idx_visits_created_at (CreatedAt)');
+
     // Seed default roles if none exist
     const [roleCount] = await pool.execute('SELECT COUNT(*) as count FROM Roles');
     if (roleCount[0].count === 0) {
@@ -838,6 +862,14 @@ app.get('/api/patients', async (req, res) => {
     let whereClause = '';
     let params = [];
 
+    // Helper to calculate exact PKT boundaries in UTC
+    const getPktDayBounds = (dateStr) => {
+      // Input: '2026-02-26'. Target PKT is +05:00
+      const startPkt = new Date(`${dateStr}T00:00:00+05:00`);
+      const endPkt = new Date(`${dateStr}T23:59:59.999+05:00`);
+      return { startUtc: startPkt.toISOString(), endUtc: endPkt.toISOString() };
+    };
+
     if (search) {
       whereClause = 'WHERE (Name LIKE ? OR ID LIKE ? OR Phone LIKE ? OR MRN LIKE ?)';
       const searchParam = `%${search}%`;
@@ -846,44 +878,57 @@ app.get('/api/patients', async (req, res) => {
 
     // Filter by CreatedToday or Recent24h if requested (and no custom range/search overrides it)
     if (recent24h && !fromDate && !toDate && !search) {
+      const condition = "CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)";
       if (whereClause) {
-        whereClause += " AND GREATEST(CONVERT_TZ(CreatedAt, '+00:00', '+05:00'), COALESCE(CONVERT_TZ(UpdatedAt, '+00:00', '+05:00'), CONVERT_TZ(CreatedAt, '+00:00', '+05:00'))) >= CONVERT_TZ(NOW(), '+00:00', '+05:00') - INTERVAL 1 DAY";
+        whereClause += ` AND ${condition}`;
       } else {
-        whereClause = "WHERE GREATEST(CONVERT_TZ(CreatedAt, '+00:00', '+05:00'), COALESCE(CONVERT_TZ(UpdatedAt, '+00:00', '+05:00'), CONVERT_TZ(CreatedAt, '+00:00', '+05:00'))) >= CONVERT_TZ(NOW(), '+00:00', '+05:00') - INTERVAL 1 DAY";
+        whereClause = `WHERE ${condition}`;
       }
     } else if (req.query.createdToday === 'true') {
+      // "Today" means the current calendar day in PKT time
+      // Determine today's date string in PKT (e.g., '2026-02-26')
+      const nowInPkt = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Karachi' }));
+      const todayDateStr = nowInPkt.getFullYear() + '-' + String(nowInPkt.getMonth() + 1).padStart(2, '0') + '-' + String(nowInPkt.getDate()).padStart(2, '0');
+      const { startUtc, endUtc } = getPktDayBounds(todayDateStr);
+
+      const condition = "(CreatedAt BETWEEN ? AND ? OR UpdatedAt BETWEEN ? AND ?)";
       if (whereClause) {
-        whereClause += " AND (DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) = DATE(CONVERT_TZ(NOW(), '+00:00', '+05:00')) OR DATE(CONVERT_TZ(UpdatedAt, '+00:00', '+05:00')) = DATE(CONVERT_TZ(NOW(), '+00:00', '+05:00')))";
+        whereClause += ` AND ${condition}`;
       } else {
-        whereClause = "WHERE (DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) = DATE(CONVERT_TZ(NOW(), '+00:00', '+05:00')) OR DATE(CONVERT_TZ(UpdatedAt, '+00:00', '+05:00')) = DATE(CONVERT_TZ(NOW(), '+00:00', '+05:00')))";
+        whereClause = `WHERE ${condition}`;
       }
+      params.push(startUtc, endUtc, startUtc, endUtc);
     }
 
     // Advanced Date Range Filter
     if (fromDate && toDate) {
-      const condition = "DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) BETWEEN ? AND ?";
+      const { startUtc, endUtc } = getPktDayBounds(fromDate);
+      const { endUtc: endUtc2 } = getPktDayBounds(toDate);
+      const condition = "CreatedAt BETWEEN ? AND ?";
       if (whereClause) {
         whereClause += ` AND ${condition}`;
       } else {
         whereClause = `WHERE ${condition}`;
       }
-      params.push(fromDate, toDate);
+      params.push(startUtc, endUtc2);
     } else if (fromDate) {
-      const condition = "DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) >= ?";
+      const { startUtc } = getPktDayBounds(fromDate);
+      const condition = "CreatedAt >= ?";
       if (whereClause) {
         whereClause += ` AND ${condition}`;
       } else {
         whereClause = `WHERE ${condition}`;
       }
-      params.push(fromDate);
+      params.push(startUtc);
     } else if (toDate) {
-      const condition = "DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) <= ?";
+      const { endUtc } = getPktDayBounds(toDate);
+      const condition = "CreatedAt <= ?";
       if (whereClause) {
         whereClause += ` AND ${condition}`;
       } else {
         whereClause = `WHERE ${condition}`;
       }
-      params.push(toDate);
+      params.push(endUtc);
     }
 
     if (hasPrescriptionsOnly) {
@@ -1249,28 +1294,46 @@ app.get('/api/payments', async (req, res) => {
     let whereClause = '';
     let params = [];
 
+    // Helper to calculate exact PKT boundaries in UTC
+    const getPktDayBounds = (dateStr) => {
+      // Input: '2026-02-26'. Target PKT is +05:00
+      const startPkt = new Date(`${dateStr}T00:00:00+05:00`);
+      const endPkt = new Date(`${dateStr}T23:59:59.999+05:00`);
+      return { startUtc: startPkt.toISOString(), endUtc: endPkt.toISOString() };
+    };
+
     if (recent24h && !fromDate && !toDate) {
-      whereClause = 'WHERE CreatedAt >= NOW() - INTERVAL 1 DAY';
+      // 24 hours rolling
+      whereClause = 'WHERE CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)';
     } else if (fromDate && toDate) {
-      whereClause = "WHERE DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) BETWEEN ? AND ?";
-      params.push(fromDate, toDate);
+      const { startUtc } = getPktDayBounds(fromDate);
+      const { endUtc } = getPktDayBounds(toDate);
+      whereClause = "WHERE CreatedAt BETWEEN ? AND ?";
+      params.push(startUtc, endUtc);
     } else if (fromDate) {
-      whereClause = "WHERE DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) >= ?";
-      params.push(fromDate);
+      const { startUtc } = getPktDayBounds(fromDate);
+      whereClause = "WHERE CreatedAt >= ?";
+      params.push(startUtc);
     } else if (toDate) {
-      whereClause = "WHERE DATE(CONVERT_TZ(CreatedAt, '+00:00', '+05:00')) <= ?";
-      params.push(toDate);
+      const { endUtc } = getPktDayBounds(toDate);
+      whereClause = "WHERE CreatedAt <= ?";
+      params.push(endUtc);
     }
 
     // 1. Get total count and sum of collections
-    const [summaryResult] = await pool.execute(`SELECT COUNT(*) as total, SUM(TotalAmount) as totalCollection FROM Payments ${whereClause}`, params);
+    // We clone the params object because the second execute() will otherwise re-use and expect the same params
+    const summaryParams = [...params];
+    const [summaryResult] = await pool.execute(`SELECT COUNT(*) as total, SUM(TotalAmount) as totalCollection, SUM(LabFee) as totalLabFee, SUM(ConsultationFee) as totalConsultationFee FROM Payments ${whereClause}`, summaryParams);
     const total = summaryResult[0].total;
     const totalCollection = summaryResult[0].totalCollection || 0;
+    const totalLabFee = summaryResult[0].totalLabFee || 0;
+    const totalConsultationFee = summaryResult[0].totalConsultationFee || 0;
 
     // 2. Get paginated data
+    const listParams = [...params];
     const [rows] = await pool.execute(
       `SELECT * FROM Payments ${whereClause} ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`,
-      params
+      listParams
     );
 
     const data = rows.map(row => {
@@ -1292,7 +1355,9 @@ app.get('/api/payments', async (req, res) => {
         page,
         limit,
         totalPages: Math.ceil(total / limit),
-        totalCollection
+        totalCollection,
+        totalLabFee,
+        totalConsultationFee
       }
     });
   } catch (error) {
@@ -1390,7 +1455,10 @@ app.get('/api/prescriptions', async (req, res) => {
     }
 
     if (recent24h === 'true') {
-      conditions.push("CreatedAt >= CONVERT_TZ(NOW(), '+00:00', '+05:00') - INTERVAL 1 DAY");
+      // Use direct JS subtraction to feed a clean UTC timestamp to MySQL
+      const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      conditions.push('CreatedAt >= ?');
+      params.push(yesterday);
     }
 
     if (conditions.length > 0) {
@@ -1562,8 +1630,24 @@ app.delete('/api/prescriptions/:id', async (req, res) => {
 
 app.get('/api/stock', async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT * FROM stock ORDER BY Name ASC');
-    res.json(rows.map(convertRowDates));
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
+    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM stock');
+    const total = countResult[0].total;
+
+    const [rows] = await pool.execute(`SELECT * FROM stock ORDER BY Name ASC LIMIT ${limit} OFFSET ${offset}`);
+
+    res.json({
+      data: rows.map(convertRowDates),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1613,9 +1697,25 @@ app.delete('/api/stock/:id', async (req, res) => {
 
 app.get('/api/clinical-medicines', async (req, res) => {
   try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
     // Fetch only master medicines (where PrescriptionID is NULL)
-    const [rows] = await pool.execute('SELECT * FROM PrescriptionMedicines WHERE PrescriptionID IS NULL ORDER BY MedicineName ASC');
-    res.json(rows);
+    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM PrescriptionMedicines WHERE PrescriptionID IS NULL');
+    const total = countResult[0].total;
+
+    const [rows] = await pool.execute(`SELECT * FROM PrescriptionMedicines WHERE PrescriptionID IS NULL ORDER BY MedicineName ASC LIMIT ${limit} OFFSET ${offset}`);
+
+    res.json({
+      data: rows,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1752,8 +1852,24 @@ app.put('/api/lab-results/:id', async (req, res) => {
 
 app.get('/api/lab-tests-catalog', async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT * FROM LabTestsCatalog ORDER BY Category ASC, Name ASC');
-    res.json(rows);
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
+    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM LabTestsCatalog');
+    const total = countResult[0].total;
+
+    const [rows] = await pool.execute(`SELECT * FROM LabTestsCatalog ORDER BY Category ASC, Name ASC LIMIT ${limit} OFFSET ${offset}`);
+
+    res.json({
+      data: rows,
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1829,8 +1945,24 @@ app.delete('/api/lab-tests-catalog/:id', async (req, res) => {
 
 app.get('/api/patient-services', async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT * FROM PatientServices ORDER BY CreatedAt DESC');
-    res.json(rows.map(convertRowDates));
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
+    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM PatientServices');
+    const total = countResult[0].total;
+
+    const [rows] = await pool.execute(`SELECT * FROM PatientServices ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`);
+
+    res.json({
+      data: rows.map(convertRowDates),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1838,8 +1970,28 @@ app.get('/api/patient-services', async (req, res) => {
 
 app.get('/api/patient-services/:patientId', async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT * FROM PatientServices WHERE PatientID = ? ORDER BY CreatedAt DESC', [req.params.patientId]);
-    res.json(rows.map(convertRowDates));
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+    const patientId = req.params.patientId;
+
+    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM PatientServices WHERE PatientID = ?', [patientId]);
+    const total = countResult[0].total;
+
+    const [rows] = await pool.execute(
+      `SELECT * FROM PatientServices WHERE PatientID = ? ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`,
+      [patientId]
+    );
+
+    res.json({
+      data: rows.map(convertRowDates),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1861,6 +2013,10 @@ app.post('/api/patient-services', async (req, res) => {
     if (isRevisit === true) {
       console.log(`[Revisit] Updating patient ${patientId} timestamp and creating visit record.`);
 
+      // Get current date in PKT format YYYY-MM-DD
+      const [pktDateResult] = await pool.execute("SELECT DATE(CONVERT_TZ(NOW(), '+00:00', '+05:00')) as pktDate");
+      const pktVisitDate = pktDateResult[0].pktDate;
+
       // Update Patient record
       await pool.execute(
         'UPDATE Patients SET UpdatedAt = ?, VisitDate = ? WHERE ID = ?',
@@ -1868,10 +2024,6 @@ app.post('/api/patient-services', async (req, res) => {
       );
 
       // Create new Visit record
-      // Get current date in PKT format YYYY-MM-DD
-      const [pktDateResult] = await pool.execute("SELECT DATE(CONVERT_TZ(NOW(), '+00:00', '+05:00')) as pktDate");
-      const pktVisitDate = pktDateResult[0].pktDate;
-
       await pool.execute(
         'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
         [patientId, pktVisitDate, 'Revisit - New Service', now]
@@ -1903,8 +2055,24 @@ app.put('/api/patient-services/:id', async (req, res) => {
 
 app.get('/api/daily-expenses', async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT * FROM DailyExpenses ORDER BY CreatedAt DESC');
-    res.json(rows.map(convertRowDates));
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
+    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM DailyExpenses');
+    const total = countResult[0].total;
+
+    const [rows] = await pool.execute(`SELECT * FROM DailyExpenses ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`);
+
+    res.json({
+      data: rows.map(convertRowDates),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
