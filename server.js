@@ -97,7 +97,8 @@ async function createPool() {
     queueLimit: 0,
     enableKeepAlive: true,
     keepAliveInitialDelay: 0,
-    timezone: 'Z'
+    timezone: 'Z',
+    decimalNumbers: true
   };
 
   if (process.env.DATABASE_URL) {
@@ -161,7 +162,7 @@ function convertRowDates(row) {
   });
 
   // Convert JSON fields if they are strings (some MySQL drivers don't auto-parse JSON columns)
-  ['Data', 'Medicines', 'LabTests', 'Tests', 'Services'].forEach(field => {
+  ['Data', 'Medicines', 'LabTests', 'Tests', 'Services', 'Items', 'SelectedTests'].forEach(field => {
     if (converted[field] && typeof converted[field] === 'string') {
       try {
         // Check if it's actually a JSON string (starts with { or [)
@@ -246,6 +247,9 @@ async function initializeDatabase() {
 
     // Attempt to add Items column to Payments (Migration)
     try { await pool.execute("ALTER TABLE Payments ADD COLUMN Items TEXT"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Payments ADD COLUMN LabPatientID VARCHAR(50) NULL"); } catch (e) { }
+    try { await pool.execute("CREATE INDEX idx_payments_patientid ON Payments(PatientID)"); } catch (e) { }
+    try { await pool.execute("CREATE INDEX idx_payments_labpatientid ON Payments(LabPatientID)"); } catch (e) { }
 
     // Prescriptions table
     await pool.execute(`
@@ -352,7 +356,7 @@ async function initializeDatabase() {
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS LabResults (
         ID VARCHAR(50) PRIMARY KEY,
-        PatientID VARCHAR(50),
+        LabPatientID VARCHAR(50) NOT NULL,
         PatientName VARCHAR(255),
         PatientAge INT,
         TestDate VARCHAR(50),
@@ -368,16 +372,65 @@ async function initializeDatabase() {
       )
     `);
 
-    // Migrations for LabResults (if columns missing)
+    // Migrations for LabResults
+    try { await pool.execute("ALTER TABLE LabResults CHANGE COLUMN PatientID LabPatientID VARCHAR(50) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults CHANGE COLUMN ClinicPatientID LabPatientID VARCHAR(50) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN LabPatientID VARCHAR(50) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults MODIFY COLUMN LabPatientID VARCHAR(50) NOT NULL"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN PatientAge INT"); } catch (e) { }
-    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN PatientAgeMonths INT DEFAULT 0"); } catch (e) { }
-    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN PatientAgeDays INT DEFAULT 0"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN ReportDate VARCHAR(50)"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN Notes TEXT"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN Technician VARCHAR(255)"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN NotifiedAt DATETIME NULL"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN CollectedAt DATETIME NULL"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN ReferredBy VARCHAR(255) DEFAULT 'Self'"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults DROP COLUMN ClinicPatientID"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults DROP COLUMN PatientID"); } catch (e) { }
+
+    // LabTestsCatalog Phase 1: machine assignment
+    try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN Machine VARCHAR(100) NULL"); } catch (e) { }
+
+    // LabPatients table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS LabPatients (
+        ID VARCHAR(50) PRIMARY KEY,
+        Name VARCHAR(255) NOT NULL,
+        GuardianName VARCHAR(255),
+        Age INT,
+        AgeMonths INT DEFAULT 0,
+        AgeDays INT DEFAULT 0,
+        Gender VARCHAR(20),
+        Phone VARCHAR(20),
+        Address TEXT,
+        CNIC VARCHAR(20),
+        ReferringDoctorName VARCHAR(255),
+        Priority VARCHAR(20) DEFAULT 'Normal',
+        SelectedTests JSON NULL,
+        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // labpaymenthistory table (The Ledger)
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS labpaymenthistory (
+        ID VARCHAR(50) PRIMARY KEY,
+        LabPatientID VARCHAR(50) NOT NULL,
+        PatientName VARCHAR(255) NOT NULL,
+        TotalAmount DECIMAL(10, 2) DEFAULT 0,
+        DiscountAmount DECIMAL(10, 2) DEFAULT 0,
+        PaidAmount DECIMAL(10, 2) DEFAULT 0,
+        PaymentStatus VARCHAR(50) DEFAULT 'Unpaid',
+        Tests JSON NULL,
+        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FinalizedAt DATETIME NULL
+      )
+    `);
+
+    // Migrations for LabPatients
+    try { await pool.execute("ALTER TABLE LabPatients ADD COLUMN SelectedTests JSON NULL"); } catch (e) { }
+
+    // LabResults Priority migration
+    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN Priority VARCHAR(50) DEFAULT 'Normal'"); } catch (e) { }
 
     // Backfill Visits from Patients table
     // Insert a visit record for any patient who doesn't have one yet (migration for existing data)
@@ -471,7 +524,7 @@ async function initializeDatabase() {
     await createIndex('ALTER TABLE Payments ADD INDEX idx_payments_patient (PatientID)');
     // LabResults
     await createIndex('ALTER TABLE LabResults ADD INDEX idx_lab_created_at (CreatedAt)');
-    await createIndex('ALTER TABLE LabResults ADD INDEX idx_lab_patient_status (PatientID, Status)');
+    await createIndex('ALTER TABLE LabResults ADD INDEX idx_lab_patient_status (LabPatientID, Status)');
     // Visits
     await createIndex('ALTER TABLE Visits ADD INDEX idx_visits_date (VisitDate)');
     await createIndex('ALTER TABLE Visits ADD INDEX idx_visits_created_at (CreatedAt)');
@@ -494,10 +547,10 @@ async function initializeDatabase() {
 
       // Seed default permissions per role
       const defaultRolePermissions = {
-        Admin: ['page_dashboard', 'page_patients', 'page_fees', 'page_medicines', 'page_pharmacy', 'page_prescriptions', 'page_lab_results', 'page_users', 'page_expenses', 'page_settings'],
+        Admin: ['page_dashboard', 'page_patients', 'page_fees', 'page_medicines', 'page_pharmacy', 'page_prescriptions', 'page_lab_registration', 'page_lab_fees', 'page_lab_results', 'page_pathology', 'page_users', 'page_expenses', 'page_settings'],
         Doctor: ['page_dashboard', 'page_patients', 'page_medicines', 'page_prescriptions', 'page_settings'],
         Receptionist: ['page_dashboard', 'page_patients', 'page_fees', 'page_pharmacy', 'page_expenses', 'page_settings'],
-        LabTechnician: ['page_dashboard', 'page_lab_results', 'page_settings'],
+        LabTechnician: ['page_dashboard', 'page_lab_registration', 'page_lab_fees', 'page_lab_results', 'page_pathology', 'page_settings'],
       };
       for (const [roleName, permissions] of Object.entries(defaultRolePermissions)) {
         for (const perm of permissions) {
@@ -514,7 +567,7 @@ async function initializeDatabase() {
     const [userCount] = await pool.execute('SELECT COUNT(*) as count FROM Users');
     if (userCount[0].count === 0) {
       const defaultUsers = [
-        { id: 'USR-000', username: 'admin', password: 'admin123', name: 'System Admin', role: 'Admin' },
+        { id: 'USR-000', username: 'admin', password: 'Admin123@#', name: 'System Admin', role: 'Admin' },
         { id: 'USR-001', username: 'receptionist', password: 'reception123', name: 'Front Desk', role: 'Receptionist' },
         { id: 'USR-002', username: 'doctor', password: 'doctor123', name: 'Dr. Admin', role: 'Doctor' },
         { id: 'USR-003', username: 'labtech', password: 'lab123', name: 'Lab Technician', role: 'LabTechnician' },
@@ -526,6 +579,12 @@ async function initializeDatabase() {
           [user.id, user.username, user.password, user.name, user.role]
         );
       }
+    } else {
+      // Force update admin password if table already exists (as requested by user)
+      await pool.execute(
+        "UPDATE Users SET Password = ? WHERE Username = 'admin'",
+        ['Admin123@#']
+      );
     }
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS DailyExpenses(
@@ -539,6 +598,35 @@ async function initializeDatabase() {
     CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
   )
   `);
+
+    // LabVisits table with payment columns
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS LabVisits (
+        ID VARCHAR(50) PRIMARY KEY,
+        LabPatientID VARCHAR(50) NOT NULL,
+        VisitDate DATE NOT NULL,
+        Status VARCHAR(50) DEFAULT 'Pending',
+        SelectedTests JSON NULL,
+        TotalAmount DECIMAL(10, 2) DEFAULT 0,
+        DiscountAmount DECIMAL(10, 2) DEFAULT 0,
+        PaidAmount DECIMAL(10, 2) DEFAULT 0,
+        PaymentStatus VARCHAR(50) DEFAULT 'Unpaid',
+        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // LabFeesLedger table for the ledger
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS LabFeesLedger (
+        ID VARCHAR(50) PRIMARY KEY,
+        LabPatientID VARCHAR(50) NOT NULL,
+        VisitID VARCHAR(50) NOT NULL,
+        AmountPaid DECIMAL(10, 2) NOT NULL,
+        PaymentMethod VARCHAR(50) DEFAULT 'Cash',
+        Notes TEXT,
+        PaymentDate DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
     // Stock table (Medicine Inventory - separate from prescriptions)
     await pool.execute(`
@@ -649,6 +737,8 @@ async function initializeDatabase() {
       { name: 'Patients', indexes: ['Name', 'Phone', 'MRN', 'CreatedAt'] },
       { name: 'Prescriptions', indexes: ['PatientID', 'CreatedAt', 'Status'] },
       { name: 'LabResults', indexes: ['PatientID', 'CreatedAt', 'Status'] },
+      { name: 'LabPatients', indexes: ['Name', 'Phone', 'CreatedAt'] },
+      { name: 'LabFeesLedger', indexes: ['LabPatientID', 'PaymentDate'] },
       { name: 'Payments', indexes: ['PatientID', 'CreatedAt'] },
       { name: 'DailyExpenses', indexes: ['Date', 'Category'] },
       { name: 'PatientServices', indexes: ['PatientID', 'CreatedAt'] }
@@ -953,7 +1043,9 @@ app.get('/api/patients', async (req, res) => {
 
 
     // 1. Get Total Count
-    const [countResult] = await pool.execute(
+    // Use pool.query (not pool.execute) because the WHERE clause is built dynamically;
+    // pool.execute caches prepared statements by SQL text and fails when ? count changes.
+    const [countResult] = await pool.query(
       `SELECT COUNT(*) as total FROM Patients ${whereClause} `,
       params
     );
@@ -961,9 +1053,9 @@ app.get('/api/patients', async (req, res) => {
 
     // 2. Get Paginated Data
     // Sort by Last Activity (Latest of CreatedAt or UpdatedAt)
-    const [rows] = await pool.execute(
-      `SELECT * FROM Patients ${whereClause} ORDER BY GREATEST(CreatedAt, COALESCE(UpdatedAt, CreatedAt)) DESC LIMIT ${limit} OFFSET ${offset} `,
-      params
+    const [rows] = await pool.query(
+      `SELECT * FROM Patients ${whereClause} ORDER BY GREATEST(CreatedAt, COALESCE(UpdatedAt, CreatedAt)) DESC LIMIT ? OFFSET ?`,
+      [...params, Number(limit), Number(offset)]
     );
 
     res.json({
@@ -1083,7 +1175,10 @@ app.get('/api/profile/:identifier', async (req, res) => {
     // Helper to fetch valid resources
     const fetchResources = async (table) => {
       try {
-        const [res] = await pool.execute(`SELECT * FROM ${table} WHERE PatientID IN(${placeholders}) ORDER BY CreatedAt DESC`, allPatientIds);
+        // Use pool.query (not pool.execute): IN(${placeholders}) has a variable ? count
+        // pool.execute caches by SQL text and fails when placeholder count changes between calls
+        const idCol = table === 'LabResults' ? 'LabPatientID' : 'PatientID';
+        const [res] = await pool.query(`SELECT * FROM ${table} WHERE ${idCol} IN(${placeholders}) ORDER BY CreatedAt DESC`, allPatientIds);
         return res; // We'll convert dates later if needed or on frontend
       } catch (e) {
         console.warn(`Failed to fetch ${table} for profile: `, e.message);
@@ -1096,7 +1191,7 @@ app.get('/api/profile/:identifier', async (req, res) => {
       fetchResources('LabResults'),
       fetchResources('PatientServices'),
       fetchResources('Payments'),
-      pool.execute(`SELECT * FROM Visits WHERE PatientID IN(${placeholders}) ORDER BY VisitDate DESC, CreatedAt DESC`, allPatientIds).then(([rows]) => rows).catch(() => [])
+      pool.query(`SELECT * FROM Visits WHERE PatientID IN(${placeholders}) ORDER BY VisitDate DESC, CreatedAt DESC`, allPatientIds).then(([rows]) => rows).catch(() => [])
     ]);
 
     res.json({
@@ -1164,15 +1259,29 @@ app.put('/api/patients/:id', async (req, res) => {
 
     // Update Patient Profile
     await pool.execute(
-      'UPDATE Patients SET Name = ?, GuardianName = ?, CNIC = ?, Age = ?, AgeMonths = ?, AgeDays = ?, Gender = ?, Phone = ?, Address = ?, VisitDate = ?, Symptoms = ?, UpdatedAt = ? WHERE ID = ?',
-      [name, guardianName || null, cnic || null, age, ageMonths || 0, ageDays || 0, gender, phone, address, visitDate, symptoms, updatedAt, req.params.id]
+      'UPDATE Patients SET Name = ?, GuardianName = ?, CNIC = ?, Age = ?, AgeMonths = ?, AgeDays = ?, Gender = ?, Phone = ?, Address = ?, VisitDate = COALESCE(?, VisitDate), Symptoms = ?, UpdatedAt = ? WHERE ID = ?',
+      [
+        name ?? null,
+        guardianName ?? null,
+        cnic ?? null,
+        age ?? null,
+        ageMonths ?? 0,
+        ageDays ?? 0,
+        gender ?? null,
+        phone ?? null,
+        address ?? null,
+        visitDate ?? null,
+        symptoms ?? null,
+        updatedAt,
+        req.params.id
+      ]
     );
 
     // Insert new Visit ONLY if explicitly requested (e.g. Revisit)
     if (isRevisit === true) {
       await pool.execute(
         'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
-        [req.params.id, visitDate, symptoms, updatedAt]
+        [req.params.id, visitDate ?? null, symptoms ?? null, updatedAt]
       );
     }
 
@@ -1202,10 +1311,7 @@ app.delete('/api/patients/:id', async (req, res) => {
     // But we defined FK ON DELETE CASCADE for PrescriptionMedicines, so deleting Prescriptions is enough
     await connection.execute('DELETE FROM Prescriptions WHERE PatientID = ?', [patientId]);
 
-    // 4. Delete Lab Results
-    await connection.execute('DELETE FROM LabResults WHERE PatientID = ?', [patientId]);
-
-    // 5. Delete Visits
+    // 4. Delete Visits
     await connection.execute('DELETE FROM Visits WHERE PatientID = ?', [patientId]);
 
     // 6. Delete Patient
@@ -1225,6 +1331,416 @@ app.delete('/api/patients/:id', async (req, res) => {
     res.status(500).json({ error: error.message });
   } finally {
     if (connection) connection.release();
+  }
+});
+
+// ============ LAB PATIENTS API ============
+
+app.get('/api/lab-patients', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const search = req.query.search || '';
+    const gender = req.query.gender || '';
+    const recent24h = req.query.recent24h === 'true';
+    const fromDate = req.query.fromDate;
+    const toDate = req.query.toDate;
+    const offset = (page - 1) * limit;
+
+    let whereClause = '';
+    let params = [];
+
+    const getPktDayBounds = (dateStr) => {
+      const startPkt = new Date(`${dateStr}T00:00:00+05:00`);
+      const endPkt = new Date(`${dateStr}T23:59:59.999+05:00`);
+      return { startUtc: startPkt.toISOString(), endUtc: endPkt.toISOString() };
+    };
+
+    if (search) {
+      whereClause = 'WHERE (Name LIKE ? OR ID LIKE ? OR Phone LIKE ?)';
+      const searchParam = `%${search}%`;
+      params = [searchParam, searchParam, searchParam];
+    }
+
+    if (gender && gender !== 'all') {
+      whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'Gender = ?';
+      params.push(gender);
+    }
+
+    if (recent24h && !fromDate && !toDate) {
+      whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)';
+    } else if (fromDate && toDate) {
+      const { startUtc } = getPktDayBounds(fromDate);
+      const { endUtc } = getPktDayBounds(toDate);
+      whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'CreatedAt BETWEEN ? AND ?';
+      params.push(startUtc, endUtc);
+    } else if (fromDate) {
+      const { startUtc } = getPktDayBounds(fromDate);
+      whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'CreatedAt >= ?';
+      params.push(startUtc);
+    } else if (toDate) {
+      const { endUtc } = getPktDayBounds(toDate);
+      whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'CreatedAt <= ?';
+      params.push(endUtc);
+    }
+
+    // Use pool.query (not pool.execute): dynamic whereClause means the SQL text changes per request
+    const [countRows] = await pool.query(`SELECT COUNT(*) as total FROM LabPatients ${whereClause}`, params);
+    const total = countRows[0].total;
+
+    const [rows] = await pool.query(
+      `SELECT * FROM LabPatients ${whereClause} ORDER BY CreatedAt DESC LIMIT ? OFFSET ?`,
+      [...params, Number(limit), Number(offset)]
+    );
+
+    res.json({
+      data: rows.map(convertRowDates),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/lab-patients/lookup', async (req, res) => {
+  try {
+    const { query } = req.query;
+    if (!query) return res.json(null);
+
+    // Search by exact ID or exact Phone
+    const [rows] = await pool.execute(
+      'SELECT * FROM LabPatients WHERE ID = ? OR Phone = ? LIMIT 1',
+      [query, query]
+    );
+
+    res.json(rows.length > 0 ? convertRowDates(rows[0]) : null);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/lab-patients/:id/profile', async (req, res) => {
+  try {
+    const patientId = req.params.id;
+
+    // 1. Fetch Patient Profile
+    const [profiles] = await pool.query('SELECT * FROM LabPatients WHERE ID = ?', [patientId]);
+    if (profiles.length === 0) return res.status(404).json({ error: 'Lab Patient not found' });
+    const profile = profiles[0];
+
+    // 2. Fetch Visits
+    const [visits] = await pool.query('SELECT * FROM LabVisits WHERE LabPatientID = ? ORDER BY CreatedAt DESC', [patientId]);
+
+    // 3. Fetch Lab Results
+    let labResults = [];
+    try {
+      const [lr] = await pool.query(
+        'SELECT * FROM LabResults WHERE LabPatientID = ? ORDER BY CreatedAt DESC',
+        [patientId]
+      );
+      labResults = lr;
+    } catch (e) {
+      console.log('Error fetching LabResults for lab patient profile:', e.message);
+    }
+
+    // 4. Fetch Payments Ledger
+    const [payments] = await pool.query('SELECT * FROM LabFeesLedger WHERE LabPatientID = ? ORDER BY PaymentDate DESC', [patientId]);
+
+    res.json({
+      profile: convertRowDates(profile),
+      visits: visits.map(convertRowDates),
+      history: {
+        prescriptions: [],
+        services: [],
+        labResults: labResults.map(convertRowDates),
+        payments: payments.map(convertRowDates)
+      }
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/lab-patients', async (req, res) => {
+  try {
+    const {
+      id, name, guardianName, age, ageMonths, ageDays, gender, phone, address, cnic,
+      referringDoctorName, priority, selectedTests
+    } = req.body;
+    const createdAt = new Date().toISOString();
+
+    const query = `
+      INSERT INTO LabPatients (
+        ID, Name, GuardianName, Age, AgeMonths, AgeDays, Gender, Phone, Address, CNIC,
+        ReferringDoctorName, Priority, SelectedTests, CreatedAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+
+    await pool.execute(query, [
+      id, name, guardianName || null, age || 0, ageMonths || 0, ageDays || 0, gender, phone, address || null, cnic || null,
+      referringDoctorName || null, priority || 'Normal', selectedTests ? JSON.stringify(selectedTests) : null, createdAt
+    ]);
+
+    res.json({ success: true, id });
+  } catch (error) {
+    console.error('Error creating lab patient:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/lab-patients/:id', async (req, res) => {
+  try {
+    const {
+      name, guardianName, age, ageMonths, ageDays, gender, phone, address, cnic,
+      referringDoctorName, priority, selectedTests
+    } = req.body;
+
+    const query = `
+      UPDATE LabPatients SET
+        Name=?, GuardianName=?, Age=?, AgeMonths=?, AgeDays=?, Gender=?, Phone=?, Address=?, CNIC=?,
+        ReferringDoctorName=?, Priority=?, SelectedTests=?
+      WHERE ID=?
+    `;
+
+    await pool.execute(query, [
+      name, guardianName, age, ageMonths, ageDays, gender, phone, address, cnic,
+      referringDoctorName || null, priority || 'Normal',
+      selectedTests ? JSON.stringify(selectedTests) : null,
+      req.params.id
+    ]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating lab patient:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/lab-patients/:id', async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM LabPatients WHERE ID = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+// ============ LAB PATIENT HISTORY API ============
+
+app.get('/api/lab-history', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const search = req.query.search || '';
+    const recent24h = req.query.recent24h === 'true';
+    const fromDate = req.query.fromDate;
+    const toDate = req.query.toDate;
+    const offset = (page - 1) * limit;
+
+    let whereClause = '';
+    let params = [];
+
+    const getPktDayBounds = (dateStr) => {
+      const startPkt = new Date(`${dateStr}T00:00:00+05:00`);
+      const endPkt = new Date(`${dateStr}T23:59:59.999+05:00`);
+      return { startUtc: startPkt.toISOString(), endUtc: endPkt.toISOString() };
+    };
+
+    if (search) {
+      whereClause = 'WHERE (PatientName LIKE ? OR LabPatientID LIKE ?)';
+      const searchParam = `%${search}%`;
+      params = [searchParam, searchParam];
+    }
+
+    if (recent24h && !fromDate && !toDate) {
+      whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)';
+    } else if (fromDate && toDate) {
+      const { startUtc } = getPktDayBounds(fromDate);
+      const { endUtc } = getPktDayBounds(toDate);
+      whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'CreatedAt BETWEEN ? AND ?';
+      params.push(startUtc, endUtc);
+    } else if (fromDate) {
+      const { startUtc } = getPktDayBounds(fromDate);
+      whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'CreatedAt >= ?';
+      params.push(startUtc);
+    } else if (toDate) {
+      const { endUtc } = getPktDayBounds(toDate);
+      whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'CreatedAt <= ?';
+      params.push(endUtc);
+    }
+
+    // Use pool.query (not pool.execute): dynamic whereClause means the SQL text changes per request,
+    // causing mysql2's prepared statement cache to mismatch (Incorrect arguments to mysqld_stmt_execute)
+    const [countResult] = await pool.query(`SELECT COUNT(*) as total, SUM(PaidAmount) as totalCollection, SUM(DiscountAmount) as totalDiscount FROM labpaymenthistory ${whereClause}`, params);
+    const total = countResult[0].total;
+    const totalCollection = countResult[0].totalCollection || 0;
+    const totalDiscount = countResult[0].totalDiscount || 0;
+
+    const [rows] = await pool.query(`
+      SELECT * FROM labpaymenthistory 
+      ${whereClause} 
+      ORDER BY CreatedAt DESC 
+      LIMIT ${Number(limit)} OFFSET ${Number(offset)}
+    `, params);
+
+    res.json({
+      data: rows.map(convertRowDates),
+      meta: { total, page, limit, totalPages: Math.ceil(total / limit), totalCollection, totalDiscount }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+app.post('/api/lab-history', async (req, res) => {
+  try {
+    const {
+      LabPatientID, PatientName, TotalAmount, DiscountAmount, PaidAmount,
+      PaymentStatus, Tests
+    } = req.body;
+
+    const labPatientID = LabPatientID || req.body.labPatientId || req.body.LabPatientId;
+    const patientName = PatientName || req.body.patientName;
+    const totalAmount = TotalAmount !== undefined ? TotalAmount : (req.body.totalAmount || 0);
+    const discountAmount = DiscountAmount !== undefined ? DiscountAmount : (req.body.discountAmount || 0);
+    const paidAmount = PaidAmount !== undefined ? PaidAmount : (req.body.paidAmount || 0);
+    const paymentStatus = PaymentStatus || req.body.paymentStatus;
+    const tests = Tests || req.body.tests || req.body.testsWithResults || [];
+
+    const id = `LPH-${Date.now()}`;
+    const createdAt = new Date().toISOString();
+
+    await pool.execute(
+      `INSERT INTO labpaymenthistory (
+        ID, LabPatientID, PatientName, TotalAmount, DiscountAmount, PaidAmount,
+        PaymentStatus, Tests, CreatedAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        id, labPatientID, patientName, totalAmount, discountAmount, paidAmount,
+        paymentStatus || 'Pending', JSON.stringify(tests), createdAt
+      ]
+    );
+
+    res.json({ success: true, id });
+  } catch (error) {
+    console.error('Error creating lab history:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/lab-history/:id', async (req, res) => {
+  try {
+    const updates = req.body;
+    const id = req.params.id;
+
+    if (Object.keys(updates).length === 0) {
+      return res.json({ success: true });
+    }
+
+    let setClause = [];
+    let values = [];
+
+    const validColumns = [
+      'LabPatientID', 'PatientName', 'TotalAmount', 'DiscountAmount',
+      'PaidAmount', 'PaymentStatus', 'Tests', 'FinalizedAt'
+    ];
+
+    Object.keys(updates).forEach(key => {
+      let colName = validColumns.find(c => c.toLowerCase() === key.toLowerCase() || c === key || c.charAt(0).toLowerCase() + c.slice(1) === key);
+
+      // Handle legacy mapping for tests
+      if (!colName && (key.toLowerCase() === 'testswithresults' || key === 'tests')) colName = 'Tests';
+
+      if (colName) {
+        setClause.push(`${colName} = ?`);
+        let val = updates[key];
+        if (colName === 'Tests' && typeof val !== 'string') {
+          val = JSON.stringify(val);
+        }
+        values.push(val);
+      }
+    });
+
+    if (setClause.length > 0) {
+      values.push(id);
+      values.push(id); // For the OR LabPatientID = ?
+      // Use pool.query: dynamic SET clause means SQL text changes per request
+      await pool.query(`UPDATE labpaymenthistory SET ${setClause.join(', ')} WHERE ID = ? OR LabPatientID = ?`, values);
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating lab history:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ LAB RESULT HISTORY API (Separate Clinical History) ============
+
+app.post('/api/lab-result-history', async (req, res) => {
+  try {
+    const {
+      ID, LabPatientID, LabReportID, PatientName, FinalizedAt, TestsWithResults, Technician, ResultStatus
+    } = req.body;
+
+    const createdAt = new Date().toISOString();
+
+    await pool.execute(
+      `INSERT INTO labresulthistory (
+        ID, LabPatientID, LabReportID, PatientName, FinalizedAt, TestsWithResults, Technician, ResultStatus, CreatedAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        ID || `LRH-${Date.now()}`,
+        LabPatientID,
+        LabReportID,
+        PatientName,
+        FinalizedAt || createdAt,
+        typeof TestsWithResults === 'string' ? TestsWithResults : JSON.stringify(TestsWithResults),
+        Technician,
+        ResultStatus || 'Finalized',
+        createdAt
+      ]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error creating lab result history:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/lab-result-history/:labPatientId', async (req, res) => {
+  try {
+    const { labPatientId } = req.params;
+    const [rows] = await pool.execute(
+      'SELECT * FROM labresulthistory WHERE LabPatientID = ? ORDER BY CreatedAt DESC',
+      [labPatientId]
+    );
+    res.json(rows.map(convertRowDates));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/lab-result-history-patients', async (req, res) => {
+  try {
+    const [rows] = await pool.execute(`
+      SELECT DISTINCT 
+        h.LabPatientID as ID, 
+        h.PatientName as Name,
+        p.Phone, p.Gender
+      FROM labresulthistory h
+      LEFT JOIN LabPatients p ON h.LabPatientID = p.ID
+      ORDER BY h.PatientName ASC
+    `);
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -1305,36 +1821,48 @@ app.get('/api/payments', async (req, res) => {
 
     if (recent24h && !fromDate && !toDate) {
       // 24 hours rolling
-      whereClause = 'WHERE CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)';
+      whereClause = 'WHERE p.CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)';
     } else if (fromDate && toDate) {
       const { startUtc } = getPktDayBounds(fromDate);
       const { endUtc } = getPktDayBounds(toDate);
-      whereClause = "WHERE CreatedAt BETWEEN ? AND ?";
+      whereClause = "WHERE p.CreatedAt BETWEEN ? AND ?";
       params.push(startUtc, endUtc);
     } else if (fromDate) {
       const { startUtc } = getPktDayBounds(fromDate);
-      whereClause = "WHERE CreatedAt >= ?";
+      whereClause = "WHERE p.CreatedAt >= ?";
       params.push(startUtc);
     } else if (toDate) {
       const { endUtc } = getPktDayBounds(toDate);
-      whereClause = "WHERE CreatedAt <= ?";
+      whereClause = "WHERE p.CreatedAt <= ?";
       params.push(endUtc);
     }
 
     // 1. Get total count and sum of collections
     // We clone the params object because the second execute() will otherwise re-use and expect the same params
     const summaryParams = [...params];
-    const [summaryResult] = await pool.execute(`SELECT COUNT(*) as total, SUM(TotalAmount) as totalCollection, SUM(LabFee) as totalLabFee, SUM(ConsultationFee) as totalConsultationFee FROM Payments ${whereClause}`, summaryParams);
+    // Use pool.query (not pool.execute): dynamic whereClause means the SQL text changes per request,
+    // causing mysql2's prepared statement cache to mismatch (Incorrect arguments to mysqld_stmt_execute)
+    const [summaryResult] = await pool.query(`SELECT COUNT(*) as total, SUM(TotalAmount) as totalCollection, SUM(LabFee) as totalLabFee, SUM(ConsultationFee) as totalConsultationFee FROM Payments p ${whereClause}`, summaryParams);
     const total = summaryResult[0].total;
     const totalCollection = summaryResult[0].totalCollection || 0;
     const totalLabFee = summaryResult[0].totalLabFee || 0;
     const totalConsultationFee = summaryResult[0].totalConsultationFee || 0;
 
     // 2. Get paginated data
-    const listParams = [...params];
-    const [rows] = await pool.execute(
-      `SELECT * FROM Payments ${whereClause} ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`,
-      listParams
+    const [rows] = await pool.query(
+      `SELECT p.*, 
+              pat.Age as PatientAge, 
+              pat.AgeMonths as PatientAgeMonths, 
+              pat.AgeDays as PatientAgeDays, 
+              pat.Gender as PatientGender, 
+              pat.Phone as PatientPhone,
+              pat.GuardianName as PatientGuardianName
+       FROM Payments p
+       LEFT JOIN Patients pat ON p.PatientID = pat.ID
+       ${whereClause} 
+       ORDER BY p.CreatedAt DESC 
+       LIMIT ? OFFSET ?`,
+      [...params, Number(limit), Number(offset)]
     );
 
     const data = rows.map(row => {
@@ -1368,12 +1896,12 @@ app.get('/api/payments', async (req, res) => {
 
 app.post('/api/payments', async (req, res) => {
   try {
-    const { id, patientId, patientName, consultationFee, labFee, medicineFee, totalAmount, paymentMode, medicines, items } = req.body;
+    const { id, patientId, patientName, consultationFee, labFee, medicineFee, totalAmount, paymentMode, medicines, items, labPatientId } = req.body;
     const createdAt = new Date().toISOString();
 
     await pool.execute(
-      'INSERT INTO Payments (ID, PatientID, PatientName, ConsultationFee, LabFee, MedicineFee, TotalAmount, PaymentMode, Medicines, Items, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, patientId, patientName, consultationFee || 0, labFee || 0, medicineFee || 0, totalAmount || 0, paymentMode, JSON.stringify(medicines || []), JSON.stringify(items || []), createdAt]
+      'INSERT INTO Payments (ID, PatientID, PatientName, ConsultationFee, LabFee, MedicineFee, TotalAmount, PaymentMode, Medicines, Items, CreatedAt, LabPatientID) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, patientId, patientName, consultationFee || 0, labFee || 0, medicineFee || 0, totalAmount || 0, paymentMode, JSON.stringify(medicines || []), JSON.stringify(items || []), createdAt, labPatientId || null]
     );
 
     res.json({ success: true, id });
@@ -1467,16 +1995,18 @@ app.get('/api/prescriptions', async (req, res) => {
     }
 
     // 1. Get total count
-    const [countResult] = await pool.execute(
+    // Use pool.query (not pool.execute) because the WHERE clause is built dynamically;
+    // pool.execute caches prepared statements by SQL text and fails when ? count changes.
+    const [countResult] = await pool.query(
       `SELECT COUNT(*) as total FROM Prescriptions ${whereClause}`,
       params
     );
     const total = countResult[0].total;
 
     // 2. Get paginated data
-    const [prescriptions] = await pool.execute(
-      `SELECT * FROM Prescriptions ${whereClause} ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`,
-      params
+    const [prescriptions] = await pool.query(
+      `SELECT * FROM Prescriptions ${whereClause} ORDER BY CreatedAt DESC LIMIT ? OFFSET ?`,
+      [...params, Number(limit), Number(offset)]
     );
 
     // MySQL2 auto-parses JSON columns into JS objects when using pool.execute.
@@ -1583,7 +2113,8 @@ app.put('/api/prescriptions/:id', async (req, res) => {
     query += ' WHERE ID=?';
     params.push(prescriptionId);
 
-    await pool.execute(query, params);
+    // Use pool.query: query string is dynamically built (conditionally appends IsLocked/FinalizedAt)
+    await pool.query(query, params);
 
     // Auto-generation removed as per manual assignment requirement
     // const wasAlreadyFinalized = existing[0].Status === 'Finalized';
@@ -1638,7 +2169,11 @@ app.get('/api/stock', async (req, res) => {
     const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM stock');
     const total = countResult[0].total;
 
-    const [rows] = await pool.execute(`SELECT * FROM stock ORDER BY Name ASC LIMIT ${limit} OFFSET ${offset}`);
+    // Use pool.query (not pool.execute): LIMIT/OFFSET causes mysql2 prepared statement cache to mismatch
+    const [rows] = await pool.query(
+      'SELECT * FROM stock ORDER BY Name ASC LIMIT ? OFFSET ?',
+      [Number(limit), Number(offset)]
+    );
 
     res.json({
       data: rows.map(convertRowDates),
@@ -1706,7 +2241,11 @@ app.get('/api/clinical-medicines', async (req, res) => {
     const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM PrescriptionMedicines WHERE PrescriptionID IS NULL');
     const total = countResult[0].total;
 
-    const [rows] = await pool.execute(`SELECT * FROM PrescriptionMedicines WHERE PrescriptionID IS NULL ORDER BY MedicineName ASC LIMIT ${limit} OFFSET ${offset}`);
+    // Use pool.query (not pool.execute): LIMIT/OFFSET causes mysql2 prepared statement cache to mismatch
+    const [rows] = await pool.query(
+      'SELECT * FROM PrescriptionMedicines WHERE PrescriptionID IS NULL ORDER BY MedicineName ASC LIMIT ? OFFSET ?',
+      [Number(limit), Number(offset)]
+    );
 
     res.json({
       data: rows,
@@ -1769,13 +2308,46 @@ app.get('/api/lab-results', async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
     const offset = (page - 1) * limit;
+    const { labPatientId, status, fromDate, toDate } = req.query;
+
+    let whereClause = '';
+    let params = [];
+
+    const getPktDayBounds = (dateStr) => {
+      const startPkt = new Date(`${dateStr}T00:00:00+05:00`);
+      const endPkt = new Date(`${dateStr}T23:59:59.999+05:00`);
+      return { startUtc: startPkt.toISOString(), endUtc: endPkt.toISOString() };
+    };
+
+    if (labPatientId) {
+      whereClause = 'WHERE LabPatientID = ?';
+      params.push(labPatientId);
+    }
+
+    if (fromDate && toDate) {
+      const { startUtc } = getPktDayBounds(fromDate);
+      const { endUtc } = getPktDayBounds(toDate);
+      whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'CreatedAt BETWEEN ? AND ?';
+      params.push(startUtc, endUtc);
+    } else if (fromDate) {
+      const { startUtc } = getPktDayBounds(fromDate);
+      whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'CreatedAt >= ?';
+      params.push(startUtc);
+    } else if (toDate) {
+      const { endUtc } = getPktDayBounds(toDate);
+      whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'CreatedAt <= ?';
+      params.push(endUtc);
+    }
 
     // 1. Get total count
-    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM LabResults');
+    const [countResult] = await pool.query(`SELECT COUNT(*) as total FROM LabResults ${whereClause}`, params);
     const total = countResult[0].total;
 
     // 2. Get paginated data
-    const [rows] = await pool.execute(`SELECT * FROM LabResults ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`);
+    const [rows] = await pool.query(
+      `SELECT * FROM LabResults ${whereClause} ORDER BY CreatedAt DESC LIMIT ? OFFSET ?`,
+      [...params, Number(limit), Number(offset)]
+    );
 
     res.json({
       data: rows.map(convertRowDates),
@@ -1793,12 +2365,16 @@ app.get('/api/lab-results', async (req, res) => {
 
 app.post('/api/lab-results', async (req, res) => {
   try {
-    const { id, patientId, patientName, patientAge, patientAgeMonths, patientAgeDays, testDate, reportDate, tests, notes, technician, status, referredBy } = req.body;
+    console.log('📝 Creating Lab Result. Body:', JSON.stringify(req.body, null, 2));
+    const { id, labPatientId, patientName, patientAge, testDate, reportDate, tests, notes, technician, status, referredBy, patientId } = req.body;
     const createdAt = new Date().toISOString();
 
+    // Use labPatientId if present, otherwise fallback to patientId (which is what clinic calls it)
+    const finalPatientId = labPatientId || patientId || null;
+
     await pool.execute(
-      'INSERT INTO LabResults (ID, PatientID, PatientName, PatientAge, PatientAgeMonths, PatientAgeDays, TestDate, ReportDate, Tests, Notes, Technician, Status, ReferredBy, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, patientId, patientName, patientAge, patientAgeMonths || 0, patientAgeDays || 0, testDate, reportDate, JSON.stringify(tests), notes, technician, status, referredBy || 'Self', createdAt]
+      'INSERT INTO LabResults (ID, LabPatientID, PatientName, PatientAge, TestDate, ReportDate, Tests, Notes, Technician, Status, ReferredBy, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, finalPatientId, patientName, patientAge || null, testDate, reportDate || null, JSON.stringify(tests), notes || null, technician || null, status || 'Pending', referredBy || 'Self', createdAt]
     );
 
     res.json({ success: true, id });
@@ -1826,7 +2402,8 @@ app.put('/api/lab-results/:id/status', async (req, res) => {
     query += ' WHERE ID = ?';
     params.push(req.params.id);
 
-    await pool.execute(query, params);
+    // Use pool.query: query string is dynamically built (conditionally appends NotifiedAt/CollectedAt)
+    await pool.query(query, params);
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1836,11 +2413,11 @@ app.put('/api/lab-results/:id/status', async (req, res) => {
 // Full update for lab results
 app.put('/api/lab-results/:id', async (req, res) => {
   try {
-    const { testDate, reportDate, tests, notes, technician, status } = req.body;
+    const { testDate, reportDate, tests, notes, technician, status, labPatientId } = req.body;
 
     await pool.execute(
-      'UPDATE LabResults SET TestDate = ?, ReportDate = ?, Tests = ?, Notes = ?, Technician = ?, Status = ? WHERE ID = ?',
-      [testDate, reportDate, JSON.stringify(tests), notes, technician, status, req.params.id]
+      'UPDATE LabResults SET TestDate = ?, ReportDate = ?, Tests = ?, Notes = ?, Technician = ?, Status = ?, LabPatientID = ? WHERE ID = ?',
+      [testDate, reportDate || null, JSON.stringify(tests), notes || null, technician || null, status, labPatientId || null, req.params.id]
     );
 
     res.json({ success: true });
@@ -1860,7 +2437,11 @@ app.get('/api/lab-tests-catalog', async (req, res) => {
     const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM LabTestsCatalog');
     const total = countResult[0].total;
 
-    const [rows] = await pool.execute(`SELECT * FROM LabTestsCatalog ORDER BY Category ASC, Name ASC LIMIT ${limit} OFFSET ${offset}`);
+    // Use pool.query (not pool.execute): LIMIT/OFFSET causes mysql2 prepared statement cache to mismatch
+    const [rows] = await pool.query(
+      'SELECT * FROM LabTestsCatalog ORDER BY Category ASC, Name ASC LIMIT ? OFFSET ?',
+      [Number(limit), Number(offset)]
+    );
 
     res.json({
       data: rows,
@@ -1882,7 +2463,7 @@ app.post('/api/lab-tests-catalog', async (req, res) => {
       id, name, category, unit, normalRange, price,
       referenceRangeMale, referenceRangeFemale, referenceRangeChild,
       criticalValueRange, sampleType, method, turnaroundTime,
-      status, isProfile, profileTests
+      status, isProfile, profileTests, machine
     } = req.body;
 
     await pool.execute(
@@ -1890,13 +2471,14 @@ app.post('/api/lab-tests-catalog', async (req, res) => {
         ID, Name, Category, Unit, NormalRange, Price,
         ReferenceRangeMale, ReferenceRangeFemale, ReferenceRangeChild,
         CriticalValueRange, SampleType, Method, TurnaroundTime,
-        Status, IsProfile, ProfileTests
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        Status, IsProfile, ProfileTests, Machine
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id, name, category, unit, normalRange, price || 0,
         referenceRangeMale || null, referenceRangeFemale || null, referenceRangeChild || null,
         criticalValueRange || null, sampleType || null, method || null, turnaroundTime || null,
-        status || 'Active', isProfile ? 1 : 0, profileTests ? JSON.stringify(profileTests) : null
+        status || 'Active', isProfile ? 1 : 0, profileTests ? JSON.stringify(profileTests) : null,
+        machine || null
       ]
     );
     res.json({ success: true, id });
@@ -1911,7 +2493,7 @@ app.put('/api/lab-tests-catalog/:id', async (req, res) => {
       name, category, unit, normalRange, price,
       referenceRangeMale, referenceRangeFemale, referenceRangeChild,
       criticalValueRange, sampleType, method, turnaroundTime,
-      status, isProfile, profileTests
+      status, isProfile, profileTests, machine
     } = req.body;
 
     await pool.execute(
@@ -1919,13 +2501,14 @@ app.put('/api/lab-tests-catalog/:id', async (req, res) => {
         Name = ?, Category = ?, Unit = ?, NormalRange = ?, Price = ?,
         ReferenceRangeMale = ?, ReferenceRangeFemale = ?, ReferenceRangeChild = ?,
         CriticalValueRange = ?, SampleType = ?, Method = ?, TurnaroundTime = ?,
-        Status = ?, IsProfile = ?, ProfileTests = ?
+        Status = ?, IsProfile = ?, ProfileTests = ?, Machine = ?
        WHERE ID = ?`,
       [
         name, category, unit, normalRange, price || 0,
         referenceRangeMale || null, referenceRangeFemale || null, referenceRangeChild || null,
         criticalValueRange || null, sampleType || null, method || null, turnaroundTime || null,
         status || 'Active', isProfile ? 1 : 0, profileTests ? JSON.stringify(profileTests) : null,
+        machine || null,
         req.params.id
       ]
     );
@@ -1953,7 +2536,11 @@ app.get('/api/patient-services', async (req, res) => {
     const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM PatientServices');
     const total = countResult[0].total;
 
-    const [rows] = await pool.execute(`SELECT * FROM PatientServices ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`);
+    // Use pool.query (not pool.execute): LIMIT/OFFSET causes mysql2 prepared statement cache to mismatch
+    const [rows] = await pool.query(
+      'SELECT * FROM PatientServices ORDER BY CreatedAt DESC LIMIT ? OFFSET ?',
+      [Number(limit), Number(offset)]
+    );
 
     res.json({
       data: rows.map(convertRowDates),
@@ -1979,9 +2566,10 @@ app.get('/api/patient-services/:patientId', async (req, res) => {
     const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM PatientServices WHERE PatientID = ?', [patientId]);
     const total = countResult[0].total;
 
-    const [rows] = await pool.execute(
-      `SELECT * FROM PatientServices WHERE PatientID = ? ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`,
-      [patientId]
+    // Use pool.query (not pool.execute): LIMIT/OFFSET causes mysql2 prepared statement cache to mismatch
+    const [rows] = await pool.query(
+      'SELECT * FROM PatientServices WHERE PatientID = ? ORDER BY CreatedAt DESC LIMIT ? OFFSET ?',
+      [patientId, Number(limit), Number(offset)]
     );
 
     res.json({
@@ -2014,8 +2602,8 @@ app.post('/api/patient-services', async (req, res) => {
     if (isRevisit === true) {
       console.log(`[Revisit] Updating patient ${patientId} timestamp and creating visit record.`);
 
-      // Get current date in PKT format YYYY-MM-DD
-      const [pktDateResult] = await pool.execute("SELECT DATE(CONVERT_TZ(NOW(), '+00:00', '+05:00')) as pktDate");
+      // Get current date in PKT format YYYY-MM-DD using UTC_TIMESTAMP to avoid double offset
+      const [pktDateResult] = await pool.execute("SELECT DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+05:00')) as pktDate");
       const pktVisitDate = pktDateResult[0].pktDate;
 
       // Update Patient record
@@ -2052,18 +2640,103 @@ app.put('/api/patient-services/:id', async (req, res) => {
   }
 });
 
-// ============ DAILY EXPENSES API ============
+// ============ LAB VISITS API ============
 
-app.get('/api/daily-expenses', async (req, res) => {
+app.post('/api/lab-visits', async (req, res) => {
   try {
+    const { id, labPatientId, visitDate, selectedTests, status = 'Pending', totalAmount = 0 } = req.body;
+    await pool.query(
+      'INSERT INTO LabVisits (ID, LabPatientID, VisitDate, Status, SelectedTests, TotalAmount, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id, labPatientId, visitDate, status, JSON.stringify(selectedTests || []), totalAmount, new Date().toISOString()]
+    );
+    res.status(201).json({ success: true, id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/lab-visits', async (req, res) => {
+  try {
+    const { labPatientId, search, recent24h, fromDate, toDate } = req.query;
+
+    let whereConditions = [];
+    let queryParams = [];
+
+    if (labPatientId) {
+      whereConditions.push('v.LabPatientID = ?');
+      queryParams.push(labPatientId);
+    }
+
+    if (search) {
+      const searchTerm = `%${search}%`;
+      whereConditions.push('(v.ID LIKE ? OR p.Name LIKE ? OR v.LabPatientID LIKE ? OR p.Phone LIKE ?)');
+      queryParams.push(searchTerm, searchTerm, searchTerm, searchTerm);
+    } else {
+      // Date filters only apply if not searching (matches Patients API behavior)
+      if (recent24h === 'true') {
+        whereConditions.push('v.CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)');
+      } else {
+        if (fromDate) {
+          whereConditions.push('DATE(v.VisitDate) >= ?');
+          queryParams.push(fromDate);
+        }
+        if (toDate) {
+          whereConditions.push('DATE(v.VisitDate) <= ?');
+          queryParams.push(toDate);
+        }
+      }
+    }
+
+    const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
+
+    // Legacy behavior for fetching patient specific visits without pagination limits
+    if (labPatientId && !req.query.page && !req.query.limit && !search && !recent24h && !fromDate && !toDate) {
+      const [rows] = await pool.query(
+        `SELECT v.*, p.Name as PatientName, p.Age, p.Gender, p.Phone FROM LabVisits v JOIN LabPatients p ON v.LabPatientID = p.ID ${whereClause} ORDER BY v.CreatedAt DESC`,
+        queryParams
+      );
+      return res.json(rows.map(convertRowDates));
+    }
+
+    // Pagination for all visits
     const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
+    const limit = parseInt(req.query.limit) || 50;
     const offset = (page - 1) * limit;
 
-    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM DailyExpenses');
+    // 1. Get total count for pagination
+    const countQuery = `
+      SELECT COUNT(*) as total 
+      FROM LabVisits v 
+      JOIN LabPatients p ON v.LabPatientID = p.ID
+      ${whereClause}
+    `;
+    const [countResult] = await pool.query(countQuery, queryParams);
     const total = countResult[0].total;
 
-    const [rows] = await pool.execute(`SELECT * FROM DailyExpenses ORDER BY CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`);
+    // 2. Fetch paginated data
+    const dataQuery = `
+      SELECT v.*, p.Name as PatientName, p.Age, p.Gender, p.Phone 
+      FROM LabVisits v 
+      JOIN LabPatients p ON v.LabPatientID = p.ID
+      ${whereClause}
+      ORDER BY v.CreatedAt DESC LIMIT ? OFFSET ?
+    `;
+    const [rows] = await pool.query(dataQuery, [...queryParams, limit, offset]);
+
+    // 3. Calculate summary stats (totalCollection, totalDiscount) using the SAME whereClause
+    const statsQuery = `
+      SELECT 
+        SUM(v.PaidAmount) as totalCollection, 
+        SUM(v.DiscountAmount) as totalDiscount,
+        COUNT(v.ID) as totalVisits
+      FROM LabVisits v 
+      JOIN LabPatients p ON v.LabPatientID = p.ID
+      ${whereClause}
+    `;
+    const [statsResult] = await pool.query(statsQuery, queryParams);
+    const totalCollection = statsResult[0].totalCollection || 0;
+    const totalDiscount = statsResult[0].totalDiscount || 0;
+    const totalVisits = statsResult[0].totalVisits || 0;
 
     res.json({
       data: rows.map(convertRowDates),
@@ -2071,7 +2744,10 @@ app.get('/api/daily-expenses', async (req, res) => {
         total,
         page,
         limit,
-        totalPages: Math.ceil(total / limit)
+        totalPages: Math.ceil(total / limit),
+        totalCollection,
+        totalDiscount,
+        totalTests: totalVisits
       }
     });
   } catch (error) {
@@ -2079,45 +2755,122 @@ app.get('/api/daily-expenses', async (req, res) => {
   }
 });
 
-app.post('/api/daily-expenses', async (req, res) => {
+app.put('/api/lab-visits/:id', async (req, res) => {
   try {
-    const { id, date, description, category, amount, paymentMethod, createdBy } = req.body;
-    const createdAt = new Date().toISOString();
+    const { status, selectedTests, totalAmount, discountAmount, paidAmount, balanceAmount, paymentStatus } = req.body;
+    // Build dynamic update query
+    let updateFields = [];
+    let queryParams = [];
 
-    await pool.execute(
-      'INSERT INTO DailyExpenses (ID, Date, Description, Category, Amount, PaymentMethod, CreatedBy, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, date, description, category, amount, paymentMethod, createdBy, createdAt]
-    );
+    if (status !== undefined) {
+      updateFields.push('Status = ?');
+      queryParams.push(status);
+    }
+    if (selectedTests !== undefined) {
+      updateFields.push('SelectedTests = ?');
+      queryParams.push(JSON.stringify(selectedTests));
+    }
+    if (totalAmount !== undefined) {
+      updateFields.push('TotalAmount = ?');
+      queryParams.push(totalAmount);
+    }
+    if (discountAmount !== undefined) {
+      updateFields.push('DiscountAmount = ?');
+      queryParams.push(discountAmount);
+    }
+    if (paidAmount !== undefined) {
+      updateFields.push('PaidAmount = ?');
+      queryParams.push(paidAmount);
+    }
+    if (balanceAmount !== undefined) {
+      updateFields.push('BalanceAmount = ?');
+      queryParams.push(balanceAmount);
+    }
+    if (paymentStatus !== undefined) {
+      updateFields.push('PaymentStatus = ?');
+      queryParams.push(paymentStatus);
+    }
 
-    res.json({ success: true, id });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.put('/api/daily-expenses/:id', async (req, res) => {
-  try {
-    const { date, description, category, amount, paymentMethod } = req.body;
-
-    await pool.execute(
-      'UPDATE DailyExpenses SET Date = ?, Description = ?, Category = ?, Amount = ?, PaymentMethod = ? WHERE ID = ?',
-      [date, description, category, amount, paymentMethod, req.params.id]
-    );
-
+    if (updateFields.length > 0) {
+      queryParams.push(req.params.id);
+      await pool.query(
+        `UPDATE LabVisits SET ${updateFields.join(', ')} WHERE ID = ?`,
+        queryParams
+      );
+    }
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-app.delete('/api/daily-expenses/:id', async (req, res) => {
+// Record a new payment for a lab visit
+app.post('/api/lab-visits/:id/payment', async (req, res) => {
   try {
-    await pool.execute('DELETE FROM DailyExpenses WHERE ID = ?', [req.params.id]);
+    const { labPatientId, amountPaid, paymentMethod, notes, discountAmount } = req.body;
+    const visitId = req.params.id;
+
+    // 1. Fetch current visit
+    const [visits] = await pool.query('SELECT * FROM LabVisits WHERE ID = ?', [visitId]);
+    if (visits.length === 0) return res.status(404).json({ error: 'Visit not found' });
+    const visit = visits[0];
+
+    // 2. Calculate new totals
+    const newDiscount = Number(visit.DiscountAmount) + Number(discountAmount || 0);
+    const newPaid = Number(visit.PaidAmount) + Number(amountPaid || 0);
+    const newBalance = Number(visit.TotalAmount) - newDiscount - newPaid;
+    const paymentStatus = newBalance <= 0 ? 'Paid' : (newPaid > 0 ? 'Partial' : 'Unpaid');
+
+    // 3. Update the Visit record
+    await pool.query(
+      'UPDATE LabVisits SET DiscountAmount = ?, PaidAmount = ?, PaymentStatus = ? WHERE ID = ?',
+      [newDiscount, newPaid, paymentStatus, visitId]
+    );
+
+    // 4. Create ledger entry if some money actually changed hands
+    if (Number(amountPaid) > 0) {
+      const paymentId = `LPMT-${Date.now().toString(36).toUpperCase()}`;
+      await pool.query(
+        'INSERT INTO LabFeesLedger (ID, LabPatientID, VisitID, AmountPaid, PaymentMethod, Notes, PaymentDate) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [paymentId, labPatientId, visitId, amountPaid, paymentMethod || 'Cash', notes || '', new Date().toISOString()]
+      );
+    }
+
+    res.json({ success: true, paymentStatus });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get payment ledger for a lab patient
+app.get('/api/lab-visits/:patientId/payments', async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT h.*, v.TotalAmount, v.DiscountAmount, v.PaidAmount AS VisitPaidAmount ' +
+      'FROM LabFeesLedger h ' +
+      'JOIN LabVisits v ON h.VisitID = v.ID ' +
+      'WHERE h.LabPatientID = ? ORDER BY h.PaymentDate DESC',
+      [req.params.patientId]
+    );
+    res.json(rows.map(convertRowDates));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/lab-visits/:id', async (req, res) => {
+  try {
+    const [result] = await pool.query('DELETE FROM LabVisits WHERE ID = ?', [req.params.id]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Lab Visit not found' });
+    }
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
+
+
 
 // ============ ROLES API ============
 
@@ -2438,15 +3191,33 @@ app.get('/api/daily-expenses', async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
     const offset = (page - 1) * limit;
+    const month = req.query.month; // e.g. YYYY-MM
 
-    // 1. Get total count
-    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM DailyExpenses');
-    const total = countResult[0].total;
+    let whereClause = '';
+    let params = [];
+
+    if (month && month.trim() !== '') {
+      whereClause = 'WHERE Date LIKE ?';
+      params.push(`${month}%`);
+    }
+
+    // 1. Get total count and monthly sum
+    const [countResult] = await pool.query(`SELECT COUNT(*) as total, SUM(Amount) as monthlyTotal FROM DailyExpenses ${whereClause}`, params);
+    const total = countResult[0].total || 0;
+    const monthlyTotal = parseFloat(countResult[0].monthlyTotal) || 0;
+
 
     // 2. Get paginated data
-    const [rows] = await pool.execute(
-      `SELECT * FROM DailyExpenses ORDER BY Date DESC, CreatedAt DESC LIMIT ${limit} OFFSET ${offset}`
-    );
+    // Use pool.query (not pool.execute): dynamic whereClause means the SQL text changes per request
+    let query = `SELECT * FROM DailyExpenses ${whereClause} ORDER BY Date DESC, CreatedAt DESC`;
+    let queryParams = [...params];
+
+    if (limit !== -1) {
+      query += ` LIMIT ? OFFSET ?`;
+      queryParams.push(Number(limit), Number(offset));
+    }
+
+    const [rows] = await pool.query(query, queryParams);
 
     res.json({
       data: rows.map(convertRowDates),
@@ -2454,7 +3225,8 @@ app.get('/api/daily-expenses', async (req, res) => {
         total,
         page,
         limit,
-        totalPages: Math.ceil(total / limit)
+        totalPages: Math.ceil(total / limit),
+        monthlyTotal
       }
     });
   } catch (error) {
