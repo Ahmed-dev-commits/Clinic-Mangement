@@ -152,7 +152,7 @@ function convertRowDates(row) {
   }
 
   // Convert other date fields
-  ['UpdatedAt', 'NotifiedAt', 'CollectedAt', 'VisitDate', 'TestDate', 'ReportDate', 'FollowUpDate'].forEach(field => {
+  ['UpdatedAt', 'NotifiedAt', 'CollectedAt', 'VisitDate', 'TestDate', 'ReportDate', 'FollowUpDate', 'ApprovalTime'].forEach(field => {
     if (converted[field] && !(converted[field] instanceof Date)) {
       const date = new Date(converted[field]);
       if (!isNaN(date.getTime())) {
@@ -352,6 +352,10 @@ async function initializeDatabase() {
     try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN ProfileTests JSON"); } catch (e) { }
 
 
+    // Attempt to add Approval tracking columns to AdvancePayments (Migration)
+    try { await pool.execute("ALTER TABLE AdvancePayments ADD COLUMN ApprovedBy VARCHAR(100) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE AdvancePayments ADD COLUMN ApprovalTime DATETIME NULL"); } catch (e) { }
+
     // LabResults table
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS LabResults (
@@ -432,25 +436,114 @@ async function initializeDatabase() {
     // LabResults Priority migration
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN Priority VARCHAR(50) DEFAULT 'Normal'"); } catch (e) { }
 
-    // Backfill Visits from Patients table
-    // Insert a visit record for any patient who doesn't have one yet (migration for existing data)
+    // HR Upgrade Migrations
+    try { await pool.execute("ALTER TABLE Employees ADD COLUMN StandardDailyHours INT DEFAULT 8"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Employees ADD COLUMN ShiftStartTime TIME DEFAULT '09:00:00'"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Employees ADD COLUMN ShiftEndTime TIME DEFAULT '17:00:00'"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Payroll ADD COLUMN OvertimeHours DECIMAL(5, 2) DEFAULT 0.00"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Payroll ADD COLUMN OvertimeAmount DECIMAL(10, 2) DEFAULT 0.00"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Payroll ADD COLUMN GrossSalary DECIMAL(10, 2) DEFAULT 0.00"); } catch (e) { }
+
+    // Users table
     await pool.execute(`
-      INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt)
-      SELECT ID, VisitDate, Symptoms, CreatedAt FROM Patients
-      WHERE ID NOT IN (SELECT DISTINCT PatientID FROM Visits)
+      CREATE TABLE IF NOT EXISTS Users(
+        ID VARCHAR(50) PRIMARY KEY,
+        Username VARCHAR(100) UNIQUE NOT NULL,
+        Password VARCHAR(255) NOT NULL,
+        Name VARCHAR(255) NOT NULL,
+        Email VARCHAR(255),
+        Phone VARCHAR(50),
+        Role VARCHAR(50) DEFAULT 'Receptionist',
+        Permissions TEXT,
+        IsActive TINYINT DEFAULT 1,
+        CreatedBy VARCHAR(50),
+        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UpdatedAt DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        LastLogin DATETIME
+      )
     `);
 
+    // Roles table - dynamic roles managed by admin
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS Roles (
+        ID INT AUTO_INCREMENT PRIMARY KEY,
+        Name VARCHAR(100) UNIQUE NOT NULL,
+        Description TEXT,
+        IsSystem TINYINT(1) DEFAULT 0,
+        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
 
+    // Employees table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS Employees (
+          ID VARCHAR(50) PRIMARY KEY,
+          UserID VARCHAR(50) NULL,
+          Name VARCHAR(255) NOT NULL,
+          Designation VARCHAR(100),
+          Phone VARCHAR(20),
+          JoiningDate DATE,
+          BasicSalary DECIMAL(10, 2) DEFAULT 0,
+          StandardDailyHours INT DEFAULT 8,
+          ShiftStartTime TIME DEFAULT '09:00:00',
+          ShiftEndTime TIME DEFAULT '17:00:00',
+          Status VARCHAR(20) DEFAULT 'Active',
+          CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (UserID) REFERENCES Users(ID) ON DELETE SET NULL
+      )
+    `);
 
+    // LeaveRequests table (now safe as Employees exists)
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS LeaveRequests (
+          ID VARCHAR(50) PRIMARY KEY,
+          EmployeeID VARCHAR(50) NOT NULL,
+          StartDate DATE NOT NULL,
+          EndDate DATE NOT NULL,
+          Reason TEXT,
+          Status ENUM('Pending', 'Approved', 'Rejected') DEFAULT 'Pending',
+          ApprovedBy VARCHAR(50),
+          CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (EmployeeID) REFERENCES Employees(ID) ON DELETE CASCADE
+      )
+    `);
 
+    // Appointments table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS Appointments (
+          ID VARCHAR(50) PRIMARY KEY,
+          PatientID VARCHAR(50) NULL,
+          PatientName VARCHAR(255) NOT NULL,
+          Phone VARCHAR(20) NOT NULL,
+          ApptDate DATE NOT NULL,
+          ApptTime TIME NOT NULL,
+          Service VARCHAR(100) DEFAULT 'Consultation',
+          Status VARCHAR(50) DEFAULT 'Pending',
+          Notes TEXT NULL,
+          TokenNumber INT NOT NULL DEFAULT 1,
+          CreatedBy VARCHAR(100) NULL,
+          CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    // Index for fast daily lookups
+    try { await pool.execute('CREATE INDEX idx_appt_date ON Appointments (ApptDate)'); } catch (e) { }
+    // Migration: ensure page_appointments permission exists for existing roles
+    try {
+      await pool.execute("INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES ('Admin', 'page_appointments')");
+      await pool.execute("INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES ('Receptionist', 'page_appointments')");
+      await pool.execute("INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES ('Doctor', 'page_appointments')");
+    } catch (e) { }
 
-
-
-
-
-
-
-
+    // Backfill Visits from Patients table
+    try {
+      await pool.execute(`
+        INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt)
+        SELECT ID, VisitDate, Symptoms, CreatedAt FROM Patients
+        WHERE ID NOT IN (SELECT DISTINCT PatientID FROM Visits)
+      `);
+    } catch (e) {
+      console.warn('⚠️ Could not backfill visits:', e.message);
+    }
 
     // PatientServices table
     await pool.execute(`
@@ -465,37 +558,57 @@ async function initializeDatabase() {
 )
   `);
 
-    // Users table
+    // Attendance
     await pool.execute(`
-      CREATE TABLE IF NOT EXISTS Users(
-    ID VARCHAR(50) PRIMARY KEY,
-    Username VARCHAR(100) UNIQUE NOT NULL,
-    Password VARCHAR(255) NOT NULL,
-    Name VARCHAR(255) NOT NULL,
-    Email VARCHAR(255),
-    Phone VARCHAR(50),
-    Role VARCHAR(50) DEFAULT 'Receptionist',
-    Permissions TEXT,
-    IsActive TINYINT DEFAULT 1,
-    CreatedBy VARCHAR(50),
-    CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UpdatedAt DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    LastLogin DATETIME
-  )
-  `);
-
-    // Roles table - dynamic roles managed by admin
-    await pool.execute(`
-      CREATE TABLE IF NOT EXISTS Roles (
-        ID INT AUTO_INCREMENT PRIMARY KEY,
-        Name VARCHAR(100) UNIQUE NOT NULL,
-        Description TEXT,
-        IsSystem TINYINT(1) DEFAULT 0,
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      CREATE TABLE IF NOT EXISTS Attendance (
+          ID INT AUTO_INCREMENT PRIMARY KEY,
+          EmployeeID VARCHAR(50) NOT NULL,
+          Date DATE NOT NULL,
+          Status ENUM('Present', 'Absent', 'Leave', 'Late') DEFAULT 'Present',
+          CheckIn TIME,
+          CheckOut TIME,
+          Notes TEXT,
+          UNIQUE KEY emp_date (EmployeeID, Date)
       )
     `);
 
-    // RolePermissions table - default permissions for each role
+    // AdvancePayments
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS AdvancePayments (
+          ID VARCHAR(50) PRIMARY KEY,
+          EmployeeID VARCHAR(50) NOT NULL,
+          Date DATE NOT NULL,
+          Amount DECIMAL(10, 2) NOT NULL,
+          Description TEXT,
+          Status ENUM('Pending', 'Deducted', 'Cancelled') DEFAULT 'Pending'
+      )
+    `);
+
+    // Payroll
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS Payroll (
+          ID VARCHAR(50) PRIMARY KEY,
+          EmployeeID VARCHAR(50) NOT NULL,
+          Month INT NOT NULL,
+          Year INT NOT NULL,
+          BasicSalary DECIMAL(10, 2) NOT NULL,
+          Bonus DECIMAL(10, 2) DEFAULT 0,
+          Deductions DECIMAL(10, 2) DEFAULT 0,
+          NetSalary DECIMAL(10, 2) NOT NULL,
+          PaymentStatus ENUM('Paid', 'Unpaid') DEFAULT 'Unpaid',
+          PaymentDate DATETIME,
+          CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    // Ensure all Payroll columns exist (Migration)
+    try { await pool.execute("ALTER TABLE Payroll ADD COLUMN OvertimeHours DECIMAL(10, 2) DEFAULT 0"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Payroll ADD COLUMN OvertimeAmount DECIMAL(10, 2) DEFAULT 0"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Payroll ADD COLUMN GrossSalary DECIMAL(10, 2) DEFAULT 0"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Payroll ADD COLUMN PresentDays INT DEFAULT 0"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Payroll ADD COLUMN LeaveDays INT DEFAULT 0"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Payroll ADD COLUMN AbsentDays INT DEFAULT 0"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Payroll ADD COLUMN WorkingDays INT DEFAULT 30"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Payroll ADD COLUMN LeaveThreshold INT DEFAULT 0"); } catch (e) { }
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS RolePermissions (
         ID INT AUTO_INCREMENT PRIMARY KEY,
@@ -547,9 +660,13 @@ async function initializeDatabase() {
 
       // Seed default permissions per role
       const defaultRolePermissions = {
-        Admin: ['page_dashboard', 'page_patients', 'page_fees', 'page_medicines', 'page_pharmacy', 'page_prescriptions', 'page_lab_registration', 'page_lab_fees', 'page_lab_results', 'page_pathology', 'page_users', 'page_expenses', 'page_settings'],
-        Doctor: ['page_dashboard', 'page_patients', 'page_medicines', 'page_prescriptions', 'page_settings'],
-        Receptionist: ['page_dashboard', 'page_patients', 'page_fees', 'page_pharmacy', 'page_expenses', 'page_settings'],
+        Admin: [
+          'page_dashboard', 'page_appointments', 'page_patients', 'page_fees', 'page_medicines', 'page_pharmacy',
+          'page_prescriptions', 'page_lab_registration', 'page_lab_fees', 'page_lab_results', 'page_pathology',
+          'page_users', 'page_expenses', 'page_settings', 'page_hr', 'page_salary_settings', 'btn_manage_staff'
+        ],
+        Doctor: ['page_dashboard', 'page_appointments', 'page_patients', 'page_medicines', 'page_prescriptions', 'page_settings'],
+        Receptionist: ['page_dashboard', 'page_appointments', 'page_patients', 'page_fees', 'page_pharmacy', 'page_expenses', 'page_settings'],
         LabTechnician: ['page_dashboard', 'page_lab_registration', 'page_lab_fees', 'page_lab_results', 'page_pathology', 'page_settings'],
       };
       for (const [roleName, permissions] of Object.entries(defaultRolePermissions)) {
@@ -563,7 +680,7 @@ async function initializeDatabase() {
       console.log('✅ Default roles and permissions seeded');
     }
 
-    // Insert default users if none exist
+    // Seed default users if none exist
     const [userCount] = await pool.execute('SELECT COUNT(*) as count FROM Users');
     if (userCount[0].count === 0) {
       const defaultUsers = [
@@ -581,82 +698,12 @@ async function initializeDatabase() {
       }
     } else {
       // Force update admin password if table already exists (as requested by user)
-      await pool.execute(
-        "UPDATE Users SET Password = ? WHERE Username = 'admin'",
-        ['Admin123@#']
-      );
-    }
-    await pool.execute(`
-      CREATE TABLE IF NOT EXISTS DailyExpenses(
-    ID VARCHAR(50) PRIMARY KEY,
-    Date VARCHAR(50),
-    Description TEXT,
-    Category VARCHAR(100),
-    Amount DECIMAL(10, 2) DEFAULT 0,
-    PaymentMethod VARCHAR(50),
-    CreatedBy VARCHAR(100),
-    CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
-  )
-  `);
-
-    // LabVisits table with payment columns
-    await pool.execute(`
-      CREATE TABLE IF NOT EXISTS LabVisits (
-        ID VARCHAR(50) PRIMARY KEY,
-        LabPatientID VARCHAR(50) NOT NULL,
-        VisitDate DATE NOT NULL,
-        Status VARCHAR(50) DEFAULT 'Pending',
-        SelectedTests JSON NULL,
-        TotalAmount DECIMAL(10, 2) DEFAULT 0,
-        DiscountAmount DECIMAL(10, 2) DEFAULT 0,
-        PaidAmount DECIMAL(10, 2) DEFAULT 0,
-        PaymentStatus VARCHAR(50) DEFAULT 'Unpaid',
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // LabFeesLedger table for the ledger
-    await pool.execute(`
-      CREATE TABLE IF NOT EXISTS LabFeesLedger (
-        ID VARCHAR(50) PRIMARY KEY,
-        LabPatientID VARCHAR(50) NOT NULL,
-        VisitID VARCHAR(50) NOT NULL,
-        AmountPaid DECIMAL(10, 2) NOT NULL,
-        PaymentMethod VARCHAR(50) DEFAULT 'Cash',
-        Notes TEXT,
-        PaymentDate DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // Stock table (Medicine Inventory - separate from prescriptions)
-    await pool.execute(`
-      CREATE TABLE IF NOT EXISTS stock(
-    ID VARCHAR(50) PRIMARY KEY,
-    Name VARCHAR(255) NOT NULL,
-    Category VARCHAR(100),
-    Quantity INT DEFAULT 0,
-    Price DECIMAL(10, 2) DEFAULT 0,
-    LowStockThreshold INT DEFAULT 10,
-    CreatedAt TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  )
-  `);
-
-    // Insert default users if none exist
-    const [users] = await pool.execute('SELECT COUNT(*) as count FROM Users');
-    if (users[0].count === 0) {
-      const defaultUsers = [
-        { id: 'USR-000', username: 'admin', password: 'admin123', name: 'System Admin', role: 'Admin' },
-        { id: 'USR-001', username: 'receptionist', password: 'reception123', name: 'Front Desk', role: 'Receptionist' },
-        { id: 'USR-002', username: 'doctor', password: 'doctor123', name: 'Dr. Admin', role: 'Doctor' },
-        { id: 'USR-003', username: 'labtech', password: 'lab123', name: 'Lab Technician', role: 'LabTechnician' },
-      ];
-
-      for (const user of defaultUsers) {
+      try {
         await pool.execute(
-          'INSERT INTO Users (ID, Username, Password, Name, Role) VALUES (?, ?, ?, ?, ?)',
-          [user.id, user.username, user.password, user.name, user.role]
+          "UPDATE Users SET Password = ? WHERE Username = 'admin'",
+          ['Admin123@#']
         );
-      }
+      } catch (e) { }
     }
 
     // Check if Prescriptions table has new columns, if not add them
@@ -704,6 +751,26 @@ async function initializeDatabase() {
         ['GLOBAL', 'Global', JSON.stringify(defaultGlobalSettings)]
       );
       console.log('✅ Default Global Settings initialized');
+    }
+
+    // Insert Default Salary Configuration if not exists
+    const [salaryConfigCount] = await pool.execute("SELECT COUNT(*) as count FROM AppSettings WHERE ID = 'SALARY_CONFIG'");
+    if (salaryConfigCount[0].count === 0) {
+      const defaultSalaryConfig = {
+        workingDaysMethod: 'Fixed',
+        fixedWorkingDays: 30,
+        paidLeavesPerMonth: 2,
+        overtimeEnabled: true,
+        overtimeRateMultiplier: 1.0,
+        lateRuleEnabled: true,
+        latesForOneDayDeduction: 3,
+        absentDeductionEnabled: true
+      };
+      await pool.execute(
+        "INSERT INTO AppSettings (ID, Category, Data) VALUES (?, ?, ?)",
+        ['SALARY_CONFIG', 'Global', JSON.stringify(defaultSalaryConfig)]
+      );
+      console.log('✅ Default Salary Configuration initialized');
     }
 
     console.log('✅ Prescriptions table schema updated');
@@ -2324,6 +2391,12 @@ app.get('/api/lab-results', async (req, res) => {
       params.push(labPatientId);
     }
 
+    if (status) {
+      const statusList = status.split(',');
+      whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'Status IN (' + statusList.map(() => '?').join(',') + ')';
+      params.push(...statusList);
+    }
+
     if (fromDate && toDate) {
       const { startUtc } = getPktDayBounds(fromDate);
       const { endUtc } = getPktDayBounds(toDate);
@@ -3262,6 +3335,507 @@ app.delete('/api/daily-expenses/:id', async (req, res) => {
   }
 });
 
+// ============ HR & PAYROLL API ============
+
+app.get('/api/employees/me/:userId', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM Employees WHERE UserID = ?', [req.params.userId]);
+    res.json(rows[0] ? convertRowDates(rows[0]) : null);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Employees ---
+app.get('/api/employees', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM Employees ORDER BY CreatedAt DESC');
+    res.json(rows.map(convertRowDates));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/employees', async (req, res) => {
+  try {
+    const { ID, UserID, Name, Designation, Phone, JoiningDate, BasicSalary, Status, StandardDailyHours, ShiftStartTime, ShiftEndTime } = req.body;
+    await pool.execute(
+      'INSERT INTO Employees (ID, UserID, Name, Designation, Phone, JoiningDate, BasicSalary, Status, StandardDailyHours, ShiftStartTime, ShiftEndTime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [ID, UserID || null, Name, Designation || null, Phone || null, JoiningDate || null, BasicSalary || 0, Status || 'Active', StandardDailyHours || 8, ShiftStartTime || '09:00:00', ShiftEndTime || '17:00:00']
+    );
+    res.json({ success: true, id: ID });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/employees/:id', async (req, res) => {
+  try {
+    const { UserID, Name, Designation, Phone, JoiningDate, BasicSalary, Status, StandardDailyHours, ShiftStartTime, ShiftEndTime } = req.body;
+    await pool.execute(
+      'UPDATE Employees SET UserID = ?, Name = ?, Designation = ?, Phone = ?, JoiningDate = ?, BasicSalary = ?, Status = ?, StandardDailyHours = ?, ShiftStartTime = ?, ShiftEndTime = ? WHERE ID = ?',
+      [UserID || null, Name, Designation || null, Phone || null, JoiningDate || null, BasicSalary || 0, Status || 'Active', StandardDailyHours || 8, ShiftStartTime || '09:00:00', ShiftEndTime || '17:00:00', req.params.id]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/employees/:id', async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM Employees WHERE ID = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Attendance ---
+app.get('/api/attendance', async (req, res) => {
+  try {
+    const { date, employeeId, startDate, endDate } = req.query;
+    let whereClause = 'WHERE 1=1';
+    let params = [];
+
+    if (date) {
+      whereClause += ' AND Date = ?';
+      params.push(date);
+    }
+    if (employeeId) {
+      whereClause += ' AND EmployeeID = ?';
+      params.push(employeeId);
+    }
+    if (startDate && endDate) {
+      whereClause += ' AND Date BETWEEN ? AND ?';
+      params.push(startDate, endDate);
+    }
+
+    const [rows] = await pool.query(`SELECT * FROM Attendance ${whereClause} ORDER BY Date DESC`, params);
+    res.json(rows.map(convertRowDates));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/attendance/mark', async (req, res) => {
+  try {
+    const { EmployeeID, Date: recordDate, Status, CheckIn, CheckOut, Notes } = req.body;
+
+    // IP Security Validation
+    let isAuthorized = true;
+    try {
+      const [settingsRows] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
+      if (settingsRows.length > 0 && settingsRows[0].Data) {
+        const globalData = typeof settingsRows[0].Data === 'string' ? JSON.parse(settingsRows[0].Data) : settingsRows[0].Data;
+
+        if (globalData.clinicIpAddress && globalData.clinicIpAddress.trim() !== '') {
+          // Get client IP
+          const rawClientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || '';
+          const clientIpStr = String(rawClientIp);
+          const requiredIp = globalData.clinicIpAddress.trim();
+
+          // Support multiple IPs separated by comma
+          const allowedIps = requiredIp.split(',').map(ip => ip.trim()).filter(ip => ip.length > 0);
+
+          const isAllowedIP = allowedIps.some(ip => clientIpStr.includes(ip));
+
+          if (!isAllowedIP) {
+            console.log(`[ATTENDANCE BLOCKED] Required IP(s): ${requiredIp}, Client IP: ${clientIpStr}`);
+            isAuthorized = false;
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Error reading IP settings:", e);
+    }
+
+    if (!isAuthorized) {
+      return res.status(403).json({ error: "You cannot mark the attendance right now. Please connect to the clinic's Wi-Fi network." });
+    }
+
+    // Check for existing record to prevent status changing
+    const [existing] = await pool.query("SELECT Status FROM Attendance WHERE EmployeeID = ? AND Date = ?", [EmployeeID, recordDate]);
+    if (existing.length > 0 && existing[0].Status && existing[0].Status !== Status) {
+      return res.status(403).json({ error: `Attendance is already marked as '${existing[0].Status}' and cannot be changed.` });
+    }
+
+    await pool.execute(
+      `INSERT INTO Attendance (EmployeeID, Date, Status, CheckIn, CheckOut, Notes) 
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE Status = VALUES(Status), CheckIn = VALUES(CheckIn), CheckOut = VALUES(CheckOut), Notes = VALUES(Notes)`,
+      [EmployeeID, recordDate, Status, CheckIn || null, CheckOut || null, Notes || null]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Leave Management ---
+app.get('/api/leaves', async (req, res) => {
+  try {
+    const { employeeId, status } = req.query;
+    let whereClause = 'WHERE 1=1';
+    let params = [];
+    if (employeeId) {
+      whereClause += ' AND EmployeeID = ?';
+      params.push(employeeId);
+    }
+    if (status) {
+      whereClause += ' AND Status = ?';
+      params.push(status);
+    }
+    const [rows] = await pool.query(`SELECT * FROM LeaveRequests ${whereClause} ORDER BY CreatedAt DESC`, params);
+    res.json(rows.map(convertRowDates));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/leaves', async (req, res) => {
+  try {
+    const { ID, EmployeeID, StartDate, EndDate, Reason } = req.body;
+    await pool.execute(
+      'INSERT INTO LeaveRequests (ID, EmployeeID, StartDate, EndDate, Reason, Status) VALUES (?, ?, ?, ?, ?, ?)',
+      [ID, EmployeeID, StartDate, EndDate, Reason || null, 'Pending']
+    );
+    res.json({ success: true, id: ID });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/leaves/:id/status', async (req, res) => {
+  try {
+    const { status, approvedBy } = req.body;
+    await pool.execute('UPDATE LeaveRequests SET Status = ?, ApprovedBy = ? WHERE ID = ?', [status, approvedBy || null, req.params.id]);
+
+    // Auto-mark attendance
+    if (status === 'Approved') {
+      const [leaves] = await pool.query('SELECT EmployeeID, StartDate, EndDate FROM LeaveRequests WHERE ID = ?', [req.params.id]);
+      if (leaves.length > 0) {
+        const leave = leaves[0];
+        let currentDate = new Date(leave.StartDate);
+        const endDate = new Date(leave.EndDate);
+
+        while (currentDate <= endDate) {
+          const dateStr = [
+            currentDate.getFullYear(),
+            String(currentDate.getMonth() + 1).padStart(2, '0'),
+            String(currentDate.getDate()).padStart(2, '0')
+          ].join('-');
+
+          await pool.execute(
+            `INSERT INTO Attendance (EmployeeID, Date, Status, Notes) VALUES (?, ?, 'Leave', 'Auto-Approved Leave')
+             ON DUPLICATE KEY UPDATE Status = 'Leave', Notes = 'Auto-Approved Leave'`,
+            [leave.EmployeeID, dateStr]
+          );
+          currentDate.setDate(currentDate.getDate() + 1);
+        }
+      }
+    }
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/leaves/:id', async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM LeaveRequests WHERE ID = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Advance Payments ---
+app.get('/api/advances', async (req, res) => {
+  try {
+    const { employeeId, status } = req.query;
+    let whereClause = 'WHERE 1=1';
+    let params = [];
+    if (employeeId) {
+      whereClause += ' AND EmployeeID = ?';
+      params.push(employeeId);
+    }
+    if (status) {
+      whereClause += ' AND Status = ?';
+      params.push(status);
+    }
+    const [rows] = await pool.query(`SELECT * FROM AdvancePayments ${whereClause} ORDER BY Date DESC`, params);
+    const converted = rows.map(convertRowDates);
+    if (converted.length > 0) console.log('DEBUG: First Advance Row:', JSON.stringify(converted[0], null, 2));
+    res.json(converted);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/advances', async (req, res) => {
+  try {
+    const { ID, EmployeeID, Date: advanceDate, Amount, Description, Status, ApprovedBy } = req.body;
+    const finalStatus = Status || 'Pending';
+    const approvalTime = (finalStatus === 'Approved' || finalStatus === 'Deducted') ? new Date() : null;
+
+    await pool.execute(
+      'INSERT INTO AdvancePayments (ID, EmployeeID, Date, Amount, Description, Status, ApprovedBy, ApprovalTime) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [ID, EmployeeID, advanceDate, Amount, Description || null, finalStatus, ApprovedBy || null, approvalTime]
+    );
+    res.json({ success: true, id: ID });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/advances/:id/status', async (req, res) => {
+  try {
+    const { status, approvedBy } = req.body;
+    await pool.execute(
+      'UPDATE AdvancePayments SET Status = ?, ApprovedBy = ?, ApprovalTime = NOW() WHERE ID = ?',
+      [status, approvedBy || null, req.params.id]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/advances/:id', async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM AdvancePayments WHERE ID = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Payroll ---
+app.get('/api/payroll', async (req, res) => {
+  try {
+    const { month, year } = req.query;
+    let whereClause = 'WHERE 1=1';
+    let params = [];
+    if (month && year) {
+      whereClause += ' AND Month = ? AND Year = ?';
+      params.push(month, year);
+    }
+    const [rows] = await pool.query(`SELECT * FROM Payroll ${whereClause} ORDER BY CreatedAt DESC`, params);
+    res.json(rows.map(convertRowDates));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Salary Config endpoints
+app.get('/api/hr/salary-config', async (req, res) => {
+  try {
+    const [rows] = await pool.execute("SELECT Data FROM AppSettings WHERE ID = 'SALARY_CONFIG'");
+    if (rows.length > 0) {
+      const config = typeof rows[0].Data === 'string' ? JSON.parse(rows[0].Data) : rows[0].Data;
+      res.json(config);
+    } else {
+      res.status(404).json({ error: 'Salary configuration not found' });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/hr/salary-config', async (req, res) => {
+  try {
+    const data = req.body;
+    await pool.execute(
+      `INSERT INTO AppSettings (ID, Category, Data) VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE Data = VALUES(Data)`,
+      ['SALARY_CONFIG', 'Global', JSON.stringify(data)]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/payroll/generate', async (req, res) => {
+  try {
+    const { month, year, workingDays: workingDaysInput, leaveThreshold: leaveThresholdInput } = req.body;
+
+    // 1. Fetch Global Salary Config
+    let [configRows] = await pool.execute("SELECT Data FROM AppSettings WHERE ID = 'SALARY_CONFIG'");
+    const config = configRows.length > 0 ? (typeof configRows[0].Data === 'string' ? JSON.parse(configRows[0].Data) : configRows[0].Data) : {
+      fixedWorkingDays: 30,
+      paidLeavesPerMonth: 2,
+      overtimeHourlyRate: 200,
+      latesForOneDayDeduction: 3,
+      overtimeEnabled: true
+    };
+
+    // Parameters with Fallbacks: req.body overrides global config
+    const workingDays = workingDaysInput || config.fixedWorkingDays || 30;
+    const leaveThreshold = leaveThresholdInput !== undefined ? leaveThresholdInput : (config.paidLeavesPerMonth || 0);
+
+    // 2. Get all active employees
+    const [employees] = await pool.query("SELECT * FROM Employees WHERE Status = 'Active'");
+
+    // 3. Generate payroll for each employee
+    for (const emp of employees) {
+      // Get attendance stats for the month
+      const [attendanceStats] = await pool.query(
+        "SELECT Status, COUNT(*) as count FROM Attendance WHERE EmployeeID = ? AND MONTH(Date) = ? AND YEAR(Date) = ? GROUP BY Status",
+        [emp.ID, month, year]
+      );
+
+      const stats = { Present: 0, Absent: 0, Leave: 0, Late: 0 };
+      attendanceStats.forEach(s => { stats[s.Status] = s.count || 0; });
+
+      const presentOnlyDays = stats.Present || 0;
+      const lateDays = stats.Late || 0;
+      const absentDays = stats.Absent || 0;
+      const leaveDays = stats.Leave || 0;
+      const presentDays = presentOnlyDays + lateDays;
+
+      // Late Rule Penalty
+      let latePenaltyDays = 0;
+      if (config.lateRuleEnabled && config.latesForOneDayDeduction > 0) {
+        latePenaltyDays = Math.floor(lateDays / config.latesForOneDayDeduction);
+      }
+
+      // Calculate payable days: Total worked + Leaves (up to threshold)
+      const paidLeaveDays = Math.min(leaveDays, leaveThreshold);
+      const totalPayableDays = presentOnlyDays + (lateDays - latePenaltyDays) + paidLeaveDays;
+
+      // Calculate deduction days: Total working days - Payable days
+      // This includes explicit absents AND late penalty days AND unlogged days
+      const totalDeductibleDays = Math.max(0, workingDays - totalPayableDays);
+
+      // Calculate daily and hourly rate
+      const stdDailyHours = emp.StandardDailyHours || 8;
+      const shiftEndTime = emp.ShiftEndTime || '17:00:00';
+      const perDaySalary = emp.BasicSalary / workingDays;
+      const hourlyRate = perDaySalary / stdDailyHours;
+      const absenceDeduction = perDaySalary * totalDeductibleDays;
+
+      // Calculate Overtime natively with MySQL TIMEDIFF
+      const [overtime] = await pool.query(
+        `SELECT ROUND(SUM(TIME_TO_SEC(TIMEDIFF(CheckOut, ?))) / 3600, 2) as ot_hours 
+         FROM Attendance 
+         WHERE EmployeeID = ? AND MONTH(Date) = ? AND YEAR(Date) = ? 
+         AND CheckOut IS NOT NULL AND CheckOut > ?`,
+        [shiftEndTime, emp.ID, month, year, shiftEndTime]
+      );
+      const overtimeHours = parseFloat(overtime[0].ot_hours) || 0;
+
+      // Use fixed hourly rate for overtime amount
+      const otRate = config.overtimeEnabled ? (config.overtimeHourlyRate || 0) : 0;
+      const overtimeAmount = overtimeHours * otRate;
+
+      // Get pending advances
+      const [advances] = await pool.query(
+        "SELECT SUM(Amount) as total FROM AdvancePayments WHERE EmployeeID = ? AND Status = 'Pending' AND MONTH(Date) <= ? AND YEAR(Date) <= ?",
+        [emp.ID, month, year]
+      );
+      const advanceDeduction = advances[0].total || 0;
+
+      const totalDeductions = absenceDeduction + advanceDeduction;
+      const bonus = 0; // Optional extension for Future Bonus APIs
+      const grossSalary = parseFloat(emp.BasicSalary) + overtimeAmount + bonus;
+      const netSalary = Math.max(0, grossSalary - totalDeductions);
+
+      const payrollId = `PR-${emp.ID}-${year}-${month}`;
+
+      // Insert or Update Payroll
+      await pool.execute(
+        `INSERT INTO Payroll (ID, EmployeeID, Month, Year, BasicSalary, Bonus, Deductions, NetSalary, PaymentStatus, OvertimeHours, OvertimeAmount, GrossSalary, PresentDays, LeaveDays, AbsentDays, WorkingDays, LeaveThreshold)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Unpaid', ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE BasicSalary=VALUES(BasicSalary), Bonus=VALUES(Bonus), Deductions=VALUES(Deductions), NetSalary=VALUES(NetSalary), OvertimeHours=VALUES(OvertimeHours), OvertimeAmount=VALUES(OvertimeAmount), GrossSalary=VALUES(GrossSalary), PresentDays=VALUES(PresentDays), LeaveDays=VALUES(LeaveDays), AbsentDays=VALUES(AbsentDays), WorkingDays=VALUES(WorkingDays), LeaveThreshold=VALUES(LeaveThreshold)`,
+        [payrollId, emp.ID, month, year, emp.BasicSalary, bonus, totalDeductions, netSalary, overtimeHours, overtimeAmount, grossSalary, presentDays, leaveDays, absentDays, workingDays, leaveThreshold]
+      );
+
+      // If there were advances deducted, mark them as Deducted
+      if (advanceDeduction > 0) {
+        await pool.execute(
+          "UPDATE AdvancePayments SET Status = 'Deducted' WHERE EmployeeID = ? AND Status = 'Pending' AND MONTH(Date) <= ? AND YEAR(Date) <= ?",
+          [emp.ID, month, year]
+        );
+      }
+    }
+
+    res.json({ success: true, count: employees.length });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// GET /api/attendance/monthly-summary — per-employee attendance counts for a month
+app.get('/api/attendance/monthly-summary', async (req, res) => {
+  try {
+    const { month, year } = req.query;
+    if (!month || !year) {
+      return res.status(400).json({ error: 'month and year are required' });
+    }
+
+    // Aggregate attendance status counts per employee
+    const [rows] = await pool.query(
+      `SELECT 
+         a.EmployeeID,
+         e.Name AS EmployeeName,
+         e.Designation,
+         e.ShiftEndTime,
+         SUM(CASE WHEN a.Status = 'Present' THEN 1 ELSE 0 END) AS presentDays,
+         SUM(CASE WHEN a.Status = 'Absent'  THEN 1 ELSE 0 END) AS absentDays,
+         SUM(CASE WHEN a.Status = 'Late'    THEN 1 ELSE 0 END) AS lateDays,
+         SUM(CASE WHEN a.Status = 'Leave'   THEN 1 ELSE 0 END) AS leaveDays,
+         COUNT(*)                                               AS totalMarked
+       FROM Attendance a
+       JOIN Employees e ON a.EmployeeID = e.ID
+       WHERE MONTH(a.Date) = ? AND YEAR(a.Date) = ?
+         AND e.Status = 'Active'
+       GROUP BY a.EmployeeID, e.Name, e.Designation, e.ShiftEndTime`,
+      [month, year]
+    );
+
+    // Also fetch overtime hours per employee for the month
+    const [otRows] = await pool.query(
+      `SELECT 
+         a.EmployeeID,
+         ROUND(SUM(TIME_TO_SEC(TIMEDIFF(a.CheckOut, e.ShiftEndTime))) / 3600, 2) AS overtimeHours
+       FROM Attendance a
+       JOIN Employees e ON a.EmployeeID = e.ID
+       WHERE MONTH(a.Date) = ? AND YEAR(a.Date) = ?
+         AND a.CheckOut IS NOT NULL AND a.CheckOut > e.ShiftEndTime
+         AND e.Status = 'Active'
+       GROUP BY a.EmployeeID`,
+      [month, year]
+    );
+
+    const otMap = {};
+    otRows.forEach(r => { otMap[r.EmployeeID] = parseFloat(r.overtimeHours) || 0; });
+
+    const result = rows.map(r => ({
+      ...r,
+      overtimeHours: otMap[r.EmployeeID] || 0
+    }));
+
+    res.json(result);
+  } catch (error) {
+    console.error('Error fetching monthly attendance summary:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/payroll/:id/pay', async (req, res) => {
+  try {
+    await pool.execute(
+      "UPDATE Payroll SET PaymentStatus = 'Paid', PaymentDate = CURRENT_TIMESTAMP WHERE ID = ?",
+      [req.params.id]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', database: 'MySQL', timestamp: new Date().toISOString() });
@@ -3353,6 +3927,118 @@ for (const p of possiblePaths) {
     break;
   }
 }
+
+// ============ APPOINTMENTS API ============
+
+// GET /api/appointments — list for a given date, with optional status & search
+app.get('/api/appointments', async (req, res) => {
+  try {
+    const { date, status, search } = req.query;
+
+    let whereClause = 'WHERE 1=1';
+    const params = [];
+
+    if (date) {
+      whereClause += ' AND ApptDate = ?';
+      params.push(date);
+    }
+
+    if (status && status !== 'All' && status !== 'undefined') {
+      whereClause += ' AND Status = ?';
+      params.push(status);
+    }
+
+    if (search && search !== 'undefined') {
+      whereClause += ' AND (PatientName LIKE ? OR Phone LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`);
+    }
+
+    const [rows] = await pool.query(
+      `SELECT * FROM Appointments ${whereClause} ORDER BY TokenNumber ASC, ApptTime ASC`,
+      params
+    );
+
+    res.json(rows.map(convertRowDates));
+  } catch (error) {
+    console.error('Error fetching appointments:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// POST /api/appointments — book a new appointment (auto-assigns daily token)
+app.post('/api/appointments', async (req, res) => {
+  try {
+    const { id, patientId, name, phone, date, time, service, notes, createdBy } = req.body;
+
+    if (!name || !phone || !date || !time) {
+      return res.status(400).json({ error: 'Name, phone, date and time are required.' });
+    }
+
+    // Auto-calculate next token number for the given date
+    const [tokenRows] = await pool.execute(
+      'SELECT COALESCE(MAX(TokenNumber), 0) + 1 AS nextToken FROM Appointments WHERE ApptDate = ?',
+      [date]
+    );
+    const tokenNumber = tokenRows[0].nextToken;
+
+    const apptId = id || `APPT-${Date.now().toString(36).toUpperCase()}`;
+
+    await pool.execute(
+      `INSERT INTO Appointments (ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Service, Status, Notes, TokenNumber, CreatedBy)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending', ?, ?, ?)`,
+      [apptId, (patientId && patientId !== '') ? patientId : null, name, phone, date, time, service || 'Consultation', notes || null, tokenNumber, createdBy || null]
+    );
+
+    res.json({ success: true, id: apptId, tokenNumber });
+  } catch (error) {
+    console.error('Error creating appointment:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/appointments/:id — update status or other fields
+app.put('/api/appointments/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { Status, PatientName, Phone, ApptDate, ApptTime, Service, Notes, PatientID } = req.body;
+
+    // Build dynamic SET clause
+    const updates = [];
+    const params = [];
+
+    if (Status !== undefined) { updates.push('Status = ?'); params.push(Status); }
+    if (PatientName !== undefined) { updates.push('PatientName = ?'); params.push(PatientName); }
+    if (Phone !== undefined) { updates.push('Phone = ?'); params.push(Phone); }
+    if (ApptDate !== undefined) { updates.push('ApptDate = ?'); params.push(ApptDate); }
+    if (ApptTime !== undefined) { updates.push('ApptTime = ?'); params.push(ApptTime); }
+    if (Service !== undefined) { updates.push('Service = ?'); params.push(Service); }
+    if (Notes !== undefined) { updates.push('Notes = ?'); params.push(Notes); }
+    if (PatientID !== undefined) { updates.push('PatientID = ?'); params.push(PatientID); }
+
+    if (updates.length === 0) {
+      return res.json({ success: true });
+    }
+
+    params.push(id);
+    await pool.query(`UPDATE Appointments SET ${updates.join(', ')} WHERE ID = ?`, params);
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating appointment:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/appointments/:id
+app.delete('/api/appointments/:id', async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM Appointments WHERE ID = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting appointment:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // 1. Serve Static Assets (JS, CSS, Images, Fonts) with long-term caching
 // Since Vite uses content hashing, it's safe to cache these indefinitely.
