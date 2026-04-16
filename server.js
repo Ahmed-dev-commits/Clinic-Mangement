@@ -21,6 +21,11 @@ console.log('-------------------------------------------');
 const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2/promise');
+const jwt = require('jsonwebtoken');
+const NodeCache = require('node-cache');
+
+const JWT_SECRET = process.env.JWT_SECRET || 'salamaat_extreme_secret_key_99';
+const apiCache = new NodeCache({ stdTTL: 60, checkperiod: 120 }); // Cache for 60s by default
 
 const app = express();
 
@@ -76,13 +81,73 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('🔥 Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-// 1. Strict No-Cache for API routes
+// 1. Strict No-Cache for API responses on the browser (We control caching Server-Side)
 app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
+  res.set('Connection', 'keep-alive'); // Explicitly help proxy maintain connection
   next();
 });
+
+// 1.5 JWT Authentication Middleware
+const authenticateToken = (req, res, next) => {
+  try {
+    // When mounted at '/api', Express strips that prefix — req.path is RELATIVE
+    // e.g. POST /api/users/login becomes req.path === '/users/login'
+    const openPaths = ['/users/login', '/health', '/status'];
+    // Also allow settings (needed for login page branding before auth)
+    if (openPaths.includes(req.path) || req.path.startsWith('/settings/')) {
+      return next();
+    }
+
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) {
+      return res.status(401).json({ error: 'Access Denied. No token provided.' });
+    }
+
+    jwt.verify(token, JWT_SECRET, (err, user) => {
+      if (err) {
+        return res.status(401).json({ error: 'Session expired or invalid token. Please log in again.' });
+      }
+      req.user = user;
+      next();
+    });
+  } catch (criticalErr) {
+    console.error('🔥 Critical Auth Middleware Error:', criticalErr);
+    res.status(500).json({ error: 'Internal Security Error' });
+  }
+};
+
+// Apply JWT Guard to all API routes
+app.use('/api', authenticateToken);
+
+// 1.8 Universal High-Concurrency Database Cache Middleware
+const cacheMiddleware = (req, res, next) => {
+  // If the user presses the 'Refresh' button on the UI frontend, it sends a ?refresh flag.
+  // We bust the cache for this route aggressively.
+  if (req.query.refresh === 'true' || req.query.refresh === '1') {
+    apiCache.del(req.originalUrl);
+  } else {
+    const cachedData = apiCache.get(req.originalUrl);
+    if (cachedData) {
+      return res.json(cachedData); // Return 1ms cached response for other concurrent users
+    }
+  }
+
+  // Intercept the final JSON response to populate the cache
+  const originalJson = res.json;
+  res.json = function (body) {
+    // Only cache successful OK responses
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      apiCache.set(req.originalUrl, body);
+    }
+    originalJson.call(this, body);
+  };
+  next();
+};
 
 // 2. Intelligent caching for Static Files (applied later)
 
@@ -96,9 +161,14 @@ async function createPool() {
     connectionLimit: process.env.DB_CONNECTION_LIMIT || 10,
     queueLimit: 0,
     enableKeepAlive: true,
-    keepAliveInitialDelay: 0,
+    keepAliveInitialDelay: 10000, // 10s delay
+    connectTimeout: 30000, // 30s to establish connection
+    acquireTimeout: 30000, // 30s to get a connection from pool
+    timeout: 60000,        // 60s for idle connections
     timezone: 'Z',
-    decimalNumbers: true
+    decimalNumbers: true,
+    supportBigNumbers: true,
+    bigNumberStrings: true
   };
 
   if (process.env.DATABASE_URL) {
@@ -122,6 +192,36 @@ async function createPool() {
       ...dbConfig
     });
   }
+
+  // --- POOL EVENT LOGGING & RESILIENCE ---
+  pool.on('connection', (connection) => {
+    console.log('📡 New database connection established');
+  });
+
+  pool.on('error', (err) => {
+    console.error('🔥 MySQL Pool Error:', err);
+    if (err.code === 'PROTOCOL_CONNECTION_LOST' || err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT') {
+      console.log('🔄 Attempting to re-establish connection pool...');
+      dbConnected = false;
+      // The pool usually handles this, but we log it for visibility
+    }
+  });
+
+  // --- HEARTBEAT MONITOR ---
+  setInterval(async () => {
+    if (pool) {
+      try {
+        const [rows] = await pool.query('SELECT 1');
+        if (!dbConnected) {
+          console.log('✅ Database connection recovered');
+          dbConnected = true;
+        }
+      } catch (err) {
+        console.error('⚠️ Database Heartbeat Failed:', err.message);
+        dbConnected = false;
+      }
+    }
+  }, 30000); // Check every 30 seconds
 }
 
 // Health Check Endpoint
@@ -1005,7 +1105,7 @@ app.put('/api/generic-medicines/:id', async (req, res) => {
 
 // ============ PATIENTS API ============
 
-app.get('/api/patients', async (req, res) => {
+app.get('/api/patients', cacheMiddleware, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
@@ -3247,7 +3347,16 @@ app.post('/api/users/login', async (req, res) => {
       }
 
       const permissions = JSON.stringify(userPerms);
-      res.json({ success: true, user: { ...convertRowDates(user), Permissions: permissions } });
+      const payloadUser = { ...convertRowDates(user), Permissions: permissions };
+
+      // Generate the JWT token with a 1 hour expiration
+      const token = jwt.sign(
+        { id: user.ID, username: user.Username, role: user.Role },
+        JWT_SECRET,
+        { expiresIn: '1h' }
+      );
+
+      res.json({ success: true, token, user: payloadUser });
     } else {
       res.status(401).json({ error: 'Invalid credentials' });
     }
@@ -3931,7 +4040,7 @@ for (const p of possiblePaths) {
 // ============ APPOINTMENTS API ============
 
 // GET /api/appointments — list for a given date, with optional status & search
-app.get('/api/appointments', async (req, res) => {
+app.get('/api/appointments', cacheMiddleware, async (req, res) => {
   try {
     const { date, status, search } = req.query;
 
@@ -4040,6 +4149,91 @@ app.delete('/api/appointments/:id', async (req, res) => {
   }
 });
 
+// ============ WHATSAPP API ============
+app.post('/api/whatsappsms', async (req, res) => {
+  try {
+    const { to, message } = req.body;
+    
+    // Get GLOBAL settings to extract UltraMsg credentials
+    const [settings] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
+    if (settings.length === 0) return res.status(400).json({ error: 'Global settings not found.' });
+    
+    let configStr = settings[0].Data;
+    if (typeof configStr === 'string') configStr = JSON.parse(configStr);
+    
+    const waConfig = configStr.whatsappConfig;
+    if (!waConfig || !waConfig.enabled) {
+      return res.status(400).json({ error: 'WhatsApp integration is currently disabled in Settings.' });
+    }
+    if (!waConfig.instanceId || !waConfig.token) {
+      return res.status(400).json({ error: 'WhatsApp instance ID or token missing.' });
+    }
+
+    // Format phone number to international string (remove symbols, ensure leading 92)
+    let toPhone = (to || '').replace(/\D/g, '');
+    if (toPhone.startsWith('0')) {
+      toPhone = '92' + toPhone.substring(1);
+    }
+    
+    // Use dynamic import or require
+    const axios = require('axios');
+    const response = await axios.post(`https://api.ultramsg.com/${waConfig.instanceId}/messages/chat`, {
+      token: waConfig.token,
+      to: `+${toPhone}`,
+      body: message
+    });
+    
+    res.json({ success: true, data: response.data });
+  } catch (error) {
+    console.error('WhatsApp sending error:', error?.response?.data || error.message);
+  }
+});
+
+// ============ SMS API ============
+app.post('/api/smsapi', async (req, res) => {
+  try {
+    const { to, message } = req.body;
+    
+    // Get GLOBAL settings to extract SMS credentials
+    const [settings] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
+    if (settings.length === 0) return res.status(400).json({ error: 'Global settings not found.' });
+    
+    let configStr = settings[0].Data;
+    if (typeof configStr === 'string') configStr = JSON.parse(configStr);
+    
+    const smsConfig = configStr.smsConfig;
+    if (!smsConfig || !smsConfig.enabled) {
+      return res.status(400).json({ error: 'SMS integration is currently disabled in Settings.' });
+    }
+    if (!smsConfig.providerUrlTemplate) {
+      return res.status(400).json({ error: 'SMS provider URL template is missing.' });
+    }
+
+    // Format phone number to string (remove symbols, ensure leading 92 depending on standard usually required by bulkSMS, 
+    // bulksms.com.pk usually wants e.g. 923001234567, but let's just strip formatting first)
+    let toPhone = (to || '').replace(/\D/g, '');
+    if (toPhone.startsWith('0')) {
+      toPhone = '92' + toPhone.substring(1);
+    }
+    
+    // Replace URL template strings
+    let targetUrl = smsConfig.providerUrlTemplate
+      .replace('{phone}', toPhone)
+      .replace('{message}', encodeURIComponent(message));
+      
+    // Some providers might mis-use `{{phone}}` or `[phone]`. The simple replace handles exact `{phone}` string.
+    
+    // Execute request
+    const axios = require('axios');
+    const response = await axios.get(targetUrl);
+    
+    res.json({ success: true, data: response.data });
+  } catch (error) {
+    console.error('SMS sending error:', error?.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to send SMS message.' });
+  }
+});
+
 // 1. Serve Static Assets (JS, CSS, Images, Fonts) with long-term caching
 // Since Vite uses content hashing, it's safe to cache these indefinitely.
 app.use('/assets', express.static(path.join(publicHtmlDistPath, 'assets'), {
@@ -4093,6 +4287,12 @@ try {
     console.log(`📁 Database: MySQL - ${process.env.DB_NAME}`);
     console.log(`🔗 Host: ${process.env.DB_HOST}:${process.env.DB_PORT}`);
   });
+
+  // --- SERVER TIMEOUT OPTIMIZATION (Fixes ERR_CONNECTION_RESET on Staging) ---
+  // Node's default is 5s, Hostinger's proxy usually expects 60s.
+  // We set Node higher so the proxy is the one to close the connection, not Node.
+  server.keepAliveTimeout = 65000; 
+  server.headersTimeout = 66000;
 
   server.on('error', (err) => {
     if (err.code === 'EADDRINUSE') {
