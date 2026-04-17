@@ -2765,30 +2765,29 @@ app.post('/api/patient-services', async (req, res) => {
     const now = new Date().toISOString();
 
     // 1. Insert Service Record
+    // Calculate proper Pakistani time for all stored timestamps
+    const nowObj = new Date();
+    const pktDateTimeStr = new Date(nowObj.getTime() + (5 * 60 * 60 * 1000)).toISOString().replace('T', ' ').slice(0, 19);
+    
     await pool.execute(
       'INSERT INTO PatientServices (ID, PatientID, Services, GrandTotal, Status, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [id, patientId, JSON.stringify(services), grandTotal, status || 'Draft', now, now]
+      [id, patientId, JSON.stringify(services), grandTotal, status || 'Draft', pktDateTimeStr, pktDateTimeStr]
     );
 
-    // 2. Touch Patient UpdatedAt ONLY if it is a Revisit (explicit user action)
     // 2. Touch Patient UpdatedAt and VisitDate ONLY if it is a Revisit (explicit user action)
     if (isRevisit === true) {
       console.log(`[Revisit] Updating patient ${patientId} timestamp and creating visit record.`);
 
-      // Get current date in PKT format YYYY-MM-DD using UTC_TIMESTAMP to avoid double offset
-      const [pktDateResult] = await pool.execute("SELECT DATE(CONVERT_TZ(UTC_TIMESTAMP(), '+00:00', '+05:00')) as pktDate");
-      const pktVisitDate = pktDateResult[0].pktDate;
-
-      // Update Patient record
+      // Update Patient record ensuring PKT is explicitly set natively
       await pool.execute(
         'UPDATE Patients SET UpdatedAt = ?, VisitDate = ? WHERE ID = ?',
-        [now, pktVisitDate, patientId]
+        [pktDateTimeStr, pktDateTimeStr, patientId]
       );
 
       // Create new Visit record
       await pool.execute(
         'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
-        [patientId, pktVisitDate, 'Revisit - New Service', now]
+        [patientId, pktDateTimeStr, 'Revisit - New Service', pktDateTimeStr]
       );
     }
 
