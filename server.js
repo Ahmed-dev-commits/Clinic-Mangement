@@ -27,6 +27,17 @@ const NodeCache = require('node-cache');
 const JWT_SECRET = process.env.JWT_SECRET || 'salamaat_extreme_secret_key_99';
 const apiCache = new NodeCache({ stdTTL: 60, checkperiod: 120 }); // Cache for 60s by default
 
+// Helper to flush all patient-related cache keys
+function flushPatientCache() {
+  const keys = apiCache.keys();
+  const patientKeys = keys.filter(k => k.includes('/api/patients') || k.includes('/api/profile'));
+  if (patientKeys.length > 0) {
+    console.log(`[CACHE] Flushing ${patientKeys.length} patient-related keys:`);
+    patientKeys.forEach(k => console.log(`  - 🗑️ ${k}`));
+    apiCache.del(patientKeys);
+  }
+}
+
 const app = express();
 
 // ============ SIMPLE FILE LOGGER ============
@@ -127,13 +138,17 @@ app.use('/api', authenticateToken);
 // 1.8 Universal High-Concurrency Database Cache Middleware
 const cacheMiddleware = (req, res, next) => {
   // If the user presses the 'Refresh' button on the UI frontend, it sends a ?refresh flag.
-  // We bust the cache for this route aggressively.
+  // We bust the cache for all patient-related queries to ensure a fresh start.
   if (req.query.refresh === 'true' || req.query.refresh === '1') {
-    apiCache.del(req.originalUrl);
+    if (req.originalUrl.includes('/api/patients') || req.originalUrl.includes('/api/profile')) {
+      flushPatientCache();
+    } else {
+      apiCache.del(req.originalUrl);
+    }
   } else {
     const cachedData = apiCache.get(req.originalUrl);
     if (cachedData) {
-      return res.json(cachedData); // Return 1ms cached response for other concurrent users
+      return res.json(cachedData); 
     }
   }
 
@@ -1392,22 +1407,33 @@ app.post('/api/patients', async (req, res) => {
       }
     }
 
-    const createdAt = new Date().toISOString();
+    // Calculate current date/time in PKT (UTC+5) for consistent hospital records
+    const now = new Date();
+    const pktDate = new Date(now.getTime() + (5 * 60 * 60 * 1000));
+    const pktDateTimeStr = pktDate.toISOString().replace('T', ' ').slice(0, 19);
+
+    // If visitDate provided by frontend is just a date (YYYY-MM-DD), append the current PKT time
+    let finalVisitDate = visitDate;
+    if (!visitDate || visitDate.length <= 10) {
+      finalVisitDate = pktDateTimeStr;
+    }
+
     // If mrn is provided use it, otherwise use id (for new patients without history)
     const patientMrn = mrn || id;
 
     // Insert into Patients
     await pool.execute(
       'INSERT INTO Patients (ID, MRN, CNIC, Name, GuardianName, Age, AgeMonths, AgeDays, Gender, Phone, Address, VisitDate, Symptoms, CreatedBy, CreatedByRole, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, patientMrn, cnic || null, name, guardianName || null, age, ageMonths || 0, ageDays || 0, gender, phone, address || null, visitDate, symptoms || null, createdBy || null, createdByRole || null, createdAt, createdAt]
+      [id, patientMrn, cnic || null, name, guardianName || null, age, ageMonths || 0, ageDays || 0, gender, phone, address || null, finalVisitDate, symptoms || null, createdBy || null, createdByRole || null, pktDateTimeStr, pktDateTimeStr]
     );
 
     // Insert into Visits
     await pool.execute(
       'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
-      [id, visitDate, symptoms || null, createdAt]
+      [id, finalVisitDate, symptoms || null, pktDateTimeStr]
     );
 
+    flushPatientCache();
     res.json({ success: true, id });
   } catch (error) {
     console.error('Error adding patient:', error);
@@ -1424,6 +1450,17 @@ app.put('/api/patients/:id', async (req, res) => {
     const pktDate = new Date(now.getTime() + (5 * 60 * 60 * 1000));
     const updatedAt = pktDate.toISOString().replace('T', ' ').slice(0, 19);
 
+    // ROCK-SOLID REVISIT TIME: 
+    // If it's a revisit, we ALWAYS use current PKT time for the visit column 
+    // to avoid frontend midnight-truncation issues.
+    let finalVisitDate = visitDate;
+    if (isRevisit === true) {
+      finalVisitDate = updatedAt;
+    } else if (visitDate && visitDate.length <= 10) {
+      // If it's just an edit but user sent a date-only string, append current time to prevent midnight bug
+      finalVisitDate = `${visitDate} ${updatedAt.split(' ')[1]}`;
+    }
+
     // Update Patient Profile
     await pool.execute(
       'UPDATE Patients SET Name = ?, GuardianName = ?, CNIC = ?, Age = ?, AgeMonths = ?, AgeDays = ?, Gender = ?, Phone = ?, Address = ?, VisitDate = COALESCE(?, VisitDate), Symptoms = ?, UpdatedAt = ? WHERE ID = ?',
@@ -1437,7 +1474,7 @@ app.put('/api/patients/:id', async (req, res) => {
         gender ?? null,
         phone ?? null,
         address ?? null,
-        visitDate ?? null,
+        finalVisitDate ?? null,
         symptoms ?? null,
         updatedAt,
         req.params.id
@@ -1448,10 +1485,11 @@ app.put('/api/patients/:id', async (req, res) => {
     if (isRevisit === true) {
       await pool.execute(
         'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
-        [req.params.id, visitDate ?? null, symptoms ?? null, updatedAt]
+        [req.params.id, finalVisitDate, symptoms || 'Revisit Recorded', updatedAt]
       );
     }
 
+    flushPatientCache();
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1491,6 +1529,7 @@ app.delete('/api/patients/:id', async (req, res) => {
       return res.status(404).json({ error: 'Patient not found' });
     }
 
+    flushPatientCache();
     res.json({ success: true, message: 'Patient and all related records deleted' });
   } catch (error) {
     if (connection) await connection.rollback();
@@ -2791,6 +2830,7 @@ app.post('/api/patient-services', async (req, res) => {
       );
     }
 
+    flushPatientCache();
     res.json({ success: true, id });
   } catch (error) {
     res.status(500).json({ error: error.message });
