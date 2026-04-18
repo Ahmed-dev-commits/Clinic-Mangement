@@ -260,24 +260,33 @@ function convertRowDates(row) {
   // Helper to safely convert any value to ISO string
   // This is the "Timezone Shield" logic
   const toIso = (val) => {
-    if (!val) return val;
+    if (!val) return null;
     
-    // If it is a Date object (from DATETIME column) or a bare string
-    // we need to check if it already has timezone information.
-    const s = String(val);
+    const s = String(val).trim();
+    
+    // Handle MySQL Zero Dates or empty strings
+    if (s === '0000-00-00 00:00:00' || s === '0000-00-00' || s === '') {
+      return null;
+    }
+
+    // Check if it already has timezone information
     const hasTimezone = s.includes('Z') || s.includes('+') || (s.includes('T') && s.length > 20);
 
     if (!hasTimezone) {
-      // BARE STRING/DATE: These are our "Legacy" or "Mixed" records.
-      // We know the clinic stores time in PKT, so we explicitly tag it.
-      // This stops the frontend from adding an extra 5 hours.
-      const datePart = s.split('.')[0].replace(' ', 'T').replace('Z', '');
-      return `${datePart}+05:00`;
+      // BARE STRING: Assume it is Pakistan Time.
+      // Clean up the format to ensure it's a valid ISO candidate
+      const datePart = s.split('.')[0].replace(' ', 'T');
+      const candidate = datePart.includes('T') ? `${datePart}+05:00` : `${datePart}T00:00:00+05:00`;
+      
+      // Verify validity before returning
+      const d = new Date(candidate);
+      return isNaN(d.getTime()) ? null : candidate;
     }
 
-    // MODERN ISO STRING: Has 'Z' or '+'. Standard Date handling works perfectly.
+    // MODERN ISO STRING: Verify and return standard Zulu ISO
     const d = new Date(val);
-    return isNaN(d.getTime()) ? val : d.toISOString();
+    if (isNaN(d.getTime())) return null;
+    return d.toISOString();
   };
 
   // Convert all date fields using the Shield
