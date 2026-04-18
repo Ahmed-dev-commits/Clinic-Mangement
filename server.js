@@ -148,7 +148,7 @@ const cacheMiddleware = (req, res, next) => {
   } else {
     const cachedData = apiCache.get(req.originalUrl);
     if (cachedData) {
-      return res.json(cachedData); 
+      return res.json(cachedData);
     }
   }
 
@@ -248,26 +248,25 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Helper function to convert MySQL rows with dates to ISO format
 function convertRowDates(row) {
   if (!row) return row;
 
   const converted = { ...row };
 
+  // Helper to safely convert any value to ISO string
+  const toIso = (val) => {
+    if (!val) return val;
+    const d = new Date(val);
+    return isNaN(d.getTime()) ? val : d.toISOString();
+  };
+
   // Convert CreatedAt if it exists
-  if (converted.CreatedAt && !(converted.CreatedAt instanceof Date)) {
-    const date = new Date(converted.CreatedAt);
-    if (!isNaN(date.getTime())) {
-      converted.CreatedAt = date.toISOString();
-    } else {
-      // Keep original or set to null/default? 
-      // Safest is to keep original string or null, but for this app consistency:
-      converted.CreatedAt = new Date().toISOString();
-    }
+  if (converted.CreatedAt) {
+    converted.CreatedAt = toIso(converted.CreatedAt);
   }
 
   // Convert other date fields
-  ['UpdatedAt', 'NotifiedAt', 'CollectedAt', 'VisitDate', 'TestDate', 'ReportDate', 'FollowUpDate', 'ApprovalTime'].forEach(field => {
+  ['UpdatedAt', 'NotifiedAt', 'CollectedAt', 'VisitDate', 'TestDate', 'ReportDate', 'FollowUpDate', 'ApprovalTime', 'FinalizedAt', 'LastUpdatedAt'].forEach(field => {
     if (converted[field] && !(converted[field] instanceof Date)) {
       const date = new Date(converted[field]);
       if (!isNaN(date.getTime())) {
@@ -1151,7 +1150,7 @@ app.get('/api/patients', cacheMiddleware, async (req, res) => {
 
     // Filter by CreatedToday or Recent24h if requested (and no custom range/search overrides it)
     if (recent24h && !fromDate && !toDate && !search) {
-      const condition = "(CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY) OR UpdatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY))";
+      const condition = "(CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY) OR VisitDate >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY))";
       if (whereClause) {
         whereClause += ` AND ${condition}`;
       } else {
@@ -1175,33 +1174,33 @@ app.get('/api/patients', cacheMiddleware, async (req, res) => {
 
     // Advanced Date Range Filter
     if (fromDate && toDate) {
-      const { startUtc, endUtc } = getPktDayBounds(fromDate);
+      const { startUtc } = getPktDayBounds(fromDate);
       const { endUtc: endUtc2 } = getPktDayBounds(toDate);
-      const condition = "CreatedAt BETWEEN ? AND ?";
+      const condition = "(CreatedAt BETWEEN ? AND ? OR VisitDate BETWEEN ? AND ?)";
       if (whereClause) {
         whereClause += ` AND ${condition}`;
       } else {
         whereClause = `WHERE ${condition}`;
       }
-      params.push(startUtc, endUtc2);
+      params.push(startUtc, endUtc2, startUtc, endUtc2);
     } else if (fromDate) {
       const { startUtc } = getPktDayBounds(fromDate);
-      const condition = "CreatedAt >= ?";
+      const condition = "(CreatedAt >= ? OR VisitDate >= ?)";
       if (whereClause) {
         whereClause += ` AND ${condition}`;
       } else {
         whereClause = `WHERE ${condition}`;
       }
-      params.push(startUtc);
+      params.push(startUtc, startUtc);
     } else if (toDate) {
       const { endUtc } = getPktDayBounds(toDate);
-      const condition = "CreatedAt <= ?";
+      const condition = "(CreatedAt <= ? OR VisitDate <= ?)";
       if (whereClause) {
         whereClause += ` AND ${condition}`;
       } else {
         whereClause = `WHERE ${condition}`;
       }
-      params.push(endUtc);
+      params.push(endUtc, endUtc);
     }
 
     if (hasPrescriptionsOnly) {
@@ -1234,9 +1233,9 @@ app.get('/api/patients', cacheMiddleware, async (req, res) => {
     const total = countResult[0].total;
 
     // 2. Get Paginated Data
-    // Sort by Last Activity (Latest of CreatedAt or UpdatedAt)
+    // Sort by VisitDate (Latest Activity)
     const [rows] = await pool.query(
-      `SELECT * FROM Patients ${whereClause} ORDER BY GREATEST(CreatedAt, COALESCE(UpdatedAt, CreatedAt)) DESC LIMIT ? OFFSET ?`,
+      `SELECT * FROM Patients ${whereClause} ORDER BY VisitDate DESC, CreatedAt DESC LIMIT ? OFFSET ?`,
       [...params, Number(limit), Number(offset)]
     );
 
@@ -1407,16 +1406,12 @@ app.post('/api/patients', async (req, res) => {
       }
     }
 
-    // Calculate current date/time in PKT (UTC+5) for consistent hospital records
-    const now = new Date();
-    const pktDate = new Date(now.getTime() + (5 * 60 * 60 * 1000));
-    const pktDateTimeStr = pktDate.toISOString().replace('T', ' ').slice(0, 19);
-
-    // If visitDate provided by frontend is just a date (YYYY-MM-DD), append the current PKT time
-    let finalVisitDate = visitDate;
-    if (!visitDate || visitDate.length <= 10) {
-      finalVisitDate = pktDateTimeStr;
-    }
+    // Use literal PKT string (Standard Local Strategy)
+    // Use standard UTC ISO string (Pure UTC Strategy)
+    const now = new Date().toISOString();
+    
+    // For VisitDate, we also use the current moment's UTC string.
+    const finalVisitDate = visitDate || now;
 
     // If mrn is provided use it, otherwise use id (for new patients without history)
     const patientMrn = mrn || id;
@@ -1424,13 +1419,13 @@ app.post('/api/patients', async (req, res) => {
     // Insert into Patients
     await pool.execute(
       'INSERT INTO Patients (ID, MRN, CNIC, Name, GuardianName, Age, AgeMonths, AgeDays, Gender, Phone, Address, VisitDate, Symptoms, CreatedBy, CreatedByRole, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, patientMrn, cnic || null, name, guardianName || null, age, ageMonths || 0, ageDays || 0, gender, phone, address || null, finalVisitDate, symptoms || null, createdBy || null, createdByRole || null, pktDateTimeStr, pktDateTimeStr]
+      [id, patientMrn, cnic || null, name, guardianName || null, age, ageMonths || 0, ageDays || 0, gender, phone, address || null, finalVisitDate, symptoms || null, createdBy || null, createdByRole || null, now, now]
     );
 
     // Insert into Visits
     await pool.execute(
       'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
-      [id, finalVisitDate, symptoms || null, pktDateTimeStr]
+      [id, finalVisitDate, symptoms || null, now]
     );
 
     flushPatientCache();
@@ -1445,20 +1440,13 @@ app.put('/api/patients/:id', async (req, res) => {
   try {
     const { name, guardianName, cnic, age, ageMonths, ageDays, gender, phone, address, visitDate, symptoms, isRevisit } = req.body;
 
-    // CURRENT DATE IN PKT (UTC+5)
-    const now = new Date();
-    const pktDate = new Date(now.getTime() + (5 * 60 * 60 * 1000));
-    const updatedAt = pktDate.toISOString().replace('T', ' ').slice(0, 19);
+    const now = new Date().toISOString();
 
-    // ROCK-SOLID REVISIT TIME: 
-    // If it's a revisit, we ALWAYS use current PKT time for the visit column 
-    // to avoid frontend midnight-truncation issues.
+    // Pure UTC Strategy: 
+    // If it's a revisit, we ALWAYS use the current absolute moment (UTC ISO).
     let finalVisitDate = visitDate;
     if (isRevisit === true) {
-      finalVisitDate = updatedAt;
-    } else if (visitDate && visitDate.length <= 10) {
-      // If it's just an edit but user sent a date-only string, append current time to prevent midnight bug
-      finalVisitDate = `${visitDate} ${updatedAt.split(' ')[1]}`;
+      finalVisitDate = now;
     }
 
     // Update Patient Profile
@@ -1476,17 +1464,33 @@ app.put('/api/patients/:id', async (req, res) => {
         address ?? null,
         finalVisitDate ?? null,
         symptoms ?? null,
-        updatedAt,
+        now,
         req.params.id
       ]
     );
 
     // Insert new Visit ONLY if explicitly requested (e.g. Revisit)
     if (isRevisit === true) {
-      await pool.execute(
-        'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
-        [req.params.id, finalVisitDate, symptoms || 'Revisit Recorded', updatedAt]
+      // DEDUPLICATION LOGIC
+      const [existingVisits] = await pool.execute(
+        'SELECT ID FROM Visits WHERE PatientID = ? AND CreatedAt > DATE_SUB(?, INTERVAL 12 HOUR) ORDER BY CreatedAt DESC LIMIT 1',
+        [req.params.id, now]
       );
+
+      if (existingVisits.length === 0) {
+        await pool.execute(
+          'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
+          [req.params.id, finalVisitDate, symptoms || 'Revisit Recorded', now]
+        );
+      } else {
+        console.log(`[Deduplication] Skipping duplicate visit for patient ${req.params.id}`);
+        if (symptoms) {
+          await pool.execute(
+            'UPDATE Visits SET Symptoms = CONCAT(Symptoms, " | ", ?), VisitDate = ? WHERE ID = ?',
+            [symptoms, finalVisitDate, existingVisits[0].ID]
+          );
+        }
+      }
     }
 
     flushPatientCache();
@@ -2799,144 +2803,158 @@ app.get('/api/patient-services/:patientId', async (req, res) => {
 });
 
 app.post('/api/patient-services', async (req, res) => {
-  try {
-    const { id, patientId, services, grandTotal, status, isRevisit } = req.body;
+    try {
+      const { id, patientId, services, grandTotal, status, isRevisit } = req.body;
     const now = new Date().toISOString();
 
     // 1. Insert Service Record
-    // Calculate proper Pakistani time for all stored timestamps
-    const nowObj = new Date();
-    const pktDateTimeStr = new Date(nowObj.getTime() + (5 * 60 * 60 * 1000)).toISOString().replace('T', ' ').slice(0, 19);
+    // Standard UTC Strategy: Store the exact universal moment.
     
     await pool.execute(
       'INSERT INTO PatientServices (ID, PatientID, Services, GrandTotal, Status, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [id, patientId, JSON.stringify(services), grandTotal, status || 'Draft', pktDateTimeStr, pktDateTimeStr]
+      [id, patientId, JSON.stringify(services), grandTotal, status || 'Draft', now, now]
     );
 
     // 2. Touch Patient UpdatedAt and VisitDate ONLY if it is a Revisit (explicit user action)
     if (isRevisit === true) {
-      console.log(`[Revisit] Updating patient ${patientId} timestamp and creating visit record.`);
+      console.log(`[Revisit] Updating patient ${patientId} timestamp and checking for duplicate visit record.`);
 
-      // Update Patient record ensuring PKT is explicitly set natively
+      // Update Patient record using UTC ISO string
       await pool.execute(
         'UPDATE Patients SET UpdatedAt = ?, VisitDate = ? WHERE ID = ?',
-        [pktDateTimeStr, pktDateTimeStr, patientId]
+        [now, now, patientId]
       );
 
-      // Create new Visit record
-      await pool.execute(
-        'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
-        [patientId, pktDateTimeStr, 'Revisit - New Service', pktDateTimeStr]
+      // DEDUPLICATION LOGIC
+      const [existingVisits] = await pool.execute(
+        'SELECT ID FROM Visits WHERE PatientID = ? AND CreatedAt > DATE_SUB(?, INTERVAL 12 HOUR) ORDER BY CreatedAt DESC LIMIT 1',
+        [patientId, now]
       );
-    }
 
-    flushPatientCache();
-    res.json({ success: true, id });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.put('/api/patient-services/:id', async (req, res) => {
-  try {
-    const { services, grandTotal, status } = req.body;
-
-    await pool.execute(
-      'UPDATE PatientServices SET Services = ?, GrandTotal = ?, Status = ?, UpdatedAt = ? WHERE ID = ?',
-      [JSON.stringify(services), grandTotal, status, new Date().toISOString(), req.params.id]
-    );
-
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ============ LAB VISITS API ============
-
-app.post('/api/lab-visits', async (req, res) => {
-  try {
-    const { id, labPatientId, visitDate, selectedTests, status = 'Pending', totalAmount = 0 } = req.body;
-    await pool.query(
-      'INSERT INTO LabVisits (ID, LabPatientID, VisitDate, Status, SelectedTests, TotalAmount, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [id, labPatientId, visitDate, status, JSON.stringify(selectedTests || []), totalAmount, new Date().toISOString()]
-    );
-    res.status(201).json({ success: true, id });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.get('/api/lab-visits', async (req, res) => {
-  try {
-    const { labPatientId, search, recent24h, fromDate, toDate } = req.query;
-
-    let whereConditions = [];
-    let queryParams = [];
-
-    if (labPatientId) {
-      whereConditions.push('v.LabPatientID = ?');
-      queryParams.push(labPatientId);
-    }
-
-    if (search) {
-      const searchTerm = `%${search}%`;
-      whereConditions.push('(v.ID LIKE ? OR p.Name LIKE ? OR v.LabPatientID LIKE ? OR p.Phone LIKE ?)');
-      queryParams.push(searchTerm, searchTerm, searchTerm, searchTerm);
-    } else {
-      // Date filters only apply if not searching (matches Patients API behavior)
-      if (recent24h === 'true') {
-        whereConditions.push('v.CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)');
+      if (existingVisits.length === 0) {
+        // Create new Visit record
+        await pool.execute(
+          'INSERT INTO Visits (PatientID, VisitDate, Symptoms, CreatedAt) VALUES (?, ?, ?, ?)',
+          [patientId, now, 'Revisit - New Service', now]
+        );
       } else {
-        if (fromDate) {
-          whereConditions.push('DATE(v.VisitDate) >= ?');
-          queryParams.push(fromDate);
-        }
-        if (toDate) {
-          whereConditions.push('DATE(v.VisitDate) <= ?');
-          queryParams.push(toDate);
-        }
+        console.log(`[Deduplication] Service recorded. Skipping duplicate visit entry for patient ${patientId}.`);
+        // Append service note to existing visit
+        await pool.execute(
+          'UPDATE Visits SET Symptoms = CONCAT(Symptoms, " | New Service Added"), VisitDate = ? WHERE ID = ?',
+          [now, existingVisits[0].ID]
+        );
       }
     }
 
-    const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
-
-    // Legacy behavior for fetching patient specific visits without pagination limits
-    if (labPatientId && !req.query.page && !req.query.limit && !search && !recent24h && !fromDate && !toDate) {
-      const [rows] = await pool.query(
-        `SELECT v.*, p.Name as PatientName, p.Age, p.Gender, p.Phone FROM LabVisits v JOIN LabPatients p ON v.LabPatientID = p.ID ${whereClause} ORDER BY v.CreatedAt DESC`,
-        queryParams
-      );
-      return res.json(rows.map(convertRowDates));
+      flushPatientCache();
+      res.json({ success: true, id });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
     }
+  });
 
-    // Pagination for all visits
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 50;
-    const offset = (page - 1) * limit;
+  app.put('/api/patient-services/:id', async (req, res) => {
+    try {
+      const { services, grandTotal, status } = req.body;
 
-    // 1. Get total count for pagination
-    const countQuery = `
+      const pktNow = getNowPKT();
+      await pool.execute(
+        'UPDATE PatientServices SET Services = ?, GrandTotal = ?, Status = ?, UpdatedAt = ? WHERE ID = ?',
+        [JSON.stringify(services), grandTotal, status, pktNow, req.params.id]
+      );
+
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ============ LAB VISITS API ============
+
+  app.post('/api/lab-visits', async (req, res) => {
+    try {
+      const { id, labPatientId, visitDate, selectedTests, status = 'Pending', totalAmount = 0 } = req.body;
+      await pool.query(
+        'INSERT INTO LabVisits (ID, LabPatientID, VisitDate, Status, SelectedTests, TotalAmount, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [id, labPatientId, visitDate, status, JSON.stringify(selectedTests || []), totalAmount, new Date().toISOString()]
+      );
+      res.status(201).json({ success: true, id });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.get('/api/lab-visits', async (req, res) => {
+    try {
+      const { labPatientId, search, recent24h, fromDate, toDate } = req.query;
+
+      let whereConditions = [];
+      let queryParams = [];
+
+      if (labPatientId) {
+        whereConditions.push('v.LabPatientID = ?');
+        queryParams.push(labPatientId);
+      }
+
+      if (search) {
+        const searchTerm = `%${search}%`;
+        whereConditions.push('(v.ID LIKE ? OR p.Name LIKE ? OR v.LabPatientID LIKE ? OR p.Phone LIKE ?)');
+        queryParams.push(searchTerm, searchTerm, searchTerm, searchTerm);
+      } else {
+        // Date filters only apply if not searching (matches Patients API behavior)
+        if (recent24h === 'true') {
+          whereConditions.push('v.CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)');
+        } else {
+          if (fromDate) {
+            whereConditions.push('DATE(v.VisitDate) >= ?');
+            queryParams.push(fromDate);
+          }
+          if (toDate) {
+            whereConditions.push('DATE(v.VisitDate) <= ?');
+            queryParams.push(toDate);
+          }
+        }
+      }
+
+      const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
+
+      // Legacy behavior for fetching patient specific visits without pagination limits
+      if (labPatientId && !req.query.page && !req.query.limit && !search && !recent24h && !fromDate && !toDate) {
+        const [rows] = await pool.query(
+          `SELECT v.*, p.Name as PatientName, p.Age, p.Gender, p.Phone FROM LabVisits v JOIN LabPatients p ON v.LabPatientID = p.ID ${whereClause} ORDER BY v.CreatedAt DESC`,
+          queryParams
+        );
+        return res.json(rows.map(convertRowDates));
+      }
+
+      // Pagination for all visits
+      const page = parseInt(req.query.page) || 1;
+      const limit = parseInt(req.query.limit) || 50;
+      const offset = (page - 1) * limit;
+
+      // 1. Get total count for pagination
+      const countQuery = `
       SELECT COUNT(*) as total 
       FROM LabVisits v 
       JOIN LabPatients p ON v.LabPatientID = p.ID
       ${whereClause}
     `;
-    const [countResult] = await pool.query(countQuery, queryParams);
-    const total = countResult[0].total;
+      const [countResult] = await pool.query(countQuery, queryParams);
+      const total = countResult[0].total;
 
-    // 2. Fetch paginated data
-    const dataQuery = `
+      // 2. Fetch paginated data
+      const dataQuery = `
       SELECT v.*, p.Name as PatientName, p.Age, p.Gender, p.Phone 
       FROM LabVisits v 
       JOIN LabPatients p ON v.LabPatientID = p.ID
       ${whereClause}
       ORDER BY v.CreatedAt DESC LIMIT ? OFFSET ?
     `;
-    const [rows] = await pool.query(dataQuery, [...queryParams, limit, offset]);
+      const [rows] = await pool.query(dataQuery, [...queryParams, limit, offset]);
 
-    // 3. Calculate summary stats (totalCollection, totalDiscount) using the SAME whereClause
-    const statsQuery = `
+      // 3. Calculate summary stats (totalCollection, totalDiscount) using the SAME whereClause
+      const statsQuery = `
       SELECT 
         SUM(v.PaidAmount) as totalCollection, 
         SUM(v.DiscountAmount) as totalDiscount,
@@ -2945,987 +2963,987 @@ app.get('/api/lab-visits', async (req, res) => {
       JOIN LabPatients p ON v.LabPatientID = p.ID
       ${whereClause}
     `;
-    const [statsResult] = await pool.query(statsQuery, queryParams);
-    const totalCollection = statsResult[0].totalCollection || 0;
-    const totalDiscount = statsResult[0].totalDiscount || 0;
-    const totalVisits = statsResult[0].totalVisits || 0;
+      const [statsResult] = await pool.query(statsQuery, queryParams);
+      const totalCollection = statsResult[0].totalCollection || 0;
+      const totalDiscount = statsResult[0].totalDiscount || 0;
+      const totalVisits = statsResult[0].totalVisits || 0;
 
-    res.json({
-      data: rows.map(convertRowDates),
-      meta: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit),
-        totalCollection,
-        totalDiscount,
-        totalTests: totalVisits
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.put('/api/lab-visits/:id', async (req, res) => {
-  try {
-    const { status, selectedTests, totalAmount, discountAmount, paidAmount, balanceAmount, paymentStatus } = req.body;
-    // Build dynamic update query
-    let updateFields = [];
-    let queryParams = [];
-
-    if (status !== undefined) {
-      updateFields.push('Status = ?');
-      queryParams.push(status);
+      res.json({
+        data: rows.map(convertRowDates),
+        meta: {
+          total,
+          page,
+          limit,
+          totalPages: Math.ceil(total / limit),
+          totalCollection,
+          totalDiscount,
+          totalTests: totalVisits
+        }
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
     }
-    if (selectedTests !== undefined) {
-      updateFields.push('SelectedTests = ?');
-      queryParams.push(JSON.stringify(selectedTests));
-    }
-    if (totalAmount !== undefined) {
-      updateFields.push('TotalAmount = ?');
-      queryParams.push(totalAmount);
-    }
-    if (discountAmount !== undefined) {
-      updateFields.push('DiscountAmount = ?');
-      queryParams.push(discountAmount);
-    }
-    if (paidAmount !== undefined) {
-      updateFields.push('PaidAmount = ?');
-      queryParams.push(paidAmount);
-    }
-    if (balanceAmount !== undefined) {
-      updateFields.push('BalanceAmount = ?');
-      queryParams.push(balanceAmount);
-    }
-    if (paymentStatus !== undefined) {
-      updateFields.push('PaymentStatus = ?');
-      queryParams.push(paymentStatus);
-    }
+  });
 
-    if (updateFields.length > 0) {
-      queryParams.push(req.params.id);
-      await pool.query(
-        `UPDATE LabVisits SET ${updateFields.join(', ')} WHERE ID = ?`,
-        queryParams
-      );
-    }
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Record a new payment for a lab visit
-app.post('/api/lab-visits/:id/payment', async (req, res) => {
-  try {
-    const { labPatientId, amountPaid, paymentMethod, notes, discountAmount } = req.body;
-    const visitId = req.params.id;
-
-    // 1. Fetch current visit
-    const [visits] = await pool.query('SELECT * FROM LabVisits WHERE ID = ?', [visitId]);
-    if (visits.length === 0) return res.status(404).json({ error: 'Visit not found' });
-    const visit = visits[0];
-
-    // 2. Calculate new totals
-    const newDiscount = Number(visit.DiscountAmount) + Number(discountAmount || 0);
-    const newPaid = Number(visit.PaidAmount) + Number(amountPaid || 0);
-    const newBalance = Number(visit.TotalAmount) - newDiscount - newPaid;
-    const paymentStatus = newBalance <= 0 ? 'Paid' : (newPaid > 0 ? 'Partial' : 'Unpaid');
-
-    // 3. Update the Visit record
-    await pool.query(
-      'UPDATE LabVisits SET DiscountAmount = ?, PaidAmount = ?, PaymentStatus = ? WHERE ID = ?',
-      [newDiscount, newPaid, paymentStatus, visitId]
-    );
-
-    // 4. Create ledger entry if some money actually changed hands
-    if (Number(amountPaid) > 0) {
-      const paymentId = `LPMT-${Date.now().toString(36).toUpperCase()}`;
-      await pool.query(
-        'INSERT INTO LabFeesLedger (ID, LabPatientID, VisitID, AmountPaid, PaymentMethod, Notes, PaymentDate) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [paymentId, labPatientId, visitId, amountPaid, paymentMethod || 'Cash', notes || '', new Date().toISOString()]
-      );
-    }
-
-    res.json({ success: true, paymentStatus });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get payment ledger for a lab patient
-app.get('/api/lab-visits/:patientId/payments', async (req, res) => {
-  try {
-    const [rows] = await pool.query(
-      'SELECT h.*, v.TotalAmount, v.DiscountAmount, v.PaidAmount AS VisitPaidAmount ' +
-      'FROM LabFeesLedger h ' +
-      'JOIN LabVisits v ON h.VisitID = v.ID ' +
-      'WHERE h.LabPatientID = ? ORDER BY h.PaymentDate DESC',
-      [req.params.patientId]
-    );
-    res.json(rows.map(convertRowDates));
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.delete('/api/lab-visits/:id', async (req, res) => {
-  try {
-    const [result] = await pool.query('DELETE FROM LabVisits WHERE ID = ?', [req.params.id]);
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: 'Lab Visit not found' });
-    }
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-
-
-// ============ ROLES API ============
-
-// All available permission keys in the system
-// Page-based + button-level permissions
-const ALL_PERMISSIONS = [
-  // ── Pages ──
-  { key: 'page_dashboard', label: 'Dashboard', group: 'Pages' },
-  { key: 'page_patients', label: 'Patients', group: 'Pages' },
-  { key: 'page_fees', label: 'Fee Collection', group: 'Pages' },
-  { key: 'page_medicines', label: 'Medicines', group: 'Pages' },
-  { key: 'page_pharmacy', label: 'Pharmacy', group: 'Pages' },
-  { key: 'page_prescriptions', label: 'Prescriptions', group: 'Pages' },
-  { key: 'page_lab_results', label: 'Lab Results', group: 'Pages' },
-  { key: 'page_lab_management', label: 'Lab Management', group: 'Pages' },
-  { key: 'page_users', label: 'User Management', group: 'Pages' },
-  { key: 'page_expenses', label: 'Daily Expenses', group: 'Pages' },
-  { key: 'page_settings', label: 'Settings', group: 'Pages' },
-  // ── Button actions ──
-  { key: 'btn_add_patient', label: 'Add Patient', group: 'Actions' },
-  { key: 'btn_edit_patient', label: 'Edit Patient', group: 'Actions' },
-  { key: 'btn_delete_patient', label: 'Delete Patient', group: 'Actions' },
-  { key: 'btn_manage_stock', label: 'Manage Stock', group: 'Actions' },
-  { key: 'btn_add_lab_test', label: 'Add Lab Test', group: 'Actions' },
-  { key: 'btn_edit_lab_test', label: 'Edit Lab Test', group: 'Actions' },
-  { key: 'btn_delete_lab_test', label: 'Delete Lab Test', group: 'Actions' },
-];
-
-// GET /api/permissions - list all available permission keys
-app.get('/api/permissions', (req, res) => {
-  res.json(ALL_PERMISSIONS);
-});
-
-// GET /api/roles - list all roles with their permissions
-app.get('/api/roles', async (req, res) => {
-  try {
-    const [roles] = await pool.execute('SELECT * FROM Roles ORDER BY IsSystem DESC, Name ASC');
-    const [rolePerms] = await pool.execute('SELECT RoleName, Permission FROM RolePermissions');
-
-    const rolesWithPerms = roles.map(role => ({
-      id: role.ID,
-      name: role.Name,
-      description: role.Description,
-      isSystem: role.IsSystem === 1,
-      createdAt: role.CreatedAt,
-      permissions: rolePerms.filter(rp => rp.RoleName === role.Name).map(rp => rp.Permission),
-    }));
-
-    res.json(rolesWithPerms);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// POST /api/roles - create a new role
-app.post('/api/roles', async (req, res) => {
-  try {
-    const { name, description, permissions = [] } = req.body;
-    if (!name) return res.status(400).json({ error: 'Role name is required' });
-
-    await pool.execute(
-      'INSERT INTO Roles (Name, Description, IsSystem) VALUES (?, ?, 0)',
-      [name, description || '']
-    );
-
-    // Insert permissions for this role
-    for (const perm of permissions) {
-      await pool.execute(
-        'INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES (?, ?)',
-        [name, perm]
-      );
-    }
-
-    res.json({ success: true, message: `Role '${name}' created` });
-  } catch (error) {
-    if (error.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({ error: 'A role with this name already exists' });
-    }
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// PUT /api/roles/:name - update role name/description
-app.put('/api/roles/:name', async (req, res) => {
-  try {
-    const { name: oldName } = req.params;
-    const { name: newName, description } = req.body;
-
-    // Check if it's a system role (cannot rename)
-    const [existing] = await pool.execute('SELECT * FROM Roles WHERE Name = ?', [oldName]);
-    if (!existing[0]) return res.status(404).json({ error: 'Role not found' });
-    if (existing[0].IsSystem && newName && newName !== oldName) {
-      return res.status(403).json({ error: 'System roles cannot be renamed' });
-    }
-
-    await pool.execute(
-      'UPDATE Roles SET Name = ?, Description = ? WHERE Name = ?',
-      [newName || oldName, description ?? existing[0].Description, oldName]
-    );
-
-    // If name changed, update RolePermissions references
-    if (newName && newName !== oldName) {
-      await pool.execute('UPDATE RolePermissions SET RoleName = ? WHERE RoleName = ?', [newName, oldName]);
-      await pool.execute('UPDATE Users SET Role = ? WHERE Role = ?', [newName, oldName]);
-    }
-
-    res.json({ success: true, message: 'Role updated' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// PUT /api/roles/:name/permissions - update default permissions for a role
-app.put('/api/roles/:name/permissions', async (req, res) => {
-  try {
-    const { name } = req.params;
-    const { permissions = [] } = req.body;
-
-    // Delete existing permissions for this role
-    await pool.execute('DELETE FROM RolePermissions WHERE RoleName = ?', [name]);
-
-    // Insert new permissions
-    for (const perm of permissions) {
-      await pool.execute(
-        'INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES (?, ?)',
-        [name, perm]
-      );
-    }
-
-    res.json({ success: true, message: 'Permissions updated' });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// DELETE /api/roles/:name - delete a role (blocked if users are assigned)
-app.delete('/api/roles/:name', async (req, res) => {
-  try {
-    const { name } = req.params;
-
-    // Block deletion of system roles
-    const [existing] = await pool.execute('SELECT * FROM Roles WHERE Name = ?', [name]);
-    if (!existing[0]) return res.status(404).json({ error: 'Role not found' });
-    if (existing[0].IsSystem) return res.status(403).json({ error: 'System roles cannot be deleted' });
-
-    // Block if users are assigned to this role
-    const [assignedUsers] = await pool.execute('SELECT COUNT(*) as count FROM Users WHERE Role = ?', [name]);
-    if (assignedUsers[0].count > 0) {
-      return res.status(409).json({ error: `Cannot delete role: ${assignedUsers[0].count} user(s) are assigned to it` });
-    }
-
-    await pool.execute('DELETE FROM RolePermissions WHERE RoleName = ?', [name]);
-    await pool.execute('DELETE FROM Roles WHERE Name = ?', [name]);
-
-    res.json({ success: true, message: `Role '${name}' deleted` });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ============ USERS API ============
-
-// Get all users (excluding passwords)
-app.get('/api/users', async (req, res) => {
-  try {
-    const [rows] = await pool.execute(
-      'SELECT ID, Username, Name, Email, Phone, Role, Permissions, IsActive, CreatedBy, CreatedAt, UpdatedAt, LastLogin FROM Users ORDER BY CreatedAt DESC'
-    );
-    res.json(rows.map(convertRowDates));
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get single user by ID
-app.get('/api/users/:id', async (req, res) => {
-  try {
-    const [rows] = await pool.execute(
-      'SELECT ID, Username, Name, Email, Phone, Role, Permissions, IsActive, CreatedBy, CreatedAt, UpdatedAt, LastLogin FROM Users WHERE ID = ?',
-      [req.params.id]
-    );
-    res.json(rows[0] ? convertRowDates(rows[0]) : null);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Create new user
-app.post('/api/users', async (req, res) => {
-  try {
-    const { id, username, password, name, email, phone, role, permissions, createdBy } = req.body;
-    const createdAt = new Date().toISOString();
-    const permissionsJson = typeof permissions === 'string' ? permissions : JSON.stringify(permissions || []);
-
-    await pool.execute(
-      'INSERT INTO Users (ID, Username, Password, Name, Email, Phone, Role, Permissions, IsActive, CreatedBy, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, username, password, name, email || null, phone || null, role || 'Receptionist', permissionsJson, 1, createdBy || null, createdAt]
-    );
-
-    res.json({ success: true, id });
-  } catch (error) {
-    console.error('Error creating user:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Update user
-app.put('/api/users/:id', async (req, res) => {
-  try {
-    const { username, name, email, phone, role, isActive } = req.body;
-
-    await pool.execute(
-      'UPDATE Users SET Username = ?, Name = ?, Email = ?, Phone = ?, Role = ?, IsActive = ? WHERE ID = ?',
-      [username, name, email || null, phone || null, role, isActive !== undefined ? isActive : 1, req.params.id]
-    );
-
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Update user permissions
-app.put('/api/users/:id/permissions', async (req, res) => {
-  try {
-    const { permissions } = req.body;
-    const permissionsJson = typeof permissions === 'string' ? permissions : JSON.stringify(permissions || []);
-
-    await pool.execute(
-      'UPDATE Users SET Permissions = ? WHERE ID = ?',
-      [permissionsJson, req.params.id]
-    );
-
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Update user password
-app.put('/api/users/:id/password', async (req, res) => {
-  try {
-    const { password } = req.body;
-
-    await pool.execute(
-      'UPDATE Users SET Password = ? WHERE ID = ?',
-      [password, req.params.id]
-    );
-
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Soft delete user (set IsActive to 0)
-app.delete('/api/users/:id', async (req, res) => {
-  try {
-    await pool.execute(
-      'UPDATE Users SET IsActive = 0 WHERE ID = ?',
-      [req.params.id]
-    );
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Login endpoint
-app.post('/api/users/login', async (req, res) => {
-  try {
-    const { username, password } = req.body;
-    const [rows] = await pool.execute(
-      'SELECT ID, Username, Name, Email, Phone, Role, Permissions FROM Users WHERE Username = ? AND Password = ? AND IsActive = 1',
-      [username, password]
-    );
-
-    if (rows.length > 0) {
-      const user = rows[0];
-
-      // Update last login timestamp
-      await pool.execute(
-        'UPDATE Users SET LastLogin = ? WHERE ID = ?',
-        [new Date().toISOString(), user.ID]
-      );
-
-      // Load user's own permissions first; fall back to role defaults if empty
-      let userPerms = [];
-      try {
-        const raw = user.Permissions;
-        userPerms = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
-      } catch { userPerms = []; }
-
-      if (!userPerms || userPerms.length === 0) {
-        // Fall back to role-level permissions
-        const [rolePerms] = await pool.execute(
-          'SELECT Permission FROM RolePermissions WHERE RoleName = ?',
-          [user.Role]
-        );
-        userPerms = rolePerms.map(rp => rp.Permission);
-      }
-
-      const permissions = JSON.stringify(userPerms);
-      const payloadUser = { ...convertRowDates(user), Permissions: permissions };
-
-      // Generate the JWT token with a 1 hour expiration
-      const token = jwt.sign(
-        { id: user.ID, username: user.Username, role: user.Role },
-        JWT_SECRET,
-        { expiresIn: '1h' }
-      );
-
-      res.json({ success: true, token, user: payloadUser });
-    } else {
-      res.status(401).json({ error: 'Invalid credentials' });
-    }
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ============ DAILY EXPENSES API ============
-
-// Get all expenses
-app.get('/api/daily-expenses', async (req, res) => {
-  try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
-    const offset = (page - 1) * limit;
-    const month = req.query.month; // e.g. YYYY-MM
-
-    let whereClause = '';
-    let params = [];
-
-    if (month && month.trim() !== '') {
-      whereClause = 'WHERE Date LIKE ?';
-      params.push(`${month}%`);
-    }
-
-    // 1. Get total count and monthly sum
-    const [countResult] = await pool.query(`SELECT COUNT(*) as total, SUM(Amount) as monthlyTotal FROM DailyExpenses ${whereClause}`, params);
-    const total = countResult[0].total || 0;
-    const monthlyTotal = parseFloat(countResult[0].monthlyTotal) || 0;
-
-
-    // 2. Get paginated data
-    // Use pool.query (not pool.execute): dynamic whereClause means the SQL text changes per request
-    let query = `SELECT * FROM DailyExpenses ${whereClause} ORDER BY Date DESC, CreatedAt DESC`;
-    let queryParams = [...params];
-
-    if (limit !== -1) {
-      query += ` LIMIT ? OFFSET ?`;
-      queryParams.push(Number(limit), Number(offset));
-    }
-
-    const [rows] = await pool.query(query, queryParams);
-
-    res.json({
-      data: rows.map(convertRowDates),
-      meta: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit),
-        monthlyTotal
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Create new expense
-app.post('/api/daily-expenses', async (req, res) => {
-  try {
-    const { id, date, description, category, amount, paymentMethod, createdBy } = req.body;
-    const createdAt = new Date().toISOString();
-
-    await pool.execute(
-      'INSERT INTO DailyExpenses (ID, Date, Description, Category, Amount, PaymentMethod, CreatedBy, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, date, description, category, amount, paymentMethod, createdBy || 'System', createdAt]
-    );
-
-    res.json({ success: true, id });
-  } catch (error) {
-    console.error('Error creating expense:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Delete expense
-app.delete('/api/daily-expenses/:id', async (req, res) => {
-  try {
-    await pool.execute('DELETE FROM DailyExpenses WHERE ID = ?', [req.params.id]);
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ============ HR & PAYROLL API ============
-
-app.get('/api/employees/me/:userId', async (req, res) => {
-  try {
-    const [rows] = await pool.query('SELECT * FROM Employees WHERE UserID = ?', [req.params.userId]);
-    res.json(rows[0] ? convertRowDates(rows[0]) : null);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// --- Employees ---
-app.get('/api/employees', async (req, res) => {
-  try {
-    const [rows] = await pool.query('SELECT * FROM Employees ORDER BY CreatedAt DESC');
-    res.json(rows.map(convertRowDates));
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/api/employees', async (req, res) => {
-  try {
-    const { ID, UserID, Name, Designation, Phone, JoiningDate, BasicSalary, Status, StandardDailyHours, ShiftStartTime, ShiftEndTime } = req.body;
-    await pool.execute(
-      'INSERT INTO Employees (ID, UserID, Name, Designation, Phone, JoiningDate, BasicSalary, Status, StandardDailyHours, ShiftStartTime, ShiftEndTime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [ID, UserID || null, Name, Designation || null, Phone || null, JoiningDate || null, BasicSalary || 0, Status || 'Active', StandardDailyHours || 8, ShiftStartTime || '09:00:00', ShiftEndTime || '17:00:00']
-    );
-    res.json({ success: true, id: ID });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.put('/api/employees/:id', async (req, res) => {
-  try {
-    const { UserID, Name, Designation, Phone, JoiningDate, BasicSalary, Status, StandardDailyHours, ShiftStartTime, ShiftEndTime } = req.body;
-    await pool.execute(
-      'UPDATE Employees SET UserID = ?, Name = ?, Designation = ?, Phone = ?, JoiningDate = ?, BasicSalary = ?, Status = ?, StandardDailyHours = ?, ShiftStartTime = ?, ShiftEndTime = ? WHERE ID = ?',
-      [UserID || null, Name, Designation || null, Phone || null, JoiningDate || null, BasicSalary || 0, Status || 'Active', StandardDailyHours || 8, ShiftStartTime || '09:00:00', ShiftEndTime || '17:00:00', req.params.id]
-    );
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.delete('/api/employees/:id', async (req, res) => {
-  try {
-    await pool.execute('DELETE FROM Employees WHERE ID = ?', [req.params.id]);
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// --- Attendance ---
-app.get('/api/attendance', async (req, res) => {
-  try {
-    const { date, employeeId, startDate, endDate } = req.query;
-    let whereClause = 'WHERE 1=1';
-    let params = [];
-
-    if (date) {
-      whereClause += ' AND Date = ?';
-      params.push(date);
-    }
-    if (employeeId) {
-      whereClause += ' AND EmployeeID = ?';
-      params.push(employeeId);
-    }
-    if (startDate && endDate) {
-      whereClause += ' AND Date BETWEEN ? AND ?';
-      params.push(startDate, endDate);
-    }
-
-    const [rows] = await pool.query(`SELECT * FROM Attendance ${whereClause} ORDER BY Date DESC`, params);
-    res.json(rows.map(convertRowDates));
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/api/attendance/mark', async (req, res) => {
-  try {
-    const { EmployeeID, Date: recordDate, Status, CheckIn, CheckOut, Notes } = req.body;
-
-    // IP Security Validation
-    let isAuthorized = true;
+  app.put('/api/lab-visits/:id', async (req, res) => {
     try {
-      const [settingsRows] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
-      if (settingsRows.length > 0 && settingsRows[0].Data) {
-        const globalData = typeof settingsRows[0].Data === 'string' ? JSON.parse(settingsRows[0].Data) : settingsRows[0].Data;
+      const { status, selectedTests, totalAmount, discountAmount, paidAmount, balanceAmount, paymentStatus } = req.body;
+      // Build dynamic update query
+      let updateFields = [];
+      let queryParams = [];
 
-        if (globalData.clinicIpAddress && globalData.clinicIpAddress.trim() !== '') {
-          // Get client IP
-          const rawClientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || '';
-          const clientIpStr = String(rawClientIp);
-          const requiredIp = globalData.clinicIpAddress.trim();
+      if (status !== undefined) {
+        updateFields.push('Status = ?');
+        queryParams.push(status);
+      }
+      if (selectedTests !== undefined) {
+        updateFields.push('SelectedTests = ?');
+        queryParams.push(JSON.stringify(selectedTests));
+      }
+      if (totalAmount !== undefined) {
+        updateFields.push('TotalAmount = ?');
+        queryParams.push(totalAmount);
+      }
+      if (discountAmount !== undefined) {
+        updateFields.push('DiscountAmount = ?');
+        queryParams.push(discountAmount);
+      }
+      if (paidAmount !== undefined) {
+        updateFields.push('PaidAmount = ?');
+        queryParams.push(paidAmount);
+      }
+      if (balanceAmount !== undefined) {
+        updateFields.push('BalanceAmount = ?');
+        queryParams.push(balanceAmount);
+      }
+      if (paymentStatus !== undefined) {
+        updateFields.push('PaymentStatus = ?');
+        queryParams.push(paymentStatus);
+      }
 
-          // Support multiple IPs separated by comma
-          const allowedIps = requiredIp.split(',').map(ip => ip.trim()).filter(ip => ip.length > 0);
+      if (updateFields.length > 0) {
+        queryParams.push(req.params.id);
+        await pool.query(
+          `UPDATE LabVisits SET ${updateFields.join(', ')} WHERE ID = ?`,
+          queryParams
+        );
+      }
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
 
-          const isAllowedIP = allowedIps.some(ip => clientIpStr.includes(ip));
+  // Record a new payment for a lab visit
+  app.post('/api/lab-visits/:id/payment', async (req, res) => {
+    try {
+      const { labPatientId, amountPaid, paymentMethod, notes, discountAmount } = req.body;
+      const visitId = req.params.id;
 
-          if (!isAllowedIP) {
-            console.log(`[ATTENDANCE BLOCKED] Required IP(s): ${requiredIp}, Client IP: ${clientIpStr}`);
-            isAuthorized = false;
+      // 1. Fetch current visit
+      const [visits] = await pool.query('SELECT * FROM LabVisits WHERE ID = ?', [visitId]);
+      if (visits.length === 0) return res.status(404).json({ error: 'Visit not found' });
+      const visit = visits[0];
+
+      // 2. Calculate new totals
+      const newDiscount = Number(visit.DiscountAmount) + Number(discountAmount || 0);
+      const newPaid = Number(visit.PaidAmount) + Number(amountPaid || 0);
+      const newBalance = Number(visit.TotalAmount) - newDiscount - newPaid;
+      const paymentStatus = newBalance <= 0 ? 'Paid' : (newPaid > 0 ? 'Partial' : 'Unpaid');
+
+      // 3. Update the Visit record
+      await pool.query(
+        'UPDATE LabVisits SET DiscountAmount = ?, PaidAmount = ?, PaymentStatus = ? WHERE ID = ?',
+        [newDiscount, newPaid, paymentStatus, visitId]
+      );
+
+      // 4. Create ledger entry if some money actually changed hands
+      if (Number(amountPaid) > 0) {
+        const paymentId = `LPMT-${Date.now().toString(36).toUpperCase()}`;
+        await pool.query(
+          'INSERT INTO LabFeesLedger (ID, LabPatientID, VisitID, AmountPaid, PaymentMethod, Notes, PaymentDate) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [paymentId, labPatientId, visitId, amountPaid, paymentMethod || 'Cash', notes || '', new Date().toISOString()]
+        );
+      }
+
+      res.json({ success: true, paymentStatus });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Get payment ledger for a lab patient
+  app.get('/api/lab-visits/:patientId/payments', async (req, res) => {
+    try {
+      const [rows] = await pool.query(
+        'SELECT h.*, v.TotalAmount, v.DiscountAmount, v.PaidAmount AS VisitPaidAmount ' +
+        'FROM LabFeesLedger h ' +
+        'JOIN LabVisits v ON h.VisitID = v.ID ' +
+        'WHERE h.LabPatientID = ? ORDER BY h.PaymentDate DESC',
+        [req.params.patientId]
+      );
+      res.json(rows.map(convertRowDates));
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete('/api/lab-visits/:id', async (req, res) => {
+    try {
+      const [result] = await pool.query('DELETE FROM LabVisits WHERE ID = ?', [req.params.id]);
+      if (result.affectedRows === 0) {
+        return res.status(404).json({ error: 'Lab Visit not found' });
+      }
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+
+
+  // ============ ROLES API ============
+
+  // All available permission keys in the system
+  // Page-based + button-level permissions
+  const ALL_PERMISSIONS = [
+    // ── Pages ──
+    { key: 'page_dashboard', label: 'Dashboard', group: 'Pages' },
+    { key: 'page_patients', label: 'Patients', group: 'Pages' },
+    { key: 'page_fees', label: 'Fee Collection', group: 'Pages' },
+    { key: 'page_medicines', label: 'Medicines', group: 'Pages' },
+    { key: 'page_pharmacy', label: 'Pharmacy', group: 'Pages' },
+    { key: 'page_prescriptions', label: 'Prescriptions', group: 'Pages' },
+    { key: 'page_lab_results', label: 'Lab Results', group: 'Pages' },
+    { key: 'page_lab_management', label: 'Lab Management', group: 'Pages' },
+    { key: 'page_users', label: 'User Management', group: 'Pages' },
+    { key: 'page_expenses', label: 'Daily Expenses', group: 'Pages' },
+    { key: 'page_settings', label: 'Settings', group: 'Pages' },
+    // ── Button actions ──
+    { key: 'btn_add_patient', label: 'Add Patient', group: 'Actions' },
+    { key: 'btn_edit_patient', label: 'Edit Patient', group: 'Actions' },
+    { key: 'btn_delete_patient', label: 'Delete Patient', group: 'Actions' },
+    { key: 'btn_manage_stock', label: 'Manage Stock', group: 'Actions' },
+    { key: 'btn_add_lab_test', label: 'Add Lab Test', group: 'Actions' },
+    { key: 'btn_edit_lab_test', label: 'Edit Lab Test', group: 'Actions' },
+    { key: 'btn_delete_lab_test', label: 'Delete Lab Test', group: 'Actions' },
+  ];
+
+  // GET /api/permissions - list all available permission keys
+  app.get('/api/permissions', (req, res) => {
+    res.json(ALL_PERMISSIONS);
+  });
+
+  // GET /api/roles - list all roles with their permissions
+  app.get('/api/roles', async (req, res) => {
+    try {
+      const [roles] = await pool.execute('SELECT * FROM Roles ORDER BY IsSystem DESC, Name ASC');
+      const [rolePerms] = await pool.execute('SELECT RoleName, Permission FROM RolePermissions');
+
+      const rolesWithPerms = roles.map(role => ({
+        id: role.ID,
+        name: role.Name,
+        description: role.Description,
+        isSystem: role.IsSystem === 1,
+        createdAt: role.CreatedAt,
+        permissions: rolePerms.filter(rp => rp.RoleName === role.Name).map(rp => rp.Permission),
+      }));
+
+      res.json(rolesWithPerms);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // POST /api/roles - create a new role
+  app.post('/api/roles', async (req, res) => {
+    try {
+      const { name, description, permissions = [] } = req.body;
+      if (!name) return res.status(400).json({ error: 'Role name is required' });
+
+      await pool.execute(
+        'INSERT INTO Roles (Name, Description, IsSystem) VALUES (?, ?, 0)',
+        [name, description || '']
+      );
+
+      // Insert permissions for this role
+      for (const perm of permissions) {
+        await pool.execute(
+          'INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES (?, ?)',
+          [name, perm]
+        );
+      }
+
+      res.json({ success: true, message: `Role '${name}' created` });
+    } catch (error) {
+      if (error.code === 'ER_DUP_ENTRY') {
+        return res.status(409).json({ error: 'A role with this name already exists' });
+      }
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // PUT /api/roles/:name - update role name/description
+  app.put('/api/roles/:name', async (req, res) => {
+    try {
+      const { name: oldName } = req.params;
+      const { name: newName, description } = req.body;
+
+      // Check if it's a system role (cannot rename)
+      const [existing] = await pool.execute('SELECT * FROM Roles WHERE Name = ?', [oldName]);
+      if (!existing[0]) return res.status(404).json({ error: 'Role not found' });
+      if (existing[0].IsSystem && newName && newName !== oldName) {
+        return res.status(403).json({ error: 'System roles cannot be renamed' });
+      }
+
+      await pool.execute(
+        'UPDATE Roles SET Name = ?, Description = ? WHERE Name = ?',
+        [newName || oldName, description ?? existing[0].Description, oldName]
+      );
+
+      // If name changed, update RolePermissions references
+      if (newName && newName !== oldName) {
+        await pool.execute('UPDATE RolePermissions SET RoleName = ? WHERE RoleName = ?', [newName, oldName]);
+        await pool.execute('UPDATE Users SET Role = ? WHERE Role = ?', [newName, oldName]);
+      }
+
+      res.json({ success: true, message: 'Role updated' });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // PUT /api/roles/:name/permissions - update default permissions for a role
+  app.put('/api/roles/:name/permissions', async (req, res) => {
+    try {
+      const { name } = req.params;
+      const { permissions = [] } = req.body;
+
+      // Delete existing permissions for this role
+      await pool.execute('DELETE FROM RolePermissions WHERE RoleName = ?', [name]);
+
+      // Insert new permissions
+      for (const perm of permissions) {
+        await pool.execute(
+          'INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES (?, ?)',
+          [name, perm]
+        );
+      }
+
+      res.json({ success: true, message: 'Permissions updated' });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // DELETE /api/roles/:name - delete a role (blocked if users are assigned)
+  app.delete('/api/roles/:name', async (req, res) => {
+    try {
+      const { name } = req.params;
+
+      // Block deletion of system roles
+      const [existing] = await pool.execute('SELECT * FROM Roles WHERE Name = ?', [name]);
+      if (!existing[0]) return res.status(404).json({ error: 'Role not found' });
+      if (existing[0].IsSystem) return res.status(403).json({ error: 'System roles cannot be deleted' });
+
+      // Block if users are assigned to this role
+      const [assignedUsers] = await pool.execute('SELECT COUNT(*) as count FROM Users WHERE Role = ?', [name]);
+      if (assignedUsers[0].count > 0) {
+        return res.status(409).json({ error: `Cannot delete role: ${assignedUsers[0].count} user(s) are assigned to it` });
+      }
+
+      await pool.execute('DELETE FROM RolePermissions WHERE RoleName = ?', [name]);
+      await pool.execute('DELETE FROM Roles WHERE Name = ?', [name]);
+
+      res.json({ success: true, message: `Role '${name}' deleted` });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ============ USERS API ============
+
+  // Get all users (excluding passwords)
+  app.get('/api/users', async (req, res) => {
+    try {
+      const [rows] = await pool.execute(
+        'SELECT ID, Username, Name, Email, Phone, Role, Permissions, IsActive, CreatedBy, CreatedAt, UpdatedAt, LastLogin FROM Users ORDER BY CreatedAt DESC'
+      );
+      res.json(rows.map(convertRowDates));
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Get single user by ID
+  app.get('/api/users/:id', async (req, res) => {
+    try {
+      const [rows] = await pool.execute(
+        'SELECT ID, Username, Name, Email, Phone, Role, Permissions, IsActive, CreatedBy, CreatedAt, UpdatedAt, LastLogin FROM Users WHERE ID = ?',
+        [req.params.id]
+      );
+      res.json(rows[0] ? convertRowDates(rows[0]) : null);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Create new user
+  app.post('/api/users', async (req, res) => {
+    try {
+      const { id, username, password, name, email, phone, role, permissions, createdBy } = req.body;
+      const createdAt = new Date().toISOString();
+      const permissionsJson = typeof permissions === 'string' ? permissions : JSON.stringify(permissions || []);
+
+      await pool.execute(
+        'INSERT INTO Users (ID, Username, Password, Name, Email, Phone, Role, Permissions, IsActive, CreatedBy, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [id, username, password, name, email || null, phone || null, role || 'Receptionist', permissionsJson, 1, createdBy || null, createdAt]
+      );
+
+      res.json({ success: true, id });
+    } catch (error) {
+      console.error('Error creating user:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Update user
+  app.put('/api/users/:id', async (req, res) => {
+    try {
+      const { username, name, email, phone, role, isActive } = req.body;
+
+      await pool.execute(
+        'UPDATE Users SET Username = ?, Name = ?, Email = ?, Phone = ?, Role = ?, IsActive = ? WHERE ID = ?',
+        [username, name, email || null, phone || null, role, isActive !== undefined ? isActive : 1, req.params.id]
+      );
+
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Update user permissions
+  app.put('/api/users/:id/permissions', async (req, res) => {
+    try {
+      const { permissions } = req.body;
+      const permissionsJson = typeof permissions === 'string' ? permissions : JSON.stringify(permissions || []);
+
+      await pool.execute(
+        'UPDATE Users SET Permissions = ? WHERE ID = ?',
+        [permissionsJson, req.params.id]
+      );
+
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Update user password
+  app.put('/api/users/:id/password', async (req, res) => {
+    try {
+      const { password } = req.body;
+
+      await pool.execute(
+        'UPDATE Users SET Password = ? WHERE ID = ?',
+        [password, req.params.id]
+      );
+
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Soft delete user (set IsActive to 0)
+  app.delete('/api/users/:id', async (req, res) => {
+    try {
+      await pool.execute(
+        'UPDATE Users SET IsActive = 0 WHERE ID = ?',
+        [req.params.id]
+      );
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Login endpoint
+  app.post('/api/users/login', async (req, res) => {
+    try {
+      const { username, password } = req.body;
+      const [rows] = await pool.execute(
+        'SELECT ID, Username, Name, Email, Phone, Role, Permissions FROM Users WHERE Username = ? AND Password = ? AND IsActive = 1',
+        [username, password]
+      );
+
+      if (rows.length > 0) {
+        const user = rows[0];
+
+        // Update last login timestamp
+        await pool.execute(
+          'UPDATE Users SET LastLogin = ? WHERE ID = ?',
+          [new Date().toISOString(), user.ID]
+        );
+
+        // Load user's own permissions first; fall back to role defaults if empty
+        let userPerms = [];
+        try {
+          const raw = user.Permissions;
+          userPerms = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
+        } catch { userPerms = []; }
+
+        if (!userPerms || userPerms.length === 0) {
+          // Fall back to role-level permissions
+          const [rolePerms] = await pool.execute(
+            'SELECT Permission FROM RolePermissions WHERE RoleName = ?',
+            [user.Role]
+          );
+          userPerms = rolePerms.map(rp => rp.Permission);
+        }
+
+        const permissions = JSON.stringify(userPerms);
+        const payloadUser = { ...convertRowDates(user), Permissions: permissions };
+
+        // Generate the JWT token with a 1 hour expiration
+        const token = jwt.sign(
+          { id: user.ID, username: user.Username, role: user.Role },
+          JWT_SECRET,
+          { expiresIn: '1h' }
+        );
+
+        res.json({ success: true, token, user: payloadUser });
+      } else {
+        res.status(401).json({ error: 'Invalid credentials' });
+      }
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ============ DAILY EXPENSES API ============
+
+  // Get all expenses
+  app.get('/api/daily-expenses', async (req, res) => {
+    try {
+      const page = parseInt(req.query.page) || 1;
+      const limit = parseInt(req.query.limit) || 20;
+      const offset = (page - 1) * limit;
+      const month = req.query.month; // e.g. YYYY-MM
+
+      let whereClause = '';
+      let params = [];
+
+      if (month && month.trim() !== '') {
+        whereClause = 'WHERE Date LIKE ?';
+        params.push(`${month}%`);
+      }
+
+      // 1. Get total count and monthly sum
+      const [countResult] = await pool.query(`SELECT COUNT(*) as total, SUM(Amount) as monthlyTotal FROM DailyExpenses ${whereClause}`, params);
+      const total = countResult[0].total || 0;
+      const monthlyTotal = parseFloat(countResult[0].monthlyTotal) || 0;
+
+
+      // 2. Get paginated data
+      // Use pool.query (not pool.execute): dynamic whereClause means the SQL text changes per request
+      let query = `SELECT * FROM DailyExpenses ${whereClause} ORDER BY Date DESC, CreatedAt DESC`;
+      let queryParams = [...params];
+
+      if (limit !== -1) {
+        query += ` LIMIT ? OFFSET ?`;
+        queryParams.push(Number(limit), Number(offset));
+      }
+
+      const [rows] = await pool.query(query, queryParams);
+
+      res.json({
+        data: rows.map(convertRowDates),
+        meta: {
+          total,
+          page,
+          limit,
+          totalPages: Math.ceil(total / limit),
+          monthlyTotal
+        }
+      });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Create new expense
+  app.post('/api/daily-expenses', async (req, res) => {
+    try {
+      const { id, date, description, category, amount, paymentMethod, createdBy } = req.body;
+      const createdAt = new Date().toISOString();
+
+      await pool.execute(
+        'INSERT INTO DailyExpenses (ID, Date, Description, Category, Amount, PaymentMethod, CreatedBy, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [id, date, description, category, amount, paymentMethod, createdBy || 'System', createdAt]
+      );
+
+      res.json({ success: true, id });
+    } catch (error) {
+      console.error('Error creating expense:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // Delete expense
+  app.delete('/api/daily-expenses/:id', async (req, res) => {
+    try {
+      await pool.execute('DELETE FROM DailyExpenses WHERE ID = ?', [req.params.id]);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ============ HR & PAYROLL API ============
+
+  app.get('/api/employees/me/:userId', async (req, res) => {
+    try {
+      const [rows] = await pool.query('SELECT * FROM Employees WHERE UserID = ?', [req.params.userId]);
+      res.json(rows[0] ? convertRowDates(rows[0]) : null);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // --- Employees ---
+  app.get('/api/employees', async (req, res) => {
+    try {
+      const [rows] = await pool.query('SELECT * FROM Employees ORDER BY CreatedAt DESC');
+      res.json(rows.map(convertRowDates));
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/employees', async (req, res) => {
+    try {
+      const { ID, UserID, Name, Designation, Phone, JoiningDate, BasicSalary, Status, StandardDailyHours, ShiftStartTime, ShiftEndTime } = req.body;
+      await pool.execute(
+        'INSERT INTO Employees (ID, UserID, Name, Designation, Phone, JoiningDate, BasicSalary, Status, StandardDailyHours, ShiftStartTime, ShiftEndTime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [ID, UserID || null, Name, Designation || null, Phone || null, JoiningDate || null, BasicSalary || 0, Status || 'Active', StandardDailyHours || 8, ShiftStartTime || '09:00:00', ShiftEndTime || '17:00:00']
+      );
+      res.json({ success: true, id: ID });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.put('/api/employees/:id', async (req, res) => {
+    try {
+      const { UserID, Name, Designation, Phone, JoiningDate, BasicSalary, Status, StandardDailyHours, ShiftStartTime, ShiftEndTime } = req.body;
+      await pool.execute(
+        'UPDATE Employees SET UserID = ?, Name = ?, Designation = ?, Phone = ?, JoiningDate = ?, BasicSalary = ?, Status = ?, StandardDailyHours = ?, ShiftStartTime = ?, ShiftEndTime = ? WHERE ID = ?',
+        [UserID || null, Name, Designation || null, Phone || null, JoiningDate || null, BasicSalary || 0, Status || 'Active', StandardDailyHours || 8, ShiftStartTime || '09:00:00', ShiftEndTime || '17:00:00', req.params.id]
+      );
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.delete('/api/employees/:id', async (req, res) => {
+    try {
+      await pool.execute('DELETE FROM Employees WHERE ID = ?', [req.params.id]);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // --- Attendance ---
+  app.get('/api/attendance', async (req, res) => {
+    try {
+      const { date, employeeId, startDate, endDate } = req.query;
+      let whereClause = 'WHERE 1=1';
+      let params = [];
+
+      if (date) {
+        whereClause += ' AND Date = ?';
+        params.push(date);
+      }
+      if (employeeId) {
+        whereClause += ' AND EmployeeID = ?';
+        params.push(employeeId);
+      }
+      if (startDate && endDate) {
+        whereClause += ' AND Date BETWEEN ? AND ?';
+        params.push(startDate, endDate);
+      }
+
+      const [rows] = await pool.query(`SELECT * FROM Attendance ${whereClause} ORDER BY Date DESC`, params);
+      res.json(rows.map(convertRowDates));
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/attendance/mark', async (req, res) => {
+    try {
+      const { EmployeeID, Date: recordDate, Status, CheckIn, CheckOut, Notes } = req.body;
+
+      // IP Security Validation
+      let isAuthorized = true;
+      try {
+        const [settingsRows] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
+        if (settingsRows.length > 0 && settingsRows[0].Data) {
+          const globalData = typeof settingsRows[0].Data === 'string' ? JSON.parse(settingsRows[0].Data) : settingsRows[0].Data;
+
+          if (globalData.clinicIpAddress && globalData.clinicIpAddress.trim() !== '') {
+            // Get client IP
+            const rawClientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || '';
+            const clientIpStr = String(rawClientIp);
+            const requiredIp = globalData.clinicIpAddress.trim();
+
+            // Support multiple IPs separated by comma
+            const allowedIps = requiredIp.split(',').map(ip => ip.trim()).filter(ip => ip.length > 0);
+
+            const isAllowedIP = allowedIps.some(ip => clientIpStr.includes(ip));
+
+            if (!isAllowedIP) {
+              console.log(`[ATTENDANCE BLOCKED] Required IP(s): ${requiredIp}, Client IP: ${clientIpStr}`);
+              isAuthorized = false;
+            }
+          }
+        }
+      } catch (e) {
+        console.error("Error reading IP settings:", e);
+      }
+
+      if (!isAuthorized) {
+        return res.status(403).json({ error: "You cannot mark the attendance right now. Please connect to the clinic's Wi-Fi network." });
+      }
+
+      // Check for existing record to prevent status changing
+      const [existing] = await pool.query("SELECT Status FROM Attendance WHERE EmployeeID = ? AND Date = ?", [EmployeeID, recordDate]);
+      if (existing.length > 0 && existing[0].Status && existing[0].Status !== Status) {
+        return res.status(403).json({ error: `Attendance is already marked as '${existing[0].Status}' and cannot be changed.` });
+      }
+
+      await pool.execute(
+        `INSERT INTO Attendance (EmployeeID, Date, Status, CheckIn, CheckOut, Notes) 
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE Status = VALUES(Status), CheckIn = VALUES(CheckIn), CheckOut = VALUES(CheckOut), Notes = VALUES(Notes)`,
+        [EmployeeID, recordDate, Status, CheckIn || null, CheckOut || null, Notes || null]
+      );
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // --- Leave Management ---
+  app.get('/api/leaves', async (req, res) => {
+    try {
+      const { employeeId, status } = req.query;
+      let whereClause = 'WHERE 1=1';
+      let params = [];
+      if (employeeId) {
+        whereClause += ' AND EmployeeID = ?';
+        params.push(employeeId);
+      }
+      if (status) {
+        whereClause += ' AND Status = ?';
+        params.push(status);
+      }
+      const [rows] = await pool.query(`SELECT * FROM LeaveRequests ${whereClause} ORDER BY CreatedAt DESC`, params);
+      res.json(rows.map(convertRowDates));
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post('/api/leaves', async (req, res) => {
+    try {
+      const { ID, EmployeeID, StartDate, EndDate, Reason } = req.body;
+      await pool.execute(
+        'INSERT INTO LeaveRequests (ID, EmployeeID, StartDate, EndDate, Reason, Status) VALUES (?, ?, ?, ?, ?, ?)',
+        [ID, EmployeeID, StartDate, EndDate, Reason || null, 'Pending']
+      );
+      res.json({ success: true, id: ID });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.put('/api/leaves/:id/status', async (req, res) => {
+    try {
+      const { status, approvedBy } = req.body;
+      await pool.execute('UPDATE LeaveRequests SET Status = ?, ApprovedBy = ? WHERE ID = ?', [status, approvedBy || null, req.params.id]);
+
+      // Auto-mark attendance
+      if (status === 'Approved') {
+        const [leaves] = await pool.query('SELECT EmployeeID, StartDate, EndDate FROM LeaveRequests WHERE ID = ?', [req.params.id]);
+        if (leaves.length > 0) {
+          const leave = leaves[0];
+          let currentDate = new Date(leave.StartDate);
+          const endDate = new Date(leave.EndDate);
+
+          while (currentDate <= endDate) {
+            const dateStr = [
+              currentDate.getFullYear(),
+              String(currentDate.getMonth() + 1).padStart(2, '0'),
+              String(currentDate.getDate()).padStart(2, '0')
+            ].join('-');
+
+            await pool.execute(
+              `INSERT INTO Attendance (EmployeeID, Date, Status, Notes) VALUES (?, ?, 'Leave', 'Auto-Approved Leave')
+             ON DUPLICATE KEY UPDATE Status = 'Leave', Notes = 'Auto-Approved Leave'`,
+              [leave.EmployeeID, dateStr]
+            );
+            currentDate.setDate(currentDate.getDate() + 1);
           }
         }
       }
-    } catch (e) {
-      console.error("Error reading IP settings:", e);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
     }
+  });
 
-    if (!isAuthorized) {
-      return res.status(403).json({ error: "You cannot mark the attendance right now. Please connect to the clinic's Wi-Fi network." });
+  app.delete('/api/leaves/:id', async (req, res) => {
+    try {
+      await pool.execute('DELETE FROM LeaveRequests WHERE ID = ?', [req.params.id]);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
     }
+  });
 
-    // Check for existing record to prevent status changing
-    const [existing] = await pool.query("SELECT Status FROM Attendance WHERE EmployeeID = ? AND Date = ?", [EmployeeID, recordDate]);
-    if (existing.length > 0 && existing[0].Status && existing[0].Status !== Status) {
-      return res.status(403).json({ error: `Attendance is already marked as '${existing[0].Status}' and cannot be changed.` });
-    }
-
-    await pool.execute(
-      `INSERT INTO Attendance (EmployeeID, Date, Status, CheckIn, CheckOut, Notes) 
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON DUPLICATE KEY UPDATE Status = VALUES(Status), CheckIn = VALUES(CheckIn), CheckOut = VALUES(CheckOut), Notes = VALUES(Notes)`,
-      [EmployeeID, recordDate, Status, CheckIn || null, CheckOut || null, Notes || null]
-    );
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// --- Leave Management ---
-app.get('/api/leaves', async (req, res) => {
-  try {
-    const { employeeId, status } = req.query;
-    let whereClause = 'WHERE 1=1';
-    let params = [];
-    if (employeeId) {
-      whereClause += ' AND EmployeeID = ?';
-      params.push(employeeId);
-    }
-    if (status) {
-      whereClause += ' AND Status = ?';
-      params.push(status);
-    }
-    const [rows] = await pool.query(`SELECT * FROM LeaveRequests ${whereClause} ORDER BY CreatedAt DESC`, params);
-    res.json(rows.map(convertRowDates));
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/api/leaves', async (req, res) => {
-  try {
-    const { ID, EmployeeID, StartDate, EndDate, Reason } = req.body;
-    await pool.execute(
-      'INSERT INTO LeaveRequests (ID, EmployeeID, StartDate, EndDate, Reason, Status) VALUES (?, ?, ?, ?, ?, ?)',
-      [ID, EmployeeID, StartDate, EndDate, Reason || null, 'Pending']
-    );
-    res.json({ success: true, id: ID });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.put('/api/leaves/:id/status', async (req, res) => {
-  try {
-    const { status, approvedBy } = req.body;
-    await pool.execute('UPDATE LeaveRequests SET Status = ?, ApprovedBy = ? WHERE ID = ?', [status, approvedBy || null, req.params.id]);
-
-    // Auto-mark attendance
-    if (status === 'Approved') {
-      const [leaves] = await pool.query('SELECT EmployeeID, StartDate, EndDate FROM LeaveRequests WHERE ID = ?', [req.params.id]);
-      if (leaves.length > 0) {
-        const leave = leaves[0];
-        let currentDate = new Date(leave.StartDate);
-        const endDate = new Date(leave.EndDate);
-
-        while (currentDate <= endDate) {
-          const dateStr = [
-            currentDate.getFullYear(),
-            String(currentDate.getMonth() + 1).padStart(2, '0'),
-            String(currentDate.getDate()).padStart(2, '0')
-          ].join('-');
-
-          await pool.execute(
-            `INSERT INTO Attendance (EmployeeID, Date, Status, Notes) VALUES (?, ?, 'Leave', 'Auto-Approved Leave')
-             ON DUPLICATE KEY UPDATE Status = 'Leave', Notes = 'Auto-Approved Leave'`,
-            [leave.EmployeeID, dateStr]
-          );
-          currentDate.setDate(currentDate.getDate() + 1);
-        }
+  // --- Advance Payments ---
+  app.get('/api/advances', async (req, res) => {
+    try {
+      const { employeeId, status } = req.query;
+      let whereClause = 'WHERE 1=1';
+      let params = [];
+      if (employeeId) {
+        whereClause += ' AND EmployeeID = ?';
+        params.push(employeeId);
       }
+      if (status) {
+        whereClause += ' AND Status = ?';
+        params.push(status);
+      }
+      const [rows] = await pool.query(`SELECT * FROM AdvancePayments ${whereClause} ORDER BY Date DESC`, params);
+      const converted = rows.map(convertRowDates);
+      if (converted.length > 0) console.log('DEBUG: First Advance Row:', JSON.stringify(converted[0], null, 2));
+      res.json(converted);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
     }
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+  });
 
-app.delete('/api/leaves/:id', async (req, res) => {
-  try {
-    await pool.execute('DELETE FROM LeaveRequests WHERE ID = ?', [req.params.id]);
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+  app.post('/api/advances', async (req, res) => {
+    try {
+      const { ID, EmployeeID, Date: advanceDate, Amount, Description, Status, ApprovedBy } = req.body;
+      const finalStatus = Status || 'Pending';
+      const approvalTime = (finalStatus === 'Approved' || finalStatus === 'Deducted') ? new Date() : null;
 
-// --- Advance Payments ---
-app.get('/api/advances', async (req, res) => {
-  try {
-    const { employeeId, status } = req.query;
-    let whereClause = 'WHERE 1=1';
-    let params = [];
-    if (employeeId) {
-      whereClause += ' AND EmployeeID = ?';
-      params.push(employeeId);
-    }
-    if (status) {
-      whereClause += ' AND Status = ?';
-      params.push(status);
-    }
-    const [rows] = await pool.query(`SELECT * FROM AdvancePayments ${whereClause} ORDER BY Date DESC`, params);
-    const converted = rows.map(convertRowDates);
-    if (converted.length > 0) console.log('DEBUG: First Advance Row:', JSON.stringify(converted[0], null, 2));
-    res.json(converted);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/api/advances', async (req, res) => {
-  try {
-    const { ID, EmployeeID, Date: advanceDate, Amount, Description, Status, ApprovedBy } = req.body;
-    const finalStatus = Status || 'Pending';
-    const approvalTime = (finalStatus === 'Approved' || finalStatus === 'Deducted') ? new Date() : null;
-
-    await pool.execute(
-      'INSERT INTO AdvancePayments (ID, EmployeeID, Date, Amount, Description, Status, ApprovedBy, ApprovalTime) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [ID, EmployeeID, advanceDate, Amount, Description || null, finalStatus, ApprovedBy || null, approvalTime]
-    );
-    res.json({ success: true, id: ID });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.put('/api/advances/:id/status', async (req, res) => {
-  try {
-    const { status, approvedBy } = req.body;
-    await pool.execute(
-      'UPDATE AdvancePayments SET Status = ?, ApprovedBy = ?, ApprovalTime = NOW() WHERE ID = ?',
-      [status, approvedBy || null, req.params.id]
-    );
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.delete('/api/advances/:id', async (req, res) => {
-  try {
-    await pool.execute('DELETE FROM AdvancePayments WHERE ID = ?', [req.params.id]);
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// --- Payroll ---
-app.get('/api/payroll', async (req, res) => {
-  try {
-    const { month, year } = req.query;
-    let whereClause = 'WHERE 1=1';
-    let params = [];
-    if (month && year) {
-      whereClause += ' AND Month = ? AND Year = ?';
-      params.push(month, year);
-    }
-    const [rows] = await pool.query(`SELECT * FROM Payroll ${whereClause} ORDER BY CreatedAt DESC`, params);
-    res.json(rows.map(convertRowDates));
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Salary Config endpoints
-app.get('/api/hr/salary-config', async (req, res) => {
-  try {
-    const [rows] = await pool.execute("SELECT Data FROM AppSettings WHERE ID = 'SALARY_CONFIG'");
-    if (rows.length > 0) {
-      const config = typeof rows[0].Data === 'string' ? JSON.parse(rows[0].Data) : rows[0].Data;
-      res.json(config);
-    } else {
-      res.status(404).json({ error: 'Salary configuration not found' });
-    }
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.put('/api/hr/salary-config', async (req, res) => {
-  try {
-    const data = req.body;
-    await pool.execute(
-      `INSERT INTO AppSettings (ID, Category, Data) VALUES (?, ?, ?)
-       ON DUPLICATE KEY UPDATE Data = VALUES(Data)`,
-      ['SALARY_CONFIG', 'Global', JSON.stringify(data)]
-    );
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/api/payroll/generate', async (req, res) => {
-  try {
-    const { month, year, workingDays: workingDaysInput, leaveThreshold: leaveThresholdInput } = req.body;
-
-    // 1. Fetch Global Salary Config
-    let [configRows] = await pool.execute("SELECT Data FROM AppSettings WHERE ID = 'SALARY_CONFIG'");
-    const config = configRows.length > 0 ? (typeof configRows[0].Data === 'string' ? JSON.parse(configRows[0].Data) : configRows[0].Data) : {
-      fixedWorkingDays: 30,
-      paidLeavesPerMonth: 2,
-      overtimeHourlyRate: 200,
-      latesForOneDayDeduction: 3,
-      overtimeEnabled: true
-    };
-
-    // Parameters with Fallbacks: req.body overrides global config
-    const workingDays = workingDaysInput || config.fixedWorkingDays || 30;
-    const leaveThreshold = leaveThresholdInput !== undefined ? leaveThresholdInput : (config.paidLeavesPerMonth || 0);
-
-    // 2. Get all active employees
-    const [employees] = await pool.query("SELECT * FROM Employees WHERE Status = 'Active'");
-
-    // 3. Generate payroll for each employee
-    for (const emp of employees) {
-      // Get attendance stats for the month
-      const [attendanceStats] = await pool.query(
-        "SELECT Status, COUNT(*) as count FROM Attendance WHERE EmployeeID = ? AND MONTH(Date) = ? AND YEAR(Date) = ? GROUP BY Status",
-        [emp.ID, month, year]
+      await pool.execute(
+        'INSERT INTO AdvancePayments (ID, EmployeeID, Date, Amount, Description, Status, ApprovedBy, ApprovalTime) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [ID, EmployeeID, advanceDate, Amount, Description || null, finalStatus, ApprovedBy || null, approvalTime]
       );
+      res.json({ success: true, id: ID });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
 
-      const stats = { Present: 0, Absent: 0, Leave: 0, Late: 0 };
-      attendanceStats.forEach(s => { stats[s.Status] = s.count || 0; });
+  app.put('/api/advances/:id/status', async (req, res) => {
+    try {
+      const { status, approvedBy } = req.body;
+      await pool.execute(
+        'UPDATE AdvancePayments SET Status = ?, ApprovedBy = ?, ApprovalTime = NOW() WHERE ID = ?',
+        [status, approvedBy || null, req.params.id]
+      );
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
 
-      const presentOnlyDays = stats.Present || 0;
-      const lateDays = stats.Late || 0;
-      const absentDays = stats.Absent || 0;
-      const leaveDays = stats.Leave || 0;
-      const presentDays = presentOnlyDays + lateDays;
+  app.delete('/api/advances/:id', async (req, res) => {
+    try {
+      await pool.execute('DELETE FROM AdvancePayments WHERE ID = ?', [req.params.id]);
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
 
-      // Late Rule Penalty
-      let latePenaltyDays = 0;
-      if (config.lateRuleEnabled && config.latesForOneDayDeduction > 0) {
-        latePenaltyDays = Math.floor(lateDays / config.latesForOneDayDeduction);
+  // --- Payroll ---
+  app.get('/api/payroll', async (req, res) => {
+    try {
+      const { month, year } = req.query;
+      let whereClause = 'WHERE 1=1';
+      let params = [];
+      if (month && year) {
+        whereClause += ' AND Month = ? AND Year = ?';
+        params.push(month, year);
       }
+      const [rows] = await pool.query(`SELECT * FROM Payroll ${whereClause} ORDER BY CreatedAt DESC`, params);
+      res.json(rows.map(convertRowDates));
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
 
-      // Calculate payable days: Total worked + Leaves (up to threshold)
-      const paidLeaveDays = Math.min(leaveDays, leaveThreshold);
-      const totalPayableDays = presentOnlyDays + (lateDays - latePenaltyDays) + paidLeaveDays;
+  // Salary Config endpoints
+  app.get('/api/hr/salary-config', async (req, res) => {
+    try {
+      const [rows] = await pool.execute("SELECT Data FROM AppSettings WHERE ID = 'SALARY_CONFIG'");
+      if (rows.length > 0) {
+        const config = typeof rows[0].Data === 'string' ? JSON.parse(rows[0].Data) : rows[0].Data;
+        res.json(config);
+      } else {
+        res.status(404).json({ error: 'Salary configuration not found' });
+      }
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
 
-      // Calculate deduction days: Total working days - Payable days
-      // This includes explicit absents AND late penalty days AND unlogged days
-      const totalDeductibleDays = Math.max(0, workingDays - totalPayableDays);
+  app.put('/api/hr/salary-config', async (req, res) => {
+    try {
+      const data = req.body;
+      await pool.execute(
+        `INSERT INTO AppSettings (ID, Category, Data) VALUES (?, ?, ?)
+       ON DUPLICATE KEY UPDATE Data = VALUES(Data)`,
+        ['SALARY_CONFIG', 'Global', JSON.stringify(data)]
+      );
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
 
-      // Calculate daily and hourly rate
-      const stdDailyHours = emp.StandardDailyHours || 8;
-      const shiftEndTime = emp.ShiftEndTime || '17:00:00';
-      const perDaySalary = emp.BasicSalary / workingDays;
-      const hourlyRate = perDaySalary / stdDailyHours;
-      const absenceDeduction = perDaySalary * totalDeductibleDays;
+  app.post('/api/payroll/generate', async (req, res) => {
+    try {
+      const { month, year, workingDays: workingDaysInput, leaveThreshold: leaveThresholdInput } = req.body;
 
-      // Calculate Overtime natively with MySQL TIMEDIFF
-      const [overtime] = await pool.query(
-        `SELECT ROUND(SUM(TIME_TO_SEC(TIMEDIFF(CheckOut, ?))) / 3600, 2) as ot_hours 
+      // 1. Fetch Global Salary Config
+      let [configRows] = await pool.execute("SELECT Data FROM AppSettings WHERE ID = 'SALARY_CONFIG'");
+      const config = configRows.length > 0 ? (typeof configRows[0].Data === 'string' ? JSON.parse(configRows[0].Data) : configRows[0].Data) : {
+        fixedWorkingDays: 30,
+        paidLeavesPerMonth: 2,
+        overtimeHourlyRate: 200,
+        latesForOneDayDeduction: 3,
+        overtimeEnabled: true
+      };
+
+      // Parameters with Fallbacks: req.body overrides global config
+      const workingDays = workingDaysInput || config.fixedWorkingDays || 30;
+      const leaveThreshold = leaveThresholdInput !== undefined ? leaveThresholdInput : (config.paidLeavesPerMonth || 0);
+
+      // 2. Get all active employees
+      const [employees] = await pool.query("SELECT * FROM Employees WHERE Status = 'Active'");
+
+      // 3. Generate payroll for each employee
+      for (const emp of employees) {
+        // Get attendance stats for the month
+        const [attendanceStats] = await pool.query(
+          "SELECT Status, COUNT(*) as count FROM Attendance WHERE EmployeeID = ? AND MONTH(Date) = ? AND YEAR(Date) = ? GROUP BY Status",
+          [emp.ID, month, year]
+        );
+
+        const stats = { Present: 0, Absent: 0, Leave: 0, Late: 0 };
+        attendanceStats.forEach(s => { stats[s.Status] = s.count || 0; });
+
+        const presentOnlyDays = stats.Present || 0;
+        const lateDays = stats.Late || 0;
+        const absentDays = stats.Absent || 0;
+        const leaveDays = stats.Leave || 0;
+        const presentDays = presentOnlyDays + lateDays;
+
+        // Late Rule Penalty
+        let latePenaltyDays = 0;
+        if (config.lateRuleEnabled && config.latesForOneDayDeduction > 0) {
+          latePenaltyDays = Math.floor(lateDays / config.latesForOneDayDeduction);
+        }
+
+        // Calculate payable days: Total worked + Leaves (up to threshold)
+        const paidLeaveDays = Math.min(leaveDays, leaveThreshold);
+        const totalPayableDays = presentOnlyDays + (lateDays - latePenaltyDays) + paidLeaveDays;
+
+        // Calculate deduction days: Total working days - Payable days
+        // This includes explicit absents AND late penalty days AND unlogged days
+        const totalDeductibleDays = Math.max(0, workingDays - totalPayableDays);
+
+        // Calculate daily and hourly rate
+        const stdDailyHours = emp.StandardDailyHours || 8;
+        const shiftEndTime = emp.ShiftEndTime || '17:00:00';
+        const perDaySalary = emp.BasicSalary / workingDays;
+        const hourlyRate = perDaySalary / stdDailyHours;
+        const absenceDeduction = perDaySalary * totalDeductibleDays;
+
+        // Calculate Overtime natively with MySQL TIMEDIFF
+        const [overtime] = await pool.query(
+          `SELECT ROUND(SUM(TIME_TO_SEC(TIMEDIFF(CheckOut, ?))) / 3600, 2) as ot_hours 
          FROM Attendance 
          WHERE EmployeeID = ? AND MONTH(Date) = ? AND YEAR(Date) = ? 
          AND CheckOut IS NOT NULL AND CheckOut > ?`,
-        [shiftEndTime, emp.ID, month, year, shiftEndTime]
-      );
-      const overtimeHours = parseFloat(overtime[0].ot_hours) || 0;
+          [shiftEndTime, emp.ID, month, year, shiftEndTime]
+        );
+        const overtimeHours = parseFloat(overtime[0].ot_hours) || 0;
 
-      // Use fixed hourly rate for overtime amount
-      const otRate = config.overtimeEnabled ? (config.overtimeHourlyRate || 0) : 0;
-      const overtimeAmount = overtimeHours * otRate;
+        // Use fixed hourly rate for overtime amount
+        const otRate = config.overtimeEnabled ? (config.overtimeHourlyRate || 0) : 0;
+        const overtimeAmount = overtimeHours * otRate;
 
-      // Get pending advances
-      const [advances] = await pool.query(
-        "SELECT SUM(Amount) as total FROM AdvancePayments WHERE EmployeeID = ? AND Status = 'Pending' AND MONTH(Date) <= ? AND YEAR(Date) <= ?",
-        [emp.ID, month, year]
-      );
-      const advanceDeduction = advances[0].total || 0;
-
-      const totalDeductions = absenceDeduction + advanceDeduction;
-      const bonus = 0; // Optional extension for Future Bonus APIs
-      const grossSalary = parseFloat(emp.BasicSalary) + overtimeAmount + bonus;
-      const netSalary = Math.max(0, grossSalary - totalDeductions);
-
-      const payrollId = `PR-${emp.ID}-${year}-${month}`;
-
-      // Insert or Update Payroll
-      await pool.execute(
-        `INSERT INTO Payroll (ID, EmployeeID, Month, Year, BasicSalary, Bonus, Deductions, NetSalary, PaymentStatus, OvertimeHours, OvertimeAmount, GrossSalary, PresentDays, LeaveDays, AbsentDays, WorkingDays, LeaveThreshold)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Unpaid', ?, ?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE BasicSalary=VALUES(BasicSalary), Bonus=VALUES(Bonus), Deductions=VALUES(Deductions), NetSalary=VALUES(NetSalary), OvertimeHours=VALUES(OvertimeHours), OvertimeAmount=VALUES(OvertimeAmount), GrossSalary=VALUES(GrossSalary), PresentDays=VALUES(PresentDays), LeaveDays=VALUES(LeaveDays), AbsentDays=VALUES(AbsentDays), WorkingDays=VALUES(WorkingDays), LeaveThreshold=VALUES(LeaveThreshold)`,
-        [payrollId, emp.ID, month, year, emp.BasicSalary, bonus, totalDeductions, netSalary, overtimeHours, overtimeAmount, grossSalary, presentDays, leaveDays, absentDays, workingDays, leaveThreshold]
-      );
-
-      // If there were advances deducted, mark them as Deducted
-      if (advanceDeduction > 0) {
-        await pool.execute(
-          "UPDATE AdvancePayments SET Status = 'Deducted' WHERE EmployeeID = ? AND Status = 'Pending' AND MONTH(Date) <= ? AND YEAR(Date) <= ?",
+        // Get pending advances
+        const [advances] = await pool.query(
+          "SELECT SUM(Amount) as total FROM AdvancePayments WHERE EmployeeID = ? AND Status = 'Pending' AND MONTH(Date) <= ? AND YEAR(Date) <= ?",
           [emp.ID, month, year]
         );
+        const advanceDeduction = advances[0].total || 0;
+
+        const totalDeductions = absenceDeduction + advanceDeduction;
+        const bonus = 0; // Optional extension for Future Bonus APIs
+        const grossSalary = parseFloat(emp.BasicSalary) + overtimeAmount + bonus;
+        const netSalary = Math.max(0, grossSalary - totalDeductions);
+
+        const payrollId = `PR-${emp.ID}-${year}-${month}`;
+
+        // Insert or Update Payroll
+        await pool.execute(
+          `INSERT INTO Payroll (ID, EmployeeID, Month, Year, BasicSalary, Bonus, Deductions, NetSalary, PaymentStatus, OvertimeHours, OvertimeAmount, GrossSalary, PresentDays, LeaveDays, AbsentDays, WorkingDays, LeaveThreshold)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Unpaid', ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE BasicSalary=VALUES(BasicSalary), Bonus=VALUES(Bonus), Deductions=VALUES(Deductions), NetSalary=VALUES(NetSalary), OvertimeHours=VALUES(OvertimeHours), OvertimeAmount=VALUES(OvertimeAmount), GrossSalary=VALUES(GrossSalary), PresentDays=VALUES(PresentDays), LeaveDays=VALUES(LeaveDays), AbsentDays=VALUES(AbsentDays), WorkingDays=VALUES(WorkingDays), LeaveThreshold=VALUES(LeaveThreshold)`,
+          [payrollId, emp.ID, month, year, emp.BasicSalary, bonus, totalDeductions, netSalary, overtimeHours, overtimeAmount, grossSalary, presentDays, leaveDays, absentDays, workingDays, leaveThreshold]
+        );
+
+        // If there were advances deducted, mark them as Deducted
+        if (advanceDeduction > 0) {
+          await pool.execute(
+            "UPDATE AdvancePayments SET Status = 'Deducted' WHERE EmployeeID = ? AND Status = 'Pending' AND MONTH(Date) <= ? AND YEAR(Date) <= ?",
+            [emp.ID, month, year]
+          );
+        }
       }
+
+      res.json({ success: true, count: employees.length });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
     }
+  });
 
-    res.json({ success: true, count: employees.length });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+  // GET /api/attendance/monthly-summary — per-employee attendance counts for a month
+  app.get('/api/attendance/monthly-summary', async (req, res) => {
+    try {
+      const { month, year } = req.query;
+      if (!month || !year) {
+        return res.status(400).json({ error: 'month and year are required' });
+      }
 
-// GET /api/attendance/monthly-summary — per-employee attendance counts for a month
-app.get('/api/attendance/monthly-summary', async (req, res) => {
-  try {
-    const { month, year } = req.query;
-    if (!month || !year) {
-      return res.status(400).json({ error: 'month and year are required' });
-    }
-
-    // Aggregate attendance status counts per employee
-    const [rows] = await pool.query(
-      `SELECT 
+      // Aggregate attendance status counts per employee
+      const [rows] = await pool.query(
+        `SELECT 
          a.EmployeeID,
          e.Name AS EmployeeName,
          e.Designation,
@@ -3940,12 +3958,12 @@ app.get('/api/attendance/monthly-summary', async (req, res) => {
        WHERE MONTH(a.Date) = ? AND YEAR(a.Date) = ?
          AND e.Status = 'Active'
        GROUP BY a.EmployeeID, e.Name, e.Designation, e.ShiftEndTime`,
-      [month, year]
-    );
+        [month, year]
+      );
 
-    // Also fetch overtime hours per employee for the month
-    const [otRows] = await pool.query(
-      `SELECT 
+      // Also fetch overtime hours per employee for the month
+      const [otRows] = await pool.query(
+        `SELECT 
          a.EmployeeID,
          ROUND(SUM(TIME_TO_SEC(TIMEDIFF(a.CheckOut, e.ShiftEndTime))) / 3600, 2) AS overtimeHours
        FROM Attendance a
@@ -3954,48 +3972,48 @@ app.get('/api/attendance/monthly-summary', async (req, res) => {
          AND a.CheckOut IS NOT NULL AND a.CheckOut > e.ShiftEndTime
          AND e.Status = 'Active'
        GROUP BY a.EmployeeID`,
-      [month, year]
-    );
+        [month, year]
+      );
 
-    const otMap = {};
-    otRows.forEach(r => { otMap[r.EmployeeID] = parseFloat(r.overtimeHours) || 0; });
+      const otMap = {};
+      otRows.forEach(r => { otMap[r.EmployeeID] = parseFloat(r.overtimeHours) || 0; });
 
-    const result = rows.map(r => ({
-      ...r,
-      overtimeHours: otMap[r.EmployeeID] || 0
-    }));
+      const result = rows.map(r => ({
+        ...r,
+        overtimeHours: otMap[r.EmployeeID] || 0
+      }));
 
-    res.json(result);
-  } catch (error) {
-    console.error('Error fetching monthly attendance summary:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
+      res.json(result);
+    } catch (error) {
+      console.error('Error fetching monthly attendance summary:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
 
-app.put('/api/payroll/:id/pay', async (req, res) => {
-  try {
-    await pool.execute(
-      "UPDATE Payroll SET PaymentStatus = 'Paid', PaymentDate = CURRENT_TIMESTAMP WHERE ID = ?",
-      [req.params.id]
-    );
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+  app.put('/api/payroll/:id/pay', async (req, res) => {
+    try {
+      await pool.execute(
+        "UPDATE Payroll SET PaymentStatus = 'Paid', PaymentDate = CURRENT_TIMESTAMP WHERE ID = ?",
+        [req.params.id]
+      );
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
 
-// Health check
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', database: 'MySQL', timestamp: new Date().toISOString() });
-});
+  // Health check
+  app.get('/api/health', (req, res) => {
+    res.json({ status: 'ok', database: 'MySQL', timestamp: new Date().toISOString() });
+  });
 
-// Status Page - accessible at /api/status AND /
-const getStatusPage = (req, res) => {
-  const statusColor = dbConnected ? '#dcfce7' : '#fee2e2';
-  const statusTextColor = dbConnected ? '#166534' : '#991b1b';
-  const statusText = dbConnected ? 'Connected' : 'Disconnected';
+  // Status Page - accessible at /api/status AND /
+  const getStatusPage = (req, res) => {
+    const statusColor = dbConnected ? '#dcfce7' : '#fee2e2';
+    const statusTextColor = dbConnected ? '#166534' : '#991b1b';
+    const statusText = dbConnected ? 'Connected' : 'Disconnected';
 
-  const html = `
+    const html = `
     < !DOCTYPE html >
     <html>
       <head>
@@ -4043,305 +4061,305 @@ const getStatusPage = (req, res) => {
       </body>
     </html>
 `;
-  res.send(html);
-};
+    res.send(html);
+  };
 
-app.get('/api/status', getStatusPage);
-// app.get('/', getStatusPage);
+  app.get('/api/status', getStatusPage);
+  // app.get('/', getStatusPage);
 
-// Favicon Handler
-app.get('/favicon.ico', (req, res) => res.status(204).end());
+  // Favicon Handler
+  app.get('/favicon.ico', (req, res) => res.status(204).end());
 
-// ============ SERVE REACT FRONTEND ============
-// This hybrid logic ensures the frontend works regardless of whether backend is 
-// in the same folder as the build, or in a sibling nodejs/public_html structure.
-const possiblePaths = [
-  path.join(__dirname, '..', 'public_html', 'dist'),          // Sibling public_html (Previous structure)
-  path.join(__dirname, 'dist'),                              // Local dist folder (Flash/NodeJS folder)
-  path.join(__dirname, '..', 'public_html'),                 // Sibling public_html root
-  path.join(__dirname, 'build'),                             // Local build folder
-  __dirname                                                  // Flat in current folder
-];
+  // ============ SERVE REACT FRONTEND ============
+  // This hybrid logic ensures the frontend works regardless of whether backend is 
+  // in the same folder as the build, or in a sibling nodejs/public_html structure.
+  const possiblePaths = [
+    path.join(__dirname, '..', 'public_html', 'dist'),          // Sibling public_html (Previous structure)
+    path.join(__dirname, 'dist'),                              // Local dist folder (Flash/NodeJS folder)
+    path.join(__dirname, '..', 'public_html'),                 // Sibling public_html root
+    path.join(__dirname, 'build'),                             // Local build folder
+    __dirname                                                  // Flat in current folder
+  ];
 
-let publicHtmlDistPath = path.join(__dirname, '..', 'public_html', 'dist'); // Default fallback
-let publicHtmlIndexPath = path.join(publicHtmlDistPath, 'index.html');
+  let publicHtmlDistPath = path.join(__dirname, '..', 'public_html', 'dist'); // Default fallback
+  let publicHtmlIndexPath = path.join(publicHtmlDistPath, 'index.html');
 
-for (const p of possiblePaths) {
-  const indexPath = path.join(p, 'index.html');
-  if (fs.existsSync(indexPath)) {
-    publicHtmlDistPath = p;
-    publicHtmlIndexPath = indexPath;
-    console.log('📂 Frontend Dist Path found at:', p);
-    break;
+  for (const p of possiblePaths) {
+    const indexPath = path.join(p, 'index.html');
+    if (fs.existsSync(indexPath)) {
+      publicHtmlDistPath = p;
+      publicHtmlIndexPath = indexPath;
+      console.log('📂 Frontend Dist Path found at:', p);
+      break;
+    }
   }
-}
 
-// ============ APPOINTMENTS API ============
+  // ============ APPOINTMENTS API ============
 
-// GET /api/appointments — list for a given date, with optional status & search
-app.get('/api/appointments', cacheMiddleware, async (req, res) => {
-  try {
-    const { date, status, search } = req.query;
+  // GET /api/appointments — list for a given date, with optional status & search
+  app.get('/api/appointments', cacheMiddleware, async (req, res) => {
+    try {
+      const { date, status, search } = req.query;
 
-    let whereClause = 'WHERE 1=1';
-    const params = [];
+      let whereClause = 'WHERE 1=1';
+      const params = [];
 
-    if (date) {
-      whereClause += ' AND ApptDate = ?';
-      params.push(date);
+      if (date) {
+        whereClause += ' AND ApptDate = ?';
+        params.push(date);
+      }
+
+      if (status && status !== 'All' && status !== 'undefined') {
+        whereClause += ' AND Status = ?';
+        params.push(status);
+      }
+
+      if (search && search !== 'undefined') {
+        whereClause += ' AND (PatientName LIKE ? OR Phone LIKE ?)';
+        params.push(`%${search}%`, `%${search}%`);
+      }
+
+      const [rows] = await pool.query(
+        `SELECT * FROM Appointments ${whereClause} ORDER BY TokenNumber ASC, ApptTime ASC`,
+        params
+      );
+
+      res.json(rows.map(convertRowDates));
+    } catch (error) {
+      console.error('Error fetching appointments:', error);
+      res.status(500).json({ error: error.message });
     }
+  });
 
-    if (status && status !== 'All' && status !== 'undefined') {
-      whereClause += ' AND Status = ?';
-      params.push(status);
-    }
+  // POST /api/appointments — book a new appointment (auto-assigns daily token)
+  app.post('/api/appointments', async (req, res) => {
+    try {
+      const { id, patientId, name, phone, date, time, service, notes, createdBy } = req.body;
 
-    if (search && search !== 'undefined') {
-      whereClause += ' AND (PatientName LIKE ? OR Phone LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`);
-    }
+      if (!name || !phone || !date || !time) {
+        return res.status(400).json({ error: 'Name, phone, date and time are required.' });
+      }
 
-    const [rows] = await pool.query(
-      `SELECT * FROM Appointments ${whereClause} ORDER BY TokenNumber ASC, ApptTime ASC`,
-      params
-    );
+      // Auto-calculate next token number for the given date
+      const [tokenRows] = await pool.execute(
+        'SELECT COALESCE(MAX(TokenNumber), 0) + 1 AS nextToken FROM Appointments WHERE ApptDate = ?',
+        [date]
+      );
+      const tokenNumber = tokenRows[0].nextToken;
 
-    res.json(rows.map(convertRowDates));
-  } catch (error) {
-    console.error('Error fetching appointments:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
+      const apptId = id || `APPT-${Date.now().toString(36).toUpperCase()}`;
 
-// POST /api/appointments — book a new appointment (auto-assigns daily token)
-app.post('/api/appointments', async (req, res) => {
-  try {
-    const { id, patientId, name, phone, date, time, service, notes, createdBy } = req.body;
-
-    if (!name || !phone || !date || !time) {
-      return res.status(400).json({ error: 'Name, phone, date and time are required.' });
-    }
-
-    // Auto-calculate next token number for the given date
-    const [tokenRows] = await pool.execute(
-      'SELECT COALESCE(MAX(TokenNumber), 0) + 1 AS nextToken FROM Appointments WHERE ApptDate = ?',
-      [date]
-    );
-    const tokenNumber = tokenRows[0].nextToken;
-
-    const apptId = id || `APPT-${Date.now().toString(36).toUpperCase()}`;
-
-    await pool.execute(
-      `INSERT INTO Appointments (ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Service, Status, Notes, TokenNumber, CreatedBy)
+      await pool.execute(
+        `INSERT INTO Appointments (ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Service, Status, Notes, TokenNumber, CreatedBy)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending', ?, ?, ?)`,
-      [apptId, (patientId && patientId !== '') ? patientId : null, name, phone, date, time, service || 'Consultation', notes || null, tokenNumber, createdBy || null]
-    );
+        [apptId, (patientId && patientId !== '') ? patientId : null, name, phone, date, time, service || 'Consultation', notes || null, tokenNumber, createdBy || null]
+      );
 
-    res.json({ success: true, id: apptId, tokenNumber });
-  } catch (error) {
-    console.error('Error creating appointment:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// PUT /api/appointments/:id — update status or other fields
-app.put('/api/appointments/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { Status, PatientName, Phone, ApptDate, ApptTime, Service, Notes, PatientID } = req.body;
-
-    // Build dynamic SET clause
-    const updates = [];
-    const params = [];
-
-    if (Status !== undefined) { updates.push('Status = ?'); params.push(Status); }
-    if (PatientName !== undefined) { updates.push('PatientName = ?'); params.push(PatientName); }
-    if (Phone !== undefined) { updates.push('Phone = ?'); params.push(Phone); }
-    if (ApptDate !== undefined) { updates.push('ApptDate = ?'); params.push(ApptDate); }
-    if (ApptTime !== undefined) { updates.push('ApptTime = ?'); params.push(ApptTime); }
-    if (Service !== undefined) { updates.push('Service = ?'); params.push(Service); }
-    if (Notes !== undefined) { updates.push('Notes = ?'); params.push(Notes); }
-    if (PatientID !== undefined) { updates.push('PatientID = ?'); params.push(PatientID); }
-
-    if (updates.length === 0) {
-      return res.json({ success: true });
+      res.json({ success: true, id: apptId, tokenNumber });
+    } catch (error) {
+      console.error('Error creating appointment:', error);
+      res.status(500).json({ error: error.message });
     }
-
-    params.push(id);
-    await pool.query(`UPDATE Appointments SET ${updates.join(', ')} WHERE ID = ?`, params);
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Error updating appointment:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// DELETE /api/appointments/:id
-app.delete('/api/appointments/:id', async (req, res) => {
-  try {
-    await pool.execute('DELETE FROM Appointments WHERE ID = ?', [req.params.id]);
-    res.json({ success: true });
-  } catch (error) {
-    console.error('Error deleting appointment:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ============ WHATSAPP API ============
-app.post('/api/whatsappsms', async (req, res) => {
-  try {
-    const { to, message } = req.body;
-    
-    // Get GLOBAL settings to extract UltraMsg credentials
-    const [settings] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
-    if (settings.length === 0) return res.status(400).json({ error: 'Global settings not found.' });
-    
-    let configStr = settings[0].Data;
-    if (typeof configStr === 'string') configStr = JSON.parse(configStr);
-    
-    const waConfig = configStr.whatsappConfig;
-    if (!waConfig || !waConfig.enabled) {
-      return res.status(400).json({ error: 'WhatsApp integration is currently disabled in Settings.' });
-    }
-    if (!waConfig.instanceId || !waConfig.token) {
-      return res.status(400).json({ error: 'WhatsApp instance ID or token missing.' });
-    }
-
-    // Format phone number to international string (remove symbols, ensure leading 92)
-    let toPhone = (to || '').replace(/\D/g, '');
-    if (toPhone.startsWith('0')) {
-      toPhone = '92' + toPhone.substring(1);
-    }
-    
-    // Use dynamic import or require
-    const axios = require('axios');
-    const response = await axios.post(`https://api.ultramsg.com/${waConfig.instanceId}/messages/chat`, {
-      token: waConfig.token,
-      to: `+${toPhone}`,
-      body: message
-    });
-    
-    res.json({ success: true, data: response.data });
-  } catch (error) {
-    console.error('WhatsApp sending error:', error?.response?.data || error.message);
-  }
-});
-
-// ============ SMS API ============
-app.post('/api/smsapi', async (req, res) => {
-  try {
-    const { to, message } = req.body;
-    
-    // Get GLOBAL settings to extract SMS credentials
-    const [settings] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
-    if (settings.length === 0) return res.status(400).json({ error: 'Global settings not found.' });
-    
-    let configStr = settings[0].Data;
-    if (typeof configStr === 'string') configStr = JSON.parse(configStr);
-    
-    const smsConfig = configStr.smsConfig;
-    if (!smsConfig || !smsConfig.enabled) {
-      return res.status(400).json({ error: 'SMS integration is currently disabled in Settings.' });
-    }
-    if (!smsConfig.providerUrlTemplate) {
-      return res.status(400).json({ error: 'SMS provider URL template is missing.' });
-    }
-
-    // Format phone number to string (remove symbols, ensure leading 92 depending on standard usually required by bulkSMS, 
-    // bulksms.com.pk usually wants e.g. 923001234567, but let's just strip formatting first)
-    let toPhone = (to || '').replace(/\D/g, '');
-    if (toPhone.startsWith('0')) {
-      toPhone = '92' + toPhone.substring(1);
-    }
-    
-    // Replace URL template strings
-    let targetUrl = smsConfig.providerUrlTemplate
-      .replace('{phone}', toPhone)
-      .replace('{message}', encodeURIComponent(message));
-      
-    // Some providers might mis-use `{{phone}}` or `[phone]`. The simple replace handles exact `{phone}` string.
-    
-    // Execute request
-    const axios = require('axios');
-    const response = await axios.get(targetUrl);
-    
-    res.json({ success: true, data: response.data });
-  } catch (error) {
-    console.error('SMS sending error:', error?.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to send SMS message.' });
-  }
-});
-
-// 1. Serve Static Assets (JS, CSS, Images, Fonts) with long-term caching
-// Since Vite uses content hashing, it's safe to cache these indefinitely.
-app.use('/assets', express.static(path.join(publicHtmlDistPath, 'assets'), {
-  immutable: true,
-  maxAge: '1y',
-  etag: true
-}));
-
-// 2. Serve other static files (robots.txt, etc.)
-app.use(express.static(publicHtmlDistPath, {
-  index: false, // We handle index.html manually below
-  etag: true
-}));
-
-// 2. SPA Fallback / Status Page
-app.get('*', (req, res) => {
-  if (req.path.startsWith('/api')) {
-    return res.status(404).json({ error: 'API endpoint not found' });
-  }
-
-  if (fs.existsSync(publicHtmlIndexPath)) {
-    // ALWAYS set index.html to no-cache so the browser checks for updates
-    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-    res.sendFile(publicHtmlIndexPath);
-  } else {
-    // If missing, show the "Deployment in Progress" status page
-    getStatusPage(req, res);
-  }
-});
-
-
-// Graceful shutdown
-process.on('SIGINT', async () => {
-  console.log('\n🛑 Shutting down server...');
-  if (pool) {
-    await pool.end();
-  }
-  process.exit(0);
-});
-
-// Initialize database (catch any promise rejections)
-initializeDatabase().catch(err => {
-  console.error('🔥 Database initialization failed:', err.message);
-  dbConnected = false;
-});
-
-// Start server immediately
-try {
-  const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🏥 Hospital Management Backend running on http://0.0.0.0:${PORT}`);
-    console.log(`📁 Database: MySQL - ${process.env.DB_NAME}`);
-    console.log(`🔗 Host: ${process.env.DB_HOST}:${process.env.DB_PORT}`);
   });
 
-  // --- SERVER TIMEOUT OPTIMIZATION (Fixes ERR_CONNECTION_RESET on Staging) ---
-  // Node's default is 5s, Hostinger's proxy usually expects 60s.
-  // We set Node higher so the proxy is the one to close the connection, not Node.
-  server.keepAliveTimeout = 65000; 
-  server.headersTimeout = 66000;
+  // PUT /api/appointments/:id — update status or other fields
+  app.put('/api/appointments/:id', async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { Status, PatientName, Phone, ApptDate, ApptTime, Service, Notes, PatientID } = req.body;
 
-  server.on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-      console.error(`❌ Port ${PORT} is already in use. Please stop the existing process or use a different port.`);
-      process.exit(1);
+      // Build dynamic SET clause
+      const updates = [];
+      const params = [];
+
+      if (Status !== undefined) { updates.push('Status = ?'); params.push(Status); }
+      if (PatientName !== undefined) { updates.push('PatientName = ?'); params.push(PatientName); }
+      if (Phone !== undefined) { updates.push('Phone = ?'); params.push(Phone); }
+      if (ApptDate !== undefined) { updates.push('ApptDate = ?'); params.push(ApptDate); }
+      if (ApptTime !== undefined) { updates.push('ApptTime = ?'); params.push(ApptTime); }
+      if (Service !== undefined) { updates.push('Service = ?'); params.push(Service); }
+      if (Notes !== undefined) { updates.push('Notes = ?'); params.push(Notes); }
+      if (PatientID !== undefined) { updates.push('PatientID = ?'); params.push(PatientID); }
+
+      if (updates.length === 0) {
+        return res.json({ success: true });
+      }
+
+      params.push(id);
+      await pool.query(`UPDATE Appointments SET ${updates.join(', ')} WHERE ID = ?`, params);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error updating appointment:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // DELETE /api/appointments/:id
+  app.delete('/api/appointments/:id', async (req, res) => {
+    try {
+      await pool.execute('DELETE FROM Appointments WHERE ID = ?', [req.params.id]);
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Error deleting appointment:', error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  // ============ WHATSAPP API ============
+  app.post('/api/whatsappsms', async (req, res) => {
+    try {
+      const { to, message } = req.body;
+
+      // Get GLOBAL settings to extract UltraMsg credentials
+      const [settings] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
+      if (settings.length === 0) return res.status(400).json({ error: 'Global settings not found.' });
+
+      let configStr = settings[0].Data;
+      if (typeof configStr === 'string') configStr = JSON.parse(configStr);
+
+      const waConfig = configStr.whatsappConfig;
+      if (!waConfig || !waConfig.enabled) {
+        return res.status(400).json({ error: 'WhatsApp integration is currently disabled in Settings.' });
+      }
+      if (!waConfig.instanceId || !waConfig.token) {
+        return res.status(400).json({ error: 'WhatsApp instance ID or token missing.' });
+      }
+
+      // Format phone number to international string (remove symbols, ensure leading 92)
+      let toPhone = (to || '').replace(/\D/g, '');
+      if (toPhone.startsWith('0')) {
+        toPhone = '92' + toPhone.substring(1);
+      }
+
+      // Use dynamic import or require
+      const axios = require('axios');
+      const response = await axios.post(`https://api.ultramsg.com/${waConfig.instanceId}/messages/chat`, {
+        token: waConfig.token,
+        to: `+${toPhone}`,
+        body: message
+      });
+
+      res.json({ success: true, data: response.data });
+    } catch (error) {
+      console.error('WhatsApp sending error:', error?.response?.data || error.message);
+    }
+  });
+
+  // ============ SMS API ============
+  app.post('/api/smsapi', async (req, res) => {
+    try {
+      const { to, message } = req.body;
+
+      // Get GLOBAL settings to extract SMS credentials
+      const [settings] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
+      if (settings.length === 0) return res.status(400).json({ error: 'Global settings not found.' });
+
+      let configStr = settings[0].Data;
+      if (typeof configStr === 'string') configStr = JSON.parse(configStr);
+
+      const smsConfig = configStr.smsConfig;
+      if (!smsConfig || !smsConfig.enabled) {
+        return res.status(400).json({ error: 'SMS integration is currently disabled in Settings.' });
+      }
+      if (!smsConfig.providerUrlTemplate) {
+        return res.status(400).json({ error: 'SMS provider URL template is missing.' });
+      }
+
+      // Format phone number to string (remove symbols, ensure leading 92 depending on standard usually required by bulkSMS, 
+      // bulksms.com.pk usually wants e.g. 923001234567, but let's just strip formatting first)
+      let toPhone = (to || '').replace(/\D/g, '');
+      if (toPhone.startsWith('0')) {
+        toPhone = '92' + toPhone.substring(1);
+      }
+
+      // Replace URL template strings
+      let targetUrl = smsConfig.providerUrlTemplate
+        .replace('{phone}', toPhone)
+        .replace('{message}', encodeURIComponent(message));
+
+      // Some providers might mis-use `{{phone}}` or `[phone]`. The simple replace handles exact `{phone}` string.
+
+      // Execute request
+      const axios = require('axios');
+      const response = await axios.get(targetUrl);
+
+      res.json({ success: true, data: response.data });
+    } catch (error) {
+      console.error('SMS sending error:', error?.response?.data || error.message);
+      res.status(500).json({ error: 'Failed to send SMS message.' });
+    }
+  });
+
+  // 1. Serve Static Assets (JS, CSS, Images, Fonts) with long-term caching
+  // Since Vite uses content hashing, it's safe to cache these indefinitely.
+  app.use('/assets', express.static(path.join(publicHtmlDistPath, 'assets'), {
+    immutable: true,
+    maxAge: '1y',
+    etag: true
+  }));
+
+  // 2. Serve other static files (robots.txt, etc.)
+  app.use(express.static(publicHtmlDistPath, {
+    index: false, // We handle index.html manually below
+    etag: true
+  }));
+
+  // 2. SPA Fallback / Status Page
+  app.get('*', (req, res) => {
+    if (req.path.startsWith('/api')) {
+      return res.status(404).json({ error: 'API endpoint not found' });
+    }
+
+    if (fs.existsSync(publicHtmlIndexPath)) {
+      // ALWAYS set index.html to no-cache so the browser checks for updates
+      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+      res.sendFile(publicHtmlIndexPath);
     } else {
-      console.error('❌ Server error:', err);
+      // If missing, show the "Deployment in Progress" status page
+      getStatusPage(req, res);
     }
   });
-} catch (error) {
-  console.error('❌ Failed to start server:', error);
-  process.exit(1);
-}
+
+
+  // Graceful shutdown
+  process.on('SIGINT', async () => {
+    console.log('\n🛑 Shutting down server...');
+    if (pool) {
+      await pool.end();
+    }
+    process.exit(0);
+  });
+
+  // Initialize database (catch any promise rejections)
+  initializeDatabase().catch(err => {
+    console.error('🔥 Database initialization failed:', err.message);
+    dbConnected = false;
+  });
+
+  // Start server immediately
+  try {
+    const server = app.listen(PORT, '0.0.0.0', () => {
+      console.log(`🏥 Hospital Management Backend running on http://0.0.0.0:${PORT}`);
+      console.log(`📁 Database: MySQL - ${process.env.DB_NAME}`);
+      console.log(`🔗 Host: ${process.env.DB_HOST}:${process.env.DB_PORT}`);
+    });
+
+    // --- SERVER TIMEOUT OPTIMIZATION (Fixes ERR_CONNECTION_RESET on Staging) ---
+    // Node's default is 5s, Hostinger's proxy usually expects 60s.
+    // We set Node higher so the proxy is the one to close the connection, not Node.
+    server.keepAliveTimeout = 65000;
+    server.headersTimeout = 66000;
+
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(`❌ Port ${PORT} is already in use. Please stop the existing process or use a different port.`);
+        process.exit(1);
+      } else {
+        console.error('❌ Server error:', err);
+      }
+    });
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
+    process.exit(1);
+  }
