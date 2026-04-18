@@ -183,7 +183,7 @@ async function createPool() {
     timezone: 'Z',
     dateStrings: [
       'DATE',
-      'DATETIME'
+      'VARCHAR(50)'
     ],
     decimalNumbers: true,
     supportBigNumbers: true,
@@ -330,6 +330,46 @@ async function initializeDatabase() {
     console.log('✅ Connected to MySQL database');
     connection.release();
 
+    // ============ UNIVERSAL TIME MIGRATION SUITE ============
+    // This converts all legacy DATETIME columns to VARCHAR(50) to prevent timezone stripping.
+    const migrateToText = async (table, column) => {
+      try {
+        await pool.execute(`ALTER TABLE ${table} MODIFY COLUMN ${column} VARCHAR(50)`);
+        console.log(`✅ Migrated ${table}.${column} to VARCHAR(50)`);
+      } catch (e) {
+        // Column might not exist or already be VARCHAR
+      }
+    };
+
+    console.log('⏳ Running Universal Time Migration...');
+    await migrateToText('Patients', 'CreatedAt');
+    await migrateToText('Patients', 'UpdatedAt');
+    await migrateToText('Visits', 'CreatedAt');
+    await migrateToText('Stock', 'CreatedAt');
+    await migrateToText('Payments', 'CreatedAt');
+    await migrateToText('Prescriptions', 'CreatedAt');
+    await migrateToText('Prescriptions', 'FinalizedAt');
+    await migrateToText('Prescriptions', 'LastUpdatedAt');
+    await migrateToText('LabTestsCatalog', 'CreatedAt');
+    await migrateToText('AdvancePayments', 'ApprovalTime');
+    await migrateToText('LabResults', 'CreatedAt');
+    await migrateToText('LabResults', 'NotifiedAt');
+    await migrateToText('LabResults', 'CollectedAt');
+    await migrateToText('LabPatients', 'CreatedAt');
+    await migrateToText('labpaymenthistory', 'CreatedAt');
+    await migrateToText('labpaymenthistory', 'FinalizedAt');
+    await migrateToText('Users', 'CreatedAt');
+    await migrateToText('Users', 'UpdatedAt');
+    await migrateToText('Users', 'LastLogin');
+    await migrateToText('Roles', 'CreatedAt');
+    await migrateToText('Employees', 'CreatedAt');
+    await migrateToText('LeaveRequests', 'CreatedAt');
+    await migrateToText('Appointments', 'CreatedAt');
+    await migrateToText('PatientServices', 'CreatedAt');
+    await migrateToText('PatientServices', 'UpdatedAt');
+    await migrateToText('AppSettings', 'UpdatedAt');
+    console.log('✅ Universal Time Migration Complete.');
+
     // Patients table
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS Patients (
@@ -343,7 +383,7 @@ async function initializeDatabase() {
         Symptoms TEXT,
         CreatedBy VARCHAR(100),
         CreatedByRole VARCHAR(50),
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+        CreatedAt VARCHAR(50)
       )
     `);
 
@@ -365,7 +405,7 @@ async function initializeDatabase() {
         Quantity INT DEFAULT 0,
         Price DECIMAL(10, 2) DEFAULT 0,
         LowStockThreshold INT DEFAULT 10,
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+        CreatedAt VARCHAR(50)
       )
     `);
 
@@ -381,7 +421,7 @@ async function initializeDatabase() {
         TotalAmount DECIMAL(10, 2) DEFAULT 0,
         PaymentMode VARCHAR(50),
         Medicines TEXT,
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+        CreatedAt VARCHAR(50)
       )
     `);
 
@@ -405,7 +445,7 @@ async function initializeDatabase() {
         Precautions TEXT,
         GeneratedText TEXT,
         FollowUpDate VARCHAR(50),
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+        CreatedAt VARCHAR(50)
       )
     `);
 
@@ -419,8 +459,8 @@ async function initializeDatabase() {
     try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN PatientAgeMonths INT DEFAULT 0"); } catch (e) { }
     try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN PatientAgeDays INT DEFAULT 0"); } catch (e) { }
     try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN Status VARCHAR(20) DEFAULT 'Draft'"); } catch (e) { }
-    try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN FinalizedAt DATETIME NULL"); } catch (e) { }
-    try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN LastUpdatedAt DATETIME NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN FinalizedAt VARCHAR(50) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN LastUpdatedAt VARCHAR(50) NULL"); } catch (e) { }
     try { await pool.execute("ALTER TABLE Prescriptions ADD COLUMN IsLocked TINYINT(1) DEFAULT 0"); } catch (e) { }
 
     // Ensure Medicines and LabTests are JSON type (for MySQL 5.7+)
@@ -451,7 +491,7 @@ async function initializeDatabase() {
         PatientID VARCHAR(50),
         VisitDate VARCHAR(50),
         Symptoms TEXT,
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        CreatedAt VARCHAR(50),
         FOREIGN KEY (PatientID) REFERENCES Patients(ID) ON DELETE CASCADE
       )
     `);
@@ -475,7 +515,7 @@ async function initializeDatabase() {
         Status VARCHAR(50) DEFAULT 'Active',
         IsProfile TINYINT(1) DEFAULT 0,
         ProfileTests JSON,
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+        CreatedAt VARCHAR(50)
       )
     `);
 
@@ -494,7 +534,7 @@ async function initializeDatabase() {
 
     // Attempt to add Approval tracking columns to AdvancePayments (Migration)
     try { await pool.execute("ALTER TABLE AdvancePayments ADD COLUMN ApprovedBy VARCHAR(100) NULL"); } catch (e) { }
-    try { await pool.execute("ALTER TABLE AdvancePayments ADD COLUMN ApprovalTime DATETIME NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE AdvancePayments ADD COLUMN ApprovalTime VARCHAR(50) NULL"); } catch (e) { }
 
     // LabResults table
     await pool.execute(`
@@ -510,9 +550,9 @@ async function initializeDatabase() {
         Technician VARCHAR(255),
         Status VARCHAR(50),
         ReferredBy VARCHAR(255) DEFAULT 'Self',
-        NotifiedAt DATETIME NULL,
-        CollectedAt DATETIME NULL,
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+        NotifiedAt VARCHAR(50) NULL,
+        CollectedAt VARCHAR(50) NULL,
+        CreatedAt VARCHAR(50)
       )
     `);
 
@@ -525,8 +565,8 @@ async function initializeDatabase() {
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN ReportDate VARCHAR(50)"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN Notes TEXT"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN Technician VARCHAR(255)"); } catch (e) { }
-    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN NotifiedAt DATETIME NULL"); } catch (e) { }
-    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN CollectedAt DATETIME NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN NotifiedAt VARCHAR(50) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN CollectedAt VARCHAR(50) NULL"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN ReferredBy VARCHAR(255) DEFAULT 'Self'"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults DROP COLUMN ClinicPatientID"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults DROP COLUMN PatientID"); } catch (e) { }
@@ -550,7 +590,7 @@ async function initializeDatabase() {
         ReferringDoctorName VARCHAR(255),
         Priority VARCHAR(20) DEFAULT 'Normal',
         SelectedTests JSON NULL,
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+        CreatedAt VARCHAR(50)
       )
     `);
 
@@ -565,8 +605,8 @@ async function initializeDatabase() {
         PaidAmount DECIMAL(10, 2) DEFAULT 0,
         PaymentStatus VARCHAR(50) DEFAULT 'Unpaid',
         Tests JSON NULL,
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FinalizedAt DATETIME NULL
+        CreatedAt VARCHAR(50),
+        FinalizedAt VARCHAR(50) NULL
       )
     `);
 
@@ -597,9 +637,9 @@ async function initializeDatabase() {
         Permissions TEXT,
         IsActive TINYINT DEFAULT 1,
         CreatedBy VARCHAR(50),
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-        UpdatedAt DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        LastLogin DATETIME
+        CreatedAt VARCHAR(50),
+        UpdatedAt VARCHAR(50),
+        LastLogin VARCHAR(50)
       )
     `);
 
@@ -610,7 +650,7 @@ async function initializeDatabase() {
         Name VARCHAR(100) UNIQUE NOT NULL,
         Description TEXT,
         IsSystem TINYINT(1) DEFAULT 0,
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+        CreatedAt VARCHAR(50)
       )
     `);
 
@@ -628,7 +668,7 @@ async function initializeDatabase() {
           ShiftStartTime TIME DEFAULT '09:00:00',
           ShiftEndTime TIME DEFAULT '17:00:00',
           Status VARCHAR(20) DEFAULT 'Active',
-          CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+          CreatedAt VARCHAR(50),
           FOREIGN KEY (UserID) REFERENCES Users(ID) ON DELETE SET NULL
       )
     `);
@@ -643,7 +683,7 @@ async function initializeDatabase() {
           Reason TEXT,
           Status ENUM('Pending', 'Approved', 'Rejected') DEFAULT 'Pending',
           ApprovedBy VARCHAR(50),
-          CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+          CreatedAt VARCHAR(50),
           FOREIGN KEY (EmployeeID) REFERENCES Employees(ID) ON DELETE CASCADE
       )
     `);
@@ -662,7 +702,7 @@ async function initializeDatabase() {
           Notes TEXT NULL,
           TokenNumber INT NOT NULL DEFAULT 1,
           CreatedBy VARCHAR(100) NULL,
-          CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+          CreatedAt VARCHAR(50)
       )
     `);
     // Index for fast daily lookups
@@ -693,8 +733,8 @@ async function initializeDatabase() {
   Services TEXT,
   GrandTotal DECIMAL(10, 2) DEFAULT 0,
   Status VARCHAR(50) DEFAULT 'Draft',
-  CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UpdatedAt DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+  CreatedAt VARCHAR(50),
+  UpdatedAt VARCHAR(50)
 )
   `);
 
@@ -736,8 +776,8 @@ async function initializeDatabase() {
           Deductions DECIMAL(10, 2) DEFAULT 0,
           NetSalary DECIMAL(10, 2) NOT NULL,
           PaymentStatus ENUM('Paid', 'Unpaid') DEFAULT 'Unpaid',
-          PaymentDate DATETIME,
-          CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+          PaymentDate VARCHAR(50),
+          CreatedAt VARCHAR(50)
       )
     `);
     // Ensure all Payroll columns exist (Migration)
@@ -863,7 +903,7 @@ async function initializeDatabase() {
         ID VARCHAR(50) PRIMARY KEY, -- 'GLOBAL' or UserID
         Category VARCHAR(50) NOT NULL, -- 'Global' or 'User'
         Data JSON,
-        UpdatedAt DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        UpdatedAt VARCHAR(50)
       )
     `);
 
@@ -921,7 +961,7 @@ async function initializeDatabase() {
         ID INT AUTO_INCREMENT PRIMARY KEY,
         Name VARCHAR(255) NOT NULL,
         Category VARCHAR(100),
-        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
+        CreatedAt VARCHAR(50)
       )
     `);
 
