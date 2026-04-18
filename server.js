@@ -181,6 +181,10 @@ async function createPool() {
     acquireTimeout: 30000, // 30s to get a connection from pool
     timeout: 60000,        // 60s for idle connections
     timezone: 'Z',
+    dateStrings: [
+      'DATE',
+      'DATETIME'
+    ],
     decimalNumbers: true,
     supportBigNumbers: true,
     bigNumberStrings: true
@@ -254,24 +258,37 @@ function convertRowDates(row) {
   const converted = { ...row };
 
   // Helper to safely convert any value to ISO string
+  // This is the "Timezone Shield" logic
   const toIso = (val) => {
     if (!val) return val;
+    
+    // If it is a Date object (from DATETIME column) or a bare string
+    // we need to check if it already has timezone information.
+    const s = String(val);
+    const hasTimezone = s.includes('Z') || s.includes('+') || (s.includes('T') && s.length > 20);
+
+    if (!hasTimezone) {
+      // BARE STRING/DATE: These are our "Legacy" or "Mixed" records.
+      // We know the clinic stores time in PKT, so we explicitly tag it.
+      // This stops the frontend from adding an extra 5 hours.
+      const datePart = s.split('.')[0].replace(' ', 'T').replace('Z', '');
+      return `${datePart}+05:00`;
+    }
+
+    // MODERN ISO STRING: Has 'Z' or '+'. Standard Date handling works perfectly.
     const d = new Date(val);
     return isNaN(d.getTime()) ? val : d.toISOString();
   };
 
-  // Convert CreatedAt if it exists
-  if (converted.CreatedAt) {
-    converted.CreatedAt = toIso(converted.CreatedAt);
-  }
+  // Convert all date fields using the Shield
+  const dateFields = [
+    'CreatedAt', 'UpdatedAt', 'VisitDate', 'TestDate', 'ReportDate', 
+    'FollowUpDate', 'ApprovalTime', 'FinalizedAt', 'LastUpdatedAt', 'CollectedAt'
+  ];
 
-  // Convert other date fields
-  ['UpdatedAt', 'NotifiedAt', 'CollectedAt', 'VisitDate', 'TestDate', 'ReportDate', 'FollowUpDate', 'ApprovalTime', 'FinalizedAt', 'LastUpdatedAt'].forEach(field => {
-    if (converted[field] && !(converted[field] instanceof Date)) {
-      const date = new Date(converted[field]);
-      if (!isNaN(date.getTime())) {
-        converted[field] = date.toISOString();
-      }
+  dateFields.forEach(field => {
+    if (converted[field]) {
+      converted[field] = toIso(converted[field]);
     }
   });
 
