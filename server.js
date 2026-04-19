@@ -172,14 +172,12 @@ let dbConnected = false;
 
 async function createPool() {
   const dbConfig = {
+    connectTimeout: 30000, // 30s to establish connection
     waitForConnections: true,
     connectionLimit: process.env.DB_CONNECTION_LIMIT || 10,
     queueLimit: 0,
     enableKeepAlive: true,
     keepAliveInitialDelay: 10000, // 10s delay
-    connectTimeout: 30000, // 30s to establish connection
-    acquireTimeout: 30000, // 30s to get a connection from pool
-    timeout: 60000,        // 60s for idle connections
     timezone: 'Z',
     dateStrings: [
       'DATE',
@@ -257,39 +255,32 @@ function convertRowDates(row) {
 
   const converted = { ...row };
 
+  // --- CHAT SPECIFIC MAPPING ---
+  // Map PascalCase database columns to camelCase for the frontend
+  if (converted.Content !== undefined) converted.content = converted.Content;
+  if (converted.SenderID !== undefined) converted.senderId = converted.SenderID;
+  if (converted.ConversationID !== undefined) converted.conversationId = converted.ConversationID;
+  if (converted.CreatedAt !== undefined) converted.createdAt = converted.CreatedAt;
+
   // Helper to safely convert any value to ISO string
-  // This is the "Timezone Shield" logic
   const toIso = (val) => {
     if (!val) return null;
-    
     const s = String(val).trim();
-    
-    // Handle MySQL Zero Dates or empty strings
-    if (s === '0000-00-00 00:00:00' || s === '0000-00-00' || s === '') {
-      return null;
-    }
+    if (s === '0000-00-00 00:00:00' || s === '0000-00-00' || s === '') return null;
 
-    // Check if it already has timezone information
     const hasTimezone = s.includes('Z') || s.includes('+') || (s.includes('T') && s.length > 20);
-
     if (!hasTimezone) {
-      // BARE STRING: Assume it is Pakistan Time.
-      // Clean up the format to ensure it's a valid ISO candidate
       const datePart = s.split('.')[0].replace(' ', 'T');
       const candidate = datePart.includes('T') ? `${datePart}+05:00` : `${datePart}T00:00:00+05:00`;
-      
-      // Verify validity before returning
       const d = new Date(candidate);
       return isNaN(d.getTime()) ? null : candidate;
     }
 
-    // MODERN ISO STRING: Verify and return standard Zulu ISO
     const d = new Date(val);
     if (isNaN(d.getTime())) return null;
     return d.toISOString();
   };
 
-  // Convert all date fields using the Shield
   const dateFields = [
     'CreatedAt', 'UpdatedAt', 'VisitDate', 'TestDate', 'ReportDate', 
     'FollowUpDate', 'ApprovalTime', 'FinalizedAt', 'LastUpdatedAt', 'CollectedAt'
@@ -297,22 +288,23 @@ function convertRowDates(row) {
 
   dateFields.forEach(field => {
     if (converted[field]) {
-      converted[field] = toIso(converted[field]);
+      // Apply ISO conversion
+      const isoDate = toIso(converted[field]);
+      converted[field] = isoDate;
+      // Also provide camelCase version for the frontend
+      const camelField = field.charAt(0).toLowerCase() + field.slice(1);
+      converted[camelField] = isoDate;
     }
   });
 
-  // Convert JSON fields if they are strings (some MySQL drivers don't auto-parse JSON columns)
-  ['Data', 'Medicines', 'LabTests', 'Tests', 'Services', 'Items', 'SelectedTests'].forEach(field => {
+  ['Data', 'Medicines', 'LabTests', 'Tests', 'Services', 'Items', 'SelectedTests', 'FormData'].forEach(field => {
     if (converted[field] && typeof converted[field] === 'string') {
       try {
-        // Check if it's actually a JSON string (starts with { or [)
         const trimmed = converted[field].trim();
         if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
           converted[field] = JSON.parse(converted[field]);
         }
-      } catch (e) {
-        // Not a JSON string or already handled
-      }
+      } catch (e) {}
     }
   });
 
@@ -495,6 +487,66 @@ async function initializeDatabase() {
         FOREIGN KEY (PatientID) REFERENCES Patients(ID) ON DELETE CASCADE
       )
     `);
+
+    // ClinicalForms table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS ClinicalForms (
+        ID VARCHAR(50) PRIMARY KEY,
+        PatientID VARCHAR(50),
+        PatientName VARCHAR(255),
+        FormType VARCHAR(50),
+        FormData JSON,
+        CreatedBy VARCHAR(100),
+        CreatedAt VARCHAR(50),
+        UpdatedAt VARCHAR(50),
+        IsDeleted TINYINT(1) DEFAULT 0
+      )
+    `);
+    try { await pool.execute("ALTER TABLE ClinicalForms ADD COLUMN IsDeleted TINYINT(1) DEFAULT 0"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE ClinicalForms MODIFY COLUMN FormData JSON"); } catch (e) { }
+
+    // --- CHAT MODULE TABLES ---
+    
+    // 1. Conversations
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS ChatConversations (
+        ID INT AUTO_INCREMENT PRIMARY KEY,
+        Type ENUM('Direct', 'Group') DEFAULT 'Direct',
+        Name VARCHAR(255) NULL,
+        CreatedAt VARCHAR(50),
+        UpdatedAt VARCHAR(50)
+      )
+    `);
+
+    // 2. Participants
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS ChatParticipants (
+        ConversationID INT,
+        UserID VARCHAR(50),
+        JoinedAt VARCHAR(50),
+        PRIMARY KEY (ConversationID, UserID),
+        FOREIGN KEY (ConversationID) REFERENCES ChatConversations(ID) ON DELETE CASCADE
+      )
+    `);
+
+    // 3. Messages
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS ChatMessages (
+        ID INT AUTO_INCREMENT PRIMARY KEY,
+        ConversationID INT,
+        SenderID VARCHAR(50),
+        Content TEXT,
+        MessageType ENUM('Text', 'Image', 'System') DEFAULT 'Text',
+        IsRead TINYINT(1) DEFAULT 0,
+        CreatedAt VARCHAR(50),
+        FOREIGN KEY (ConversationID) REFERENCES ChatConversations(ID) ON DELETE CASCADE
+      )
+    `);
+
+    // Performance Index for Chat History
+    try { 
+      await pool.execute("CREATE INDEX idx_chat_history ON ChatMessages (ConversationID, CreatedAt DESC)"); 
+    } catch (e) { }
 
     // LabTestsCatalog table
     await pool.execute(`
@@ -843,10 +895,11 @@ async function initializeDatabase() {
         Admin: [
           'page_dashboard', 'page_appointments', 'page_patients', 'page_fees', 'page_medicines', 'page_pharmacy',
           'page_prescriptions', 'page_lab_registration', 'page_lab_fees', 'page_lab_results', 'page_pathology',
-          'page_users', 'page_expenses', 'page_settings', 'page_hr', 'page_salary_settings', 'btn_manage_staff'
+          'page_users', 'page_expenses', 'page_settings', 'page_hr', 'page_salary_settings', 'btn_manage_staff',
+          'page_clinical_forms'
         ],
-        Doctor: ['page_dashboard', 'page_appointments', 'page_patients', 'page_medicines', 'page_prescriptions', 'page_settings'],
-        Receptionist: ['page_dashboard', 'page_appointments', 'page_patients', 'page_fees', 'page_pharmacy', 'page_expenses', 'page_settings'],
+        Doctor: ['page_dashboard', 'page_appointments', 'page_patients', 'page_medicines', 'page_prescriptions', 'page_settings', 'page_clinical_forms'],
+        Receptionist: ['page_dashboard', 'page_appointments', 'page_patients', 'page_fees', 'page_pharmacy', 'page_expenses', 'page_settings', 'page_clinical_forms'],
         LabTechnician: ['page_dashboard', 'page_lab_registration', 'page_lab_fees', 'page_lab_results', 'page_pathology', 'page_settings'],
       };
       for (const [roleName, permissions] of Object.entries(defaultRolePermissions)) {
@@ -964,6 +1017,22 @@ async function initializeDatabase() {
         CreatedAt VARCHAR(50)
       )
     `);
+
+    // ClinicalForms table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS ClinicalForms (
+        ID VARCHAR(50) PRIMARY KEY,
+        PatientID VARCHAR(50),
+        PatientName VARCHAR(255),
+        FormType VARCHAR(50) NOT NULL,
+        FormData JSON,
+        CreatedBy VARCHAR(100),
+        CreatedAt VARCHAR(50),
+        UpdatedAt VARCHAR(50)
+      )
+    `);
+    try { await pool.execute('ALTER TABLE ClinicalForms ADD INDEX idx_cf_patient (PatientID)'); } catch (e) { }
+    try { await pool.execute('ALTER TABLE ClinicalForms ADD INDEX idx_cf_type (FormType)'); } catch (e) { }
 
 
     const [genericCount] = await pool.execute('SELECT COUNT(*) as count FROM GenericMedicines');
@@ -1498,6 +1567,227 @@ app.post('/api/patients', async (req, res) => {
     res.json({ success: true, id });
   } catch (error) {
     console.error('Error adding patient:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ CLINICAL FORMS API ============
+
+app.get('/api/clinical-forms', async (req, res) => {
+  try {
+    const { type, patientId } = req.query;
+    // Always filter by IsDeleted = 0 (Soft Delete)
+    let query = 'SELECT * FROM ClinicalForms WHERE IsDeleted = 0';
+    let params = [];
+    let whereAdded = true;
+
+    if (type) {
+      query += ' AND FormType = ?';
+      params.push(type);
+    }
+    if (patientId) {
+      query += ' AND PatientID = ?';
+      params.push(patientId);
+    }
+
+    query += ' ORDER BY CreatedAt DESC';
+    const [rows] = await pool.execute(query, params);
+    res.json(rows.map(convertRowDates));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/clinical-forms/:id', async (req, res) => {
+  try {
+    const [rows] = await pool.execute('SELECT * FROM ClinicalForms WHERE ID = ? AND IsDeleted = 0', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Form not found or has been deleted' });
+    res.json(convertRowDates(rows[0]));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/clinical-forms', async (req, res) => {
+  try {
+    const { id, patientId, patientName, formType, formData, createdBy } = req.body;
+    const now = new Date().toISOString();
+
+    await pool.execute(
+      'INSERT INTO ClinicalForms (ID, PatientID, PatientName, FormType, FormData, CreatedBy, CreatedAt, UpdatedAt, IsDeleted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, patientId || null, patientName || null, formType, JSON.stringify(formData), createdBy || null, now, now, 0]
+    );
+
+    res.json({ success: true, id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/clinical-forms/:id', async (req, res) => {
+  try {
+    const { formData } = req.body;
+    const now = new Date().toISOString();
+
+    await pool.execute(
+      'UPDATE ClinicalForms SET FormData = ?, UpdatedAt = ? WHERE ID = ? AND IsDeleted = 0',
+      [JSON.stringify(formData), now, req.params.id]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/clinical-forms/:id', async (req, res) => {
+  try {
+    // Soft Delete Logic: Set IsDeleted to 1 instead of removing row
+    await pool.execute('UPDATE ClinicalForms SET IsDeleted = 1 WHERE ID = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ CHAT MODULE API ============
+
+// Get all conversations for the logged-in user
+app.get('/api/chat/conversations', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    // 1. Fetch conversations and basic stats
+    const [rows] = await pool.execute(`
+      SELECT c.*, 
+             (SELECT Content FROM ChatMessages WHERE ConversationID = c.ID ORDER BY CreatedAt DESC LIMIT 1) as LastMessage,
+             (SELECT CreatedAt FROM ChatMessages WHERE ConversationID = c.ID ORDER BY CreatedAt DESC LIMIT 1) as LastMessageAt,
+             (SELECT COUNT(*) FROM ChatMessages WHERE ConversationID = c.ID AND SenderID != ? AND IsRead = 0) as UnreadCount
+      FROM ChatConversations c
+      JOIN ChatParticipants p ON c.ID = p.ConversationID
+      WHERE p.UserID = ?
+      ORDER BY LastMessageAt DESC, c.UpdatedAt DESC
+    `, [userId, userId]);
+
+    if (rows.length === 0) return res.json([]);
+
+    // 2. Optimized: Fetch ALL participants for these conversations in ONE query
+    const convIds = rows.map(r => r.ID);
+    const [allParticipants] = await pool.execute(`
+      SELECT u.ID, u.Username, u.Role, u.LastLogin, p.ConversationID
+      FROM Users u
+      JOIN ChatParticipants p ON u.ID = p.UserID
+      WHERE p.ConversationID IN (${convIds.map(() => '?').join(',')})
+    `, convIds);
+
+    // 3. Group participants by conversation
+    const conversations = rows.map(conv => {
+      const participants = allParticipants
+        .filter(p => p.ConversationID === conv.ID)
+        .map(p => {
+          const { ConversationID, ...user } = p;
+          return convertRowDates(user);
+        });
+      return { ...conv, participants };
+    });
+
+    res.json(conversations);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Start a new 1-on-1 conversation
+app.post('/api/chat/conversations', async (req, res) => {
+  try {
+    const { targetUserId } = req.body;
+    const userId = req.user.id;
+
+    if (!targetUserId) {
+      return res.status(400).json({ error: 'Target user ID is required' });
+    }
+
+    const now = new Date().toISOString();
+
+    // 1. Check if a 1-on-1 conversation already exists between these two
+    const [existing] = await pool.execute(`
+      SELECT p1.ConversationID 
+      FROM ChatParticipants p1
+      JOIN ChatParticipants p2 ON p1.ConversationID = p2.ConversationID
+      JOIN ChatConversations c ON p1.ConversationID = c.ID
+      WHERE c.Type = 'Direct' AND p1.UserID = ? AND p2.UserID = ?
+    `, [userId, targetUserId]);
+
+    if (existing.length > 0) {
+      return res.json({ id: existing[0].ConversationID });
+    }
+
+    // 2. Create new conversation
+    const [result] = await pool.execute(
+      'INSERT INTO ChatConversations (Type, CreatedAt, UpdatedAt) VALUES (?, ?, ?)',
+      ['Direct', now, now]
+    );
+    const convId = result.insertId;
+    // 3. Add both participants
+    await pool.execute('INSERT INTO ChatParticipants (ConversationID, UserID, JoinedAt) VALUES (?, ?, ?)', [convId, userId, now]);
+    await pool.execute('INSERT INTO ChatParticipants (ConversationID, UserID, JoinedAt) VALUES (?, ?, ?)', [convId, targetUserId, now]);
+
+    res.json({ id: convId });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get messages for a conversation with pagination
+app.get('/api/chat/messages/:conversationId', async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const { limit = 50, beforeId } = req.query;
+    
+    let query = `
+      SELECT m.*, m.IsRead as isRead, u.Username as SenderName 
+      FROM ChatMessages m
+      JOIN Users u ON m.SenderID = u.ID
+      WHERE m.ConversationID = ?
+    `;
+    const params = [conversationId];
+
+    if (beforeId) {
+      query += ` AND m.ID < ?`;
+      params.push(beforeId);
+    }
+
+    // Use .query instead of .execute for LIMIT to avoid "Incorrect arguments" error in some mysql2 versions
+    query += ` ORDER BY CreatedAt DESC LIMIT ${parseInt(limit) || 50}`;
+
+    const [rows] = await pool.query(query, params);
+    res.json(rows.map(convertRowDates).reverse()); // Chronological order
+  } catch (error) {
+    console.error('❌ Chat History Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Mark all messages in a conversation as read
+app.put('/api/chat/messages/:conversationId/read', async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const userId = req.user.id;
+    await pool.execute(
+      'UPDATE ChatMessages SET IsRead = 1 WHERE ConversationID = ? AND SenderID != ?',
+      [conversationId, userId]
+    );
+    
+    // Notify others in the room that messages were read
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`room_${conversationId}`).emit('messages-read', {
+        conversationId: Number(conversationId),
+        readBy: userId
+      });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
@@ -3175,13 +3465,20 @@ app.post('/api/patient-services', async (req, res) => {
   const ALL_PERMISSIONS = [
     // ── Pages ──
     { key: 'page_dashboard', label: 'Dashboard', group: 'Pages' },
+    { key: 'page_appointments', label: 'Appointments', group: 'Pages' },
     { key: 'page_patients', label: 'Patients', group: 'Pages' },
     { key: 'page_fees', label: 'Fee Collection', group: 'Pages' },
     { key: 'page_medicines', label: 'Medicines', group: 'Pages' },
     { key: 'page_pharmacy', label: 'Pharmacy', group: 'Pages' },
     { key: 'page_prescriptions', label: 'Prescriptions', group: 'Pages' },
-    { key: 'page_lab_results', label: 'Lab Results', group: 'Pages' },
+    { key: 'page_clinical_forms', label: 'Clinical Forms', group: 'Pages' },
+    { key: 'page_lab_registration', label: 'Lab Registration', group: 'Pages' },
+    { key: 'page_lab_fees', label: 'Lab Fees', group: 'Pages' },
+    { key: 'page_pathology', label: 'Pathology', group: 'Pages' },
+    { key: 'page_lab_results', label: 'Lab Results (Legacy)', group: 'Pages' },
     { key: 'page_lab_management', label: 'Lab Management', group: 'Pages' },
+    { key: 'page_hr', label: 'HR Management', group: 'Pages' },
+    { key: 'page_salary_settings', label: 'Salary Rules', group: 'Pages' },
     { key: 'page_users', label: 'User Management', group: 'Pages' },
     { key: 'page_expenses', label: 'Daily Expenses', group: 'Pages' },
     { key: 'page_settings', label: 'Settings', group: 'Pages' },
@@ -4357,6 +4654,126 @@ app.post('/api/patient-services', async (req, res) => {
     }
   });
 
+  // ============ CHAT API ENDPOINTS ============
+
+  // 1. Get all conversations for current user
+  app.get('/api/chat/conversations', async (req, res) => {
+    try {
+      const userId = req.user.id;
+      // Get conversations where user is a participant
+      const [rows] = await pool.query(`
+        SELECT c.*, 
+               (SELECT Content FROM ChatMessages WHERE ConversationID = c.ID ORDER BY CreatedAt DESC LIMIT 1) as LastMessage,
+               (SELECT CreatedAt FROM ChatMessages WHERE ConversationID = c.ID ORDER BY CreatedAt DESC LIMIT 1) as LastMessageAt,
+               (SELECT COUNT(*) FROM ChatMessages WHERE ConversationID = c.ID AND SenderID != ? AND IsRead = 0) as UnreadCount
+        FROM ChatConversations c
+        JOIN ChatParticipants cp ON c.ID = cp.ConversationID
+        WHERE cp.UserID = ?
+        ORDER BY LastMessageAt DESC
+      `, [userId, userId]);
+
+      // Get participants for each conversation
+      for (const conv of rows) {
+        const [parts] = await pool.query(`
+          SELECT u.ID, u.Username, u.Role, u.LastLogin
+          FROM ChatParticipants cp
+          JOIN Users u ON cp.UserID = u.ID
+          WHERE cp.ConversationID = ?
+        `, [conv.ID]);
+        conv.participants = parts;
+      }
+
+      res.json(rows);
+    } catch (err) {
+      console.error('❌ Failed to fetch conversations:', err);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  // 2. Get messages for a specific conversation
+  app.get('/api/chat/messages/:conversationId', async (req, res) => {
+    try {
+      const { conversationId } = req.params;
+      const { limit = 50, beforeId } = req.query;
+      
+      let query = 'SELECT * FROM ChatMessages WHERE ConversationID = ?';
+      const params = [conversationId];
+
+      if (beforeId) {
+        query += ' AND ID < ?';
+        params.push(beforeId);
+      }
+
+      query += ' ORDER BY CreatedAt DESC LIMIT ?';
+      params.push(Number(limit));
+
+      const [rows] = await pool.query(query, params);
+      // Return in chronological order for the frontend
+      res.json(rows.reverse());
+    } catch (err) {
+      console.error('❌ Failed to fetch messages:', err);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  // 3. Mark messages as read
+  app.put('/api/chat/messages/:conversationId/read', async (req, res) => {
+    try {
+      const { conversationId } = req.params;
+      const userId = req.user.id;
+
+      await pool.execute(
+        'UPDATE ChatMessages SET IsRead = 1 WHERE ConversationID = ? AND SenderID != ?',
+        [conversationId, userId]
+      );
+
+      res.json({ success: true });
+    } catch (err) {
+      console.error('❌ Failed to mark messages as read:', err);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
+  // 4. Start a new conversation
+  app.post('/api/chat/conversations', async (req, res) => {
+    try {
+      const { targetUserId } = req.body;
+      const userId = req.user.id;
+
+      // Check if conversation already exists (Direct Message)
+      const [existing] = await pool.query(`
+        SELECT cp1.ConversationID as id
+        FROM ChatParticipants cp1
+        JOIN ChatParticipants cp2 ON cp1.ConversationID = cp2.ConversationID
+        JOIN ChatConversations c ON cp1.ConversationID = c.ID
+        WHERE cp1.UserID = ? AND cp2.UserID = ? AND c.Type = 'Direct'
+      `, [userId, targetUserId]);
+
+      if (existing.length > 0) {
+        return res.json({ id: existing[0].id });
+      }
+
+      // Create new conversation with timestamps
+      const now = new Date().toISOString();
+      const [result] = await pool.execute(
+        'INSERT INTO ChatConversations (Type, CreatedAt, UpdatedAt) VALUES (?, ?, ?)',
+        ['Direct', now, now]
+      );
+      const conversationId = result.insertId;
+
+      // Add participants with JoinedAt timestamp
+      await pool.execute(
+        'INSERT INTO ChatParticipants (ConversationID, UserID, JoinedAt) VALUES (?, ?, ?), (?, ?, ?)',
+        [conversationId, userId, now, conversationId, targetUserId, now]
+      );
+
+      res.json({ id: conversationId });
+    } catch (err) {
+      console.error('❌ Failed to start conversation:', err);
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   // 1. Serve Static Assets (JS, CSS, Images, Fonts) with long-term caching
   // Since Vite uses content hashing, it's safe to cache these indefinitely.
   app.use('/assets', express.static(path.join(publicHtmlDistPath, 'assets'), {
@@ -4388,44 +4805,214 @@ app.post('/api/patient-services', async (req, res) => {
   });
 
 
-  // Graceful shutdown
-  process.on('SIGINT', async () => {
-    console.log('\n🛑 Shutting down server...');
-    if (pool) {
-      await pool.end();
-    }
-    process.exit(0);
-  });
-
-  // Initialize database (catch any promise rejections)
+  // Database initialization moved to start sequence
   initializeDatabase().catch(err => {
     console.error('🔥 Database initialization failed:', err.message);
     dbConnected = false;
   });
+  // --- SOCKET.IO REAL-TIME CHAT SETUP ---
+  const http = require('http');
+  const { Server } = require('socket.io');
+  const httpServer = http.createServer(app);
+  const io = new Server(httpServer, {
+    cors: {
+      origin: "*",
+      methods: ["GET", "POST"],
+      credentials: true
+    },
+    transports: ['websocket', 'polling']
+  });
 
-  // Start server immediately
-  try {
-    const server = app.listen(PORT, '0.0.0.0', () => {
-      console.log(`🏥 Hospital Management Backend running on http://0.0.0.0:${PORT}`);
-      console.log(`📁 Database: MySQL - ${process.env.DB_NAME}`);
-      console.log(`🔗 Host: ${process.env.DB_HOST}:${process.env.DB_PORT}`);
+  app.set('io', io);
+
+  // Presence Tracking: UserID -> { socketId, isOnChatPage, lastChatActivity }
+  const userSocketMap = new Map();
+
+  function broadcastOnlineUsers() {
+    const now = Date.now();
+    const onlineUserIds = [];
+    
+    for (const [userId, info] of userSocketMap.entries()) {
+      const diff = now - info.lastChatActivity;
+      const wasRecentlyActive = diff < 120000; // 2 minutes
+
+      if (wasRecentlyActive) {
+        onlineUserIds.push(userId);
+        info.hasWarnedInactivity = false; // Reset flag when active
+      } else {
+        // If they just crossed the 2-min mark, update their "Last Seen" in DB once
+        if (!info.hasWarnedInactivity) {
+          const lastActiveDate = new Date(info.lastChatActivity).toISOString();
+          pool.execute('UPDATE Users SET LastLogin = ? WHERE ID = ?', [lastActiveDate, userId]).catch(err => {
+            console.error('❌ Failed to update LastLogin on inactivity:', err);
+          });
+          info.hasWarnedInactivity = true; // Prevent constant DB writes
+        }
+      }
+    }
+    
+    io.emit('online-users', onlineUserIds);
+  }
+
+  // Every 60 seconds, check for inactive users and re-broadcast
+  setInterval(() => {
+    broadcastOnlineUsers();
+  }, 60000);
+
+  // Socket Auth Middleware
+  io.use((socket, next) => {
+    const token = socket.handshake.auth.token;
+    if (!token) return next(new Error("Authentication error: No token provided"));
+
+    jwt.verify(token, JWT_SECRET, (err, decoded) => {
+      if (err) return next(new Error("Authentication error: Invalid token"));
+      socket.user = decoded; // Attach user data to socket
+      next();
+    });
+  });
+
+  io.on('connection', (socket) => {
+    const userId = socket.user.id;
+    
+    // Initialize user info with smart activity tracking
+    userSocketMap.set(userId, {
+      socketId: socket.id,
+      isOnChatPage: false,
+      lastChatActivity: Date.now() // Start active
     });
 
-    // --- SERVER TIMEOUT OPTIMIZATION (Fixes ERR_CONNECTION_RESET on Staging) ---
-    // Node's default is 5s, Hostinger's proxy usually expects 60s.
-    // We set Node higher so the proxy is the one to close the connection, not Node.
-    server.keepAliveTimeout = 65000;
-    server.headersTimeout = 66000;
+    // Update LastLogin in database
+    pool.execute('UPDATE Users SET LastLogin = ? WHERE ID = ?', [new Date().toISOString(), userId]).catch(err => {
+      console.error('❌ Failed to update LastLogin:', err);
+    });
 
-    server.on('error', (err) => {
-      if (err.code === 'EADDRINUSE') {
-        console.error(`❌ Port ${PORT} is already in use. Please stop the existing process or use a different port.`);
-        process.exit(1);
-      } else {
-        console.error('❌ Server error:', err);
+    console.log(`💬 Chat: User ${socket.user.username} connected (${userId})`);
+    broadcastOnlineUsers();
+
+    // Join a specific conversation room
+    socket.on('join-conversation', (conversationId) => {
+      const roomName = `room_${conversationId}`;
+      socket.join(roomName);
+      console.log(`📍 Chat: ${socket.user.username} joined ${roomName}`);
+    });
+
+    // Handle sending message
+    socket.on('send-message', async (data) => {
+      const { conversationId, content, receiverId } = data;
+      const roomName = `room_${conversationId}`;
+
+      try {
+        // Ensure sender is in the room
+        socket.join(roomName);
+
+        // 1. Save to Database
+        const now = new Date().toISOString();
+        const [result] = await pool.execute(
+          'INSERT INTO ChatMessages (ConversationID, SenderID, Content, CreatedAt) VALUES (?, ?, ?, ?)',
+          [Number(conversationId), userId, content, now]
+        );
+
+        const newMessage = {
+          ID: result.insertId,
+          conversationId,
+          senderId: userId,
+          content,
+          createdAt: now,
+          isRead: 0
+        };
+
+        // 2. Emit to everyone in the room
+        io.to(roomName).emit('new-message', newMessage);
+
+        // 3. Global notification for receiver
+        if (receiverId) {
+          const receiverInfo = userSocketMap.get(receiverId);
+          if (receiverInfo?.socketId) {
+            const receiverSocket = io.sockets.sockets.get(receiverInfo.socketId);
+            if (receiverSocket && !receiverSocket.rooms.has(roomName)) {
+              io.to(receiverInfo.socketId).emit('message-notification', {
+                fromName: socket.user.username,
+                content: content.substring(0, 50) + (content.length > 50 ? '...' : '')
+              });
+            }
+          }
+        }
+      } catch (err) {
+        console.error('❌ Chat: Failed to save message:', err);
+        socket.emit('error', { message: 'Failed to send message' });
       }
     });
-  } catch (error) {
-    console.error('❌ Failed to start server:', error);
-    process.exit(1);
-  }
+
+    // Handle entering/leaving the chat page
+    socket.on('set-chat-status', (isOnChat) => {
+      const info = userSocketMap.get(userId);
+      if (info) {
+        info.isOnChatPage = !!isOnChat;
+        info.lastChatActivity = Date.now();
+        broadcastOnlineUsers();
+      }
+    });
+
+    // Explicitly mark user as active/online
+    socket.on('user-active', () => {
+      const info = userSocketMap.get(userId);
+      if (info) {
+        info.lastChatActivity = Date.now();
+        broadcastOnlineUsers();
+      }
+    });
+
+    socket.on('typing', (data) => {
+      const { conversationId, isTyping } = data;
+      io.emit('typing', {
+        userId,
+        isTyping,
+        conversationId: Number(conversationId)
+      });
+    });
+
+    socket.on('disconnect', () => {
+      const info = userSocketMap.get(userId);
+      // Final update to database on disconnect
+      const now = new Date().toISOString();
+      pool.execute('UPDATE Users SET LastLogin = ? WHERE ID = ?', [now, userId]).catch(err => {
+        console.error('❌ Failed to update LastLogin on disconnect:', err);
+      });
+
+      userSocketMap.delete(userId);
+      console.log(`💬 Chat: User ${socket.user.username} disconnected`);
+      broadcastOnlineUsers();
+    });
+  });
+
+    // --- START SERVER ---
+    try {
+      const serverInstance = httpServer.listen(PORT, '0.0.0.0', () => {
+        console.log('-------------------------------------------');
+        console.log('✅ SERVER ONLINE');
+        console.log(`🏥 Hospital Management Backend: http://0.0.0.0:${PORT}`);
+        console.log(`💬 Real-time Chat: Enabled (Socket.io)`);
+        console.log('-------------------------------------------');
+      });
+
+      serverInstance.on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+          console.error(`❌ Port ${PORT} is already in use.`);
+          process.exit(1);
+        } else {
+          console.error('❌ Server error:', err);
+        }
+      });
+
+      // Single Graceful Shutdown Handler
+      process.on('SIGINT', () => {
+        console.log('\n🛑 Shutdown signal received. Closing server...');
+        serverInstance.close(() => {
+          console.log('👋 Server stopped.');
+          process.exit(0);
+        });
+      });
+    } catch (error) {
+      console.error('🔥 CRITICAL ERROR during startup:', error);
+      process.exit(1);
+    }
