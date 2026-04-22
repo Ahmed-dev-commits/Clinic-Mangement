@@ -2097,7 +2097,7 @@ app.get('/api/lab-patients', async (req, res) => {
     const [countRows] = await pool.query(`SELECT COUNT(*) as total FROM LabPatients ${whereClause}`, params);
     const total = countRows[0].total;
 
-    const columns = 'ID, Name, GuardianName, Age, AgeMonths, AgeDays, Gender, Phone, Address, CNIC, ReferringDoctorName, Priority, CreatedAt';
+    const columns = 'ID, Name, GuardianName, Age, AgeMonths, AgeDays, Gender, Phone, Address, CNIC, ReferringDoctorName, Priority, SelectedTests, CreatedAt';
     const [rows] = await pool.query(
       `SELECT ${columns} FROM LabPatients ${whereClause} ORDER BY CreatedAt DESC LIMIT ? OFFSET ?`,
       [...params, Number(limit), Number(offset)]
@@ -2716,7 +2716,7 @@ app.get('/api/prescriptions', async (req, res) => {
     const total = countResult[0].total;
 
     // 2. Get paginated data
-    const columns = 'ID, PatientID, PatientName, PatientAge, PatientAgeMonths, PatientAgeDays, Diagnosis, Medicines, LabTests, Status, CreatedAt, FinalizedAt, LastUpdatedAt, IsLocked';
+    const columns = 'ID, PatientID, PatientName, PatientAge, PatientAgeMonths, PatientAgeDays, Diagnosis, CtgUsgReport, Complaints, History, OnExamination, TreatmentInHospital, TreatmentAtHome, Medicines, LabTests, DoctorNotes, Precautions, GeneratedText, FollowUpDate, Status, CreatedAt, FinalizedAt, LastUpdatedAt, IsLocked';
     const [prescriptions] = await pool.query(
       `SELECT ${columns} FROM Prescriptions ${whereClause} ORDER BY CreatedAt DESC LIMIT ? OFFSET ?`,
       [...params, Number(limit), Number(offset)]
@@ -3257,7 +3257,7 @@ app.get('/api/patient-services', async (req, res) => {
     const total = countResult[0].total;
 
     // Use pool.query (not pool.execute): LIMIT/OFFSET causes mysql2 prepared statement cache to mismatch
-    const columns = 'ID, PatientID, GrandTotal, Status, CreatedAt, UpdatedAt';
+    const columns = 'ID, PatientID, Services, GrandTotal, Status, CreatedAt, UpdatedAt';
     const [rows] = await pool.query(
       `SELECT ${columns} FROM PatientServices ORDER BY CreatedAt DESC LIMIT ? OFFSET ?`,
       [Number(limit), Number(offset)]
@@ -4058,7 +4058,7 @@ app.post('/api/patient-services', async (req, res) => {
   // --- Employees ---
   app.get('/api/employees', cacheMiddleware, async (req, res) => {
     try {
-      const columns = 'ID, UserID, Name, Designation, Phone, Status, JoiningDate, BasicSalary, CreatedAt';
+      const columns = 'ID, UserID, Name, Designation, Phone, JoiningDate, BasicSalary, StandardDailyHours, ShiftStartTime, ShiftEndTime, Status, CreatedAt';
       const [rows] = await pool.query(`SELECT ${columns} FROM Employees ORDER BY CreatedAt DESC`);
       res.json(rows.map(convertRowDates));
     } catch (error) {
@@ -4121,7 +4121,7 @@ app.post('/api/patient-services', async (req, res) => {
         params.push(startDate, endDate);
       }
 
-      const columns = 'ID, EmployeeID, Date, Status, CheckIn, CheckOut';
+      const columns = 'ID, EmployeeID, Date, Status, CheckIn, CheckOut, Notes';
       const [rows] = await pool.query(`SELECT ${columns} FROM Attendance ${whereClause} ORDER BY Date DESC`, params);
       res.json(rows.map(convertRowDates));
     } catch (error) {
@@ -4197,7 +4197,7 @@ app.post('/api/patient-services', async (req, res) => {
         whereClause += ' AND Status = ?';
         params.push(status);
       }
-      const columns = 'ID, EmployeeID, StartDate, EndDate, Status, CreatedAt';
+      const columns = 'ID, EmployeeID, StartDate, EndDate, Reason, Status, CreatedAt';
       const [rows] = await pool.query(`SELECT ${columns} FROM LeaveRequests ${whereClause} ORDER BY CreatedAt DESC`, params);
       res.json(rows.map(convertRowDates));
     } catch (error) {
@@ -4276,7 +4276,7 @@ app.post('/api/patient-services', async (req, res) => {
         whereClause += ' AND Status = ?';
         params.push(status);
       }
-      const columns = 'ID, EmployeeID, Date, Amount, Status, ApprovedBy, ApprovalTime';
+      const columns = 'ID, EmployeeID, Date, Amount, Reason, Status, ApprovedBy, ApprovalTime';
       const [rows] = await pool.query(`SELECT ${columns} FROM AdvancePayments ${whereClause} ORDER BY Date DESC`, params);
       const converted = rows.map(convertRowDates);
       if (converted.length > 0) console.log('DEBUG: First Advance Row:', JSON.stringify(converted[0], null, 2));
@@ -4334,7 +4334,7 @@ app.post('/api/patient-services', async (req, res) => {
         whereClause += ' AND Month = ? AND Year = ?';
         params.push(month, year);
       }
-      const columns = 'ID, EmployeeID, Month, Year, NetSalary, PaymentStatus, CreatedAt';
+      const columns = 'ID, EmployeeID, Month, Year, BasicSalary, Deductions, Additions, NetSalary, PaymentStatus, PaymentDate, CreatedAt';
       const [rows] = await pool.query(`SELECT ${columns} FROM Payroll ${whereClause} ORDER BY CreatedAt DESC`, params);
       res.json(rows.map(convertRowDates));
     } catch (error) {
@@ -4667,7 +4667,7 @@ app.post('/api/patient-services', async (req, res) => {
         params.push(`%${search}%`, `%${search}%`);
       }
 
-      const columns = 'ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Status, TokenNumber';
+      const columns = 'ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Service, Status, Notes, TokenNumber, CreatedBy, CreatedAt';
       const [rows] = await pool.query(
         `SELECT ${columns} FROM Appointments ${whereClause} ORDER BY TokenNumber ASC, ApptTime ASC`,
         params
