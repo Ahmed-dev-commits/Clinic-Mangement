@@ -2560,7 +2560,7 @@ app.get('/api/payments', async (req, res) => {
     const totalConsultationFee = summaryResult[0].totalConsultationFee || 0;
 
     // 2. Get paginated data
-    const columns = 'p.ID, p.PatientID, p.PatientName, p.ConsultationFee, p.LabFee, p.MedicineFee, p.TotalAmount, p.PaymentMode, p.CreatedAt, p.LabPatientID';
+    const columns = 'p.ID, p.PatientID, p.PatientName, p.ConsultationFee, p.LabFee, p.MedicineFee, p.TotalAmount, p.PaymentMode, p.CreatedAt, p.LabPatientID, p.Items, p.Medicines';
     const [rows] = await pool.query(
       `SELECT ${columns}, 
               pat.Age as PatientAge, 
@@ -3449,7 +3449,7 @@ app.post('/api/patient-services', async (req, res) => {
       const total = countResult[0].total;
 
       // 2. Fetch paginated data
-      const columns = 'v.ID, v.LabPatientID, v.VisitDate, v.Status, v.TotalAmount, v.DiscountAmount, v.PaidAmount, v.PaymentStatus, v.CreatedAt';
+      const columns = 'v.ID, v.LabPatientID, v.VisitDate, v.Status, v.TotalAmount, v.DiscountAmount, v.PaidAmount, v.PaymentStatus, v.CreatedAt, v.SelectedTests';
       const dataQuery = `
       SELECT ${columns}, p.Name as PatientName, p.Age, p.Gender, p.Phone 
       FROM LabVisits v 
