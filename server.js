@@ -38,6 +38,26 @@ function flushPatientCache() {
   }
 }
 
+// Helper to flush expense-related cache keys
+function flushExpenseCache() {
+  const keys = apiCache.keys();
+  const expenseKeys = keys.filter(k => k.includes('/api/daily-expenses'));
+  if (expenseKeys.length > 0) {
+    console.log(`[CACHE] Flushing ${expenseKeys.length} expense-related keys`);
+    apiCache.del(expenseKeys);
+  }
+}
+
+// Helper to flush appointment-related cache keys
+function flushAppointmentCache() {
+  const keys = apiCache.keys();
+  const appointmentKeys = keys.filter(k => k.includes('/api/appointments'));
+  if (appointmentKeys.length > 0) {
+    console.log(`[CACHE] Flushing ${appointmentKeys.length} appointment-related keys`);
+    apiCache.del(appointmentKeys);
+  }
+}
+
 const app = express();
 
 // ============ SIMPLE FILE LOGGER ============
@@ -97,7 +117,6 @@ app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
-  res.set('Connection', 'keep-alive'); // Explicitly help proxy maintain connection
   next();
 });
 
@@ -126,25 +145,33 @@ const authenticateToken = async (req, res, next) => {
       
       req.user = user;
 
-      // 🛡️ MAINTENANCE MODE CHECK (Phase 4)
-      try {
+    // 🛡️ MAINTENANCE MODE CHECK (Phase 4) - OPTIMIZED WITH CACHE
+    try {
+      const maintenanceCacheKey = 'internal_maintenance_check';
+      let globalData = apiCache.get(maintenanceCacheKey);
+      
+      if (!globalData) {
         const [settingsRows] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
         if (settingsRows.length > 0) {
-          const globalData = typeof settingsRows[0].Data === 'string' ? JSON.parse(settingsRows[0].Data) : settingsRows[0].Data;
-          if (globalData.isMaintenanceMode) {
-            const currentUserRole = String(user.role || '').trim().toLowerCase();
-            console.log(`[MAINTENANCE] Checking access - User: ${user.username}, Role: "${user.role}" (normalized: "${currentUserRole}")`);
-            
-            if (currentUserRole !== 'superadmin') {
-              return res.status(503).json({ error: 'System is under maintenance. Please try again later.' });
-            }
-            console.log(`[MAINTENANCE] ACCESS GRANTED for SuperAdmin: ${user.username}`);
-          }
+          globalData = typeof settingsRows[0].Data === 'string' ? JSON.parse(settingsRows[0].Data) : settingsRows[0].Data;
+          // Cache maintenance status for 10 seconds to reduce DB load
+          apiCache.set(maintenanceCacheKey, globalData, 10);
         }
-      } catch (dbErr) {
-        // Fallback: If DB check fails, we allow the request to proceed but log the warning
-        console.warn('⚠️ Could not check maintenance status:', dbErr.message);
       }
+
+      if (globalData && globalData.isMaintenanceMode) {
+        const currentUserRole = String(user.role || '').trim().toLowerCase();
+        console.log(`[MAINTENANCE] Checking access - User: ${user.username}, Role: "${user.role}" (normalized: "${currentUserRole}")`);
+        
+        if (currentUserRole !== 'superadmin') {
+          return res.status(503).json({ error: 'System is under maintenance. Please try again later.' });
+        }
+        console.log(`[MAINTENANCE] ACCESS GRANTED for SuperAdmin: ${user.username}`);
+      }
+    } catch (dbErr) {
+      // Fallback: If DB check fails, we allow the request to proceed but log the warning
+      console.warn('⚠️ Could not check maintenance status:', dbErr.message);
+    }
 
       next();
     });
@@ -300,7 +327,8 @@ function convertRowDates(row) {
 
   const dateFields = [
     'CreatedAt', 'UpdatedAt', 'VisitDate', 'TestDate', 'ReportDate', 
-    'FollowUpDate', 'ApprovalTime', 'FinalizedAt', 'LastUpdatedAt', 'CollectedAt'
+    'FollowUpDate', 'ApprovalTime', 'FinalizedAt', 'LastUpdatedAt', 'CollectedAt',
+    'Date'
   ];
 
   for (const field of dateFields) {
@@ -873,6 +901,7 @@ async function initializeDatabase() {
       )
     `);
     // Ensure all Payroll columns exist (Migration)
+    try { await pool.execute("ALTER TABLE Payroll ADD COLUMN Bonus DECIMAL(10, 2) DEFAULT 0"); } catch (e) { }
     try { await pool.execute("ALTER TABLE Payroll ADD COLUMN OvertimeHours DECIMAL(10, 2) DEFAULT 0"); } catch (e) { }
     try { await pool.execute("ALTER TABLE Payroll ADD COLUMN OvertimeAmount DECIMAL(10, 2) DEFAULT 0"); } catch (e) { }
     try { await pool.execute("ALTER TABLE Payroll ADD COLUMN GrossSalary DECIMAL(10, 2) DEFAULT 0"); } catch (e) { }
@@ -1190,7 +1219,7 @@ async function initializeDatabase() {
 // ============ SETTINGS API ============
 
 // Get Settings (Global or User)
-app.get('/api/settings/:id', async (req, res) => {
+app.get('/api/settings/:id', cacheMiddleware, async (req, res) => {
   try {
     const { id } = req.params; // 'GLOBAL' or UserID
     let [rows] = await pool.execute('SELECT ID, Category, Data FROM AppSettings WHERE ID = ?', [id]);
@@ -1266,6 +1295,10 @@ app.put('/api/settings/:id', async (req, res) => {
        ON DUPLICATE KEY UPDATE Data = VALUES(Data), Category = VALUES(Category)`,
       [id, category, JSON.stringify(data)]
     );
+
+    // 🧹 Cache Invalidation
+    apiCache.del(`/api/settings/${id}`);
+    apiCache.del('internal_maintenance_check'); 
 
     // Real-time broadcast for global settings changes
     if (id === 'GLOBAL') {
@@ -4007,7 +4040,7 @@ app.post('/api/patient-services', async (req, res) => {
           total,
           page,
           limit,
-          totalPages: Math.ceil(total / limit),
+          totalPages: limit === -1 ? 1 : Math.max(1, Math.ceil(total / limit)),
           monthlyTotal
         }
       });
@@ -4027,6 +4060,7 @@ app.post('/api/patient-services', async (req, res) => {
         [id, date, description, category, amount, paymentMethod, createdBy || 'System', createdAt]
       );
 
+      flushExpenseCache();
       res.json({ success: true, id });
     } catch (error) {
       console.error('Error creating expense:', error);
@@ -4038,6 +4072,7 @@ app.post('/api/patient-services', async (req, res) => {
   app.delete('/api/daily-expenses/:id', async (req, res) => {
     try {
       await pool.execute('DELETE FROM DailyExpenses WHERE ID = ?', [req.params.id]);
+      flushExpenseCache();
       res.json({ success: true });
     } catch (error) {
       res.status(500).json({ error: error.message });
@@ -4276,7 +4311,7 @@ app.post('/api/patient-services', async (req, res) => {
         whereClause += ' AND Status = ?';
         params.push(status);
       }
-      const columns = 'ID, EmployeeID, Date, Amount, Reason, Status, ApprovedBy, ApprovalTime';
+      const columns = 'ID, EmployeeID, Date, Amount, Description, Status, ApprovedBy, ApprovalTime';
       const [rows] = await pool.query(`SELECT ${columns} FROM AdvancePayments ${whereClause} ORDER BY Date DESC`, params);
       const converted = rows.map(convertRowDates);
       if (converted.length > 0) console.log('DEBUG: First Advance Row:', JSON.stringify(converted[0], null, 2));
@@ -4334,7 +4369,7 @@ app.post('/api/patient-services', async (req, res) => {
         whereClause += ' AND Month = ? AND Year = ?';
         params.push(month, year);
       }
-      const columns = 'ID, EmployeeID, Month, Year, BasicSalary, Deductions, Additions, NetSalary, PaymentStatus, PaymentDate, CreatedAt';
+      const columns = 'ID, EmployeeID, Month, Year, BasicSalary, Bonus, Deductions, OvertimeHours, OvertimeAmount, GrossSalary, NetSalary, PaymentStatus, PaymentDate, CreatedAt';
       const [rows] = await pool.query(`SELECT ${columns} FROM Payroll ${whereClause} ORDER BY CreatedAt DESC`, params);
       res.json(rows.map(convertRowDates));
     } catch (error) {
@@ -4669,7 +4704,7 @@ app.post('/api/patient-services', async (req, res) => {
 
       const columns = 'ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Service, Status, Notes, TokenNumber, CreatedBy, CreatedAt';
       const [rows] = await pool.query(
-        `SELECT ${columns} FROM Appointments ${whereClause} ORDER BY TokenNumber ASC, ApptTime ASC`,
+        `SELECT ${columns} FROM Appointments ${whereClause} ORDER BY TokenNumber DESC, ApptTime DESC`,
         params
       );
 
@@ -4700,9 +4735,12 @@ app.post('/api/patient-services', async (req, res) => {
 
       await pool.execute(
         `INSERT INTO Appointments (ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Service, Status, Notes, TokenNumber, CreatedBy)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'Pending', ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'Confirmed', ?, ?, ?)`,
         [apptId, (patientId && patientId !== '') ? patientId : null, name, phone, date, time, service || 'Consultation', notes || null, tokenNumber, createdBy || null]
       );
+
+      // ⚡ Flush Appointment Cache
+      flushAppointmentCache();
 
       res.json({ success: true, id: apptId, tokenNumber });
     } catch (error) {
@@ -4737,6 +4775,9 @@ app.post('/api/patient-services', async (req, res) => {
       params.push(id);
       await pool.query(`UPDATE Appointments SET ${updates.join(', ')} WHERE ID = ?`, params);
 
+      // ⚡ Flush Appointment Cache
+      flushAppointmentCache();
+
       res.json({ success: true });
     } catch (error) {
       console.error('Error updating appointment:', error);
@@ -4748,6 +4789,10 @@ app.post('/api/patient-services', async (req, res) => {
   app.delete('/api/appointments/:id', async (req, res) => {
     try {
       await pool.execute('DELETE FROM Appointments WHERE ID = ?', [req.params.id]);
+      
+      // ⚡ Flush Appointment Cache
+      flushAppointmentCache();
+
       res.json({ success: true });
     } catch (error) {
       console.error('Error deleting appointment:', error);
@@ -4787,11 +4832,15 @@ app.post('/api/patient-services', async (req, res) => {
         token: waConfig.token,
         to: `+${toPhone}`,
         body: message
-      });
+      }, { timeout: 10000 });
 
       res.json({ success: true, data: response.data });
     } catch (error) {
       console.error('WhatsApp sending error:', error?.response?.data || error.message);
+      res.status(500).json({ 
+        success: false, 
+        error: error?.response?.data?.message || error.message 
+      });
     }
   });
 
@@ -4831,7 +4880,7 @@ app.post('/api/patient-services', async (req, res) => {
 
       // Execute request
       const axios = require('axios');
-      const response = await axios.get(targetUrl);
+      const response = await axios.get(targetUrl, { timeout: 10000 });
 
       res.json({ success: true, data: response.data });
     } catch (error) {
