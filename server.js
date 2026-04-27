@@ -1517,13 +1517,37 @@ app.get('/api/patients', cacheMiddleware, async (req, res) => {
       [...params, Number(limit), Number(offset)]
     );
 
+    // 3. Get 24h Global Stats for summary cards
+    const [stats24h] = await pool.query(`
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY) THEN 1 ELSE 0 END) as newToday,
+        SUM(CASE WHEN CreatedAt < DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY) AND (UpdatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY) OR VisitDate >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)) THEN 1 ELSE 0 END) as revisits,
+        SUM(CASE WHEN Gender = 'Male' AND (CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY) OR UpdatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY) OR VisitDate >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)) THEN 1 ELSE 0 END) as males,
+        SUM(CASE WHEN Gender = 'Female' AND (CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY) OR UpdatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY) OR VisitDate >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)) THEN 1 ELSE 0 END) as females
+      FROM Patients 
+      WHERE CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY) 
+         OR UpdatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)
+         OR VisitDate >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)
+    `);
+
+    const s = stats24h[0];
+    const total24h = (s.newToday || 0) + (s.revisits || 0);
+
     res.json({
       data: rows.map(convertRowDates),
       meta: {
         total,
         page,
         limit,
-        totalPages: Math.ceil(total / limit)
+        totalPages: Math.ceil(total / limit),
+        stats24h: {
+          total: total24h,
+          newToday: s.newToday || 0,
+          revisits: s.revisits || 0,
+          males: s.males || 0,
+          females: s.females || 0
+        }
       }
     });
   } catch (error) {
@@ -4682,7 +4706,8 @@ app.post('/api/patient-services', async (req, res) => {
   // GET /api/appointments — list for a given date, with optional status & search
   app.get('/api/appointments', cacheMiddleware, async (req, res) => {
     try {
-      const { date, status, search } = req.query;
+      const { date, status, search, page = 1, limit = 20 } = req.query;
+      const offset = (parseInt(page) - 1) * parseInt(limit);
 
       let whereClause = 'WHERE 1=1';
       const params = [];
@@ -4702,13 +4727,29 @@ app.post('/api/patient-services', async (req, res) => {
         params.push(`%${search}%`, `%${search}%`);
       }
 
-      const columns = 'ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Service, Status, Notes, TokenNumber, CreatedBy, CreatedAt';
-      const [rows] = await pool.query(
-        `SELECT ${columns} FROM Appointments ${whereClause} ORDER BY TokenNumber DESC, ApptTime DESC`,
+      // 1. Get Total Count
+      const [countResult] = await pool.query(
+        `SELECT COUNT(*) as total FROM Appointments ${whereClause}`,
         params
       );
+      const total = countResult[0].total;
 
-      res.json(rows.map(convertRowDates));
+      // 2. Get Paginated Data
+      const columns = 'ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Service, Status, Notes, TokenNumber, CreatedBy, CreatedAt';
+      const [rows] = await pool.query(
+        `SELECT ${columns} FROM Appointments ${whereClause} ORDER BY TokenNumber DESC, ApptTime DESC LIMIT ? OFFSET ?`,
+        [...params, parseInt(limit), offset]
+      );
+
+      res.json({
+        data: rows.map(convertRowDates),
+        meta: {
+          total,
+          page: parseInt(page),
+          limit: parseInt(limit),
+          totalPages: Math.ceil(total / parseInt(limit))
+        }
+      });
     } catch (error) {
       console.error('Error fetching appointments:', error);
       res.status(500).json({ error: error.message });
