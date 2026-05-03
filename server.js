@@ -420,6 +420,13 @@ async function initializeDatabase() {
       "ALTER TABLE Users ADD COLUMN IsActive TINYINT DEFAULT 1"
     ]);
 
+    // v4: Appointment Soft Delete & Auditing
+    await runMigration(4, 'Appointment Soft Delete', [
+      "ALTER TABLE Appointments ADD COLUMN DeletedAt VARCHAR(50) NULL",
+      "ALTER TABLE Appointments ADD COLUMN DeletedBy VARCHAR(100) NULL",
+      "ALTER TABLE Appointments ADD COLUMN UpdatedAt VARCHAR(50) NULL"
+    ]);
+
     console.log('✅ All migrations verified.');
 
     // Patients table
@@ -822,9 +829,17 @@ async function initializeDatabase() {
           Notes TEXT NULL,
           TokenNumber INT NOT NULL DEFAULT 1,
           CreatedBy VARCHAR(100) NULL,
-          CreatedAt VARCHAR(50)
+          CreatedAt VARCHAR(50),
+          UpdatedAt VARCHAR(50) NULL,
+          DeletedAt VARCHAR(50) NULL,
+          DeletedBy VARCHAR(100) NULL
       )
     `);
+    try { await pool.execute("ALTER TABLE Appointments ADD COLUMN UpdatedAt VARCHAR(50) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Appointments ADD COLUMN DeletedAt VARCHAR(50) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Appointments ADD COLUMN DeletedBy VARCHAR(100) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Appointments ADD COLUMN DeletedAt VARCHAR(50) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE Appointments ADD COLUMN DeletedBy VARCHAR(100) NULL"); } catch (e) { }
     // Index for fast daily lookups
     try { await pool.execute('CREATE INDEX idx_appt_date ON Appointments (ApptDate)'); } catch (e) { }
     // Migration: ensure page_appointments permission exists for existing roles
@@ -1308,6 +1323,37 @@ app.put('/api/settings/:id', async (req, res) => {
 
     res.json({ success: true });
   } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ DASHBOARD STATS API ============
+app.get('/api/dashboard/stats', async (req, res) => {
+  try {
+    const today = req.query.date || new Date().toISOString().split('T')[0];
+    
+    // We execute these in parallel for maximum performance
+    const [
+      [patientCount],
+      [paymentSum],
+      [prescCount],
+      [lowStockRows]
+    ] = await Promise.all([
+      pool.query("SELECT COUNT(*) as total FROM Patients WHERE CreatedAt LIKE ?", [`${today}%`]),
+      pool.query("SELECT SUM(TotalAmount) as total FROM Payments WHERE CreatedAt LIKE ?", [`${today}%`]),
+      pool.query("SELECT COUNT(*) as total FROM Prescriptions"),
+      pool.query("SELECT ID, Name, Category, Quantity, LowStockThreshold FROM Stock WHERE Quantity <= LowStockThreshold")
+    ]);
+
+    res.json({
+      todayPatients: Number(patientCount[0].total) || 0,
+      todayCollection: parseFloat(paymentSum[0].total) || 0,
+      totalPrescriptions: Number(prescCount[0].total) || 0,
+      lowStockItems: lowStockRows,
+      serverTimeUTC: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Error fetching dashboard stats:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2516,9 +2562,30 @@ app.get('/api/lab-result-history-patients', async (req, res) => {
 
 app.get('/api/stock', cacheMiddleware, async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT ID, Name, Category, Quantity, Price, LowStockThreshold, CreatedAt FROM Stock ORDER BY Name');
-    res.json(rows.map(convertRowDates));
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
+    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM stock');
+    const total = countResult[0].total;
+
+    // Use pool.query (not pool.execute) for LIMIT/OFFSET
+    const [rows] = await pool.query(
+      'SELECT ID, Name, Category, Quantity, Price, LowStockThreshold, CreatedAt FROM stock ORDER BY Name ASC LIMIT ? OFFSET ?',
+      [Number(limit), Number(offset)]
+    );
+
+    res.json({
+      data: rows.map(convertRowDates),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit)
+      }
+    });
   } catch (error) {
+    console.error('Error fetching stock:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2529,12 +2596,13 @@ app.post('/api/stock', async (req, res) => {
     const createdAt = new Date().toISOString();
 
     await pool.execute(
-      'INSERT INTO Stock (ID, Name, Category, Quantity, Price, LowStockThreshold, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [id, name, category, quantity, price, lowStockThreshold, createdAt]
+      'INSERT INTO stock (ID, Name, Category, Quantity, Price, LowStockThreshold, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [id, name, category, quantity, price, lowStockThreshold || 10, createdAt]
     );
 
     res.json({ success: true, id });
   } catch (error) {
+    console.error('Error adding stock item:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2544,21 +2612,23 @@ app.put('/api/stock/:id', async (req, res) => {
     const { name, category, quantity, price, lowStockThreshold } = req.body;
 
     await pool.execute(
-      'UPDATE Stock SET Name = ?, Category = ?, Quantity = ?, Price = ?, LowStockThreshold = ? WHERE ID = ?',
+      'UPDATE stock SET Name = ?, Category = ?, Quantity = ?, Price = ?, LowStockThreshold = ? WHERE ID = ?',
       [name, category, quantity, price, lowStockThreshold, req.params.id]
     );
 
     res.json({ success: true });
   } catch (error) {
+    console.error('Error updating stock item:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 app.delete('/api/stock/:id', async (req, res) => {
   try {
-    await pool.execute('DELETE FROM Stock WHERE ID = ?', [req.params.id]);
+    await pool.execute('DELETE FROM stock WHERE ID = ?', [req.params.id]);
     res.json({ success: true });
   } catch (error) {
+    console.error('Error deleting stock item:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2928,76 +2998,6 @@ app.delete('/api/prescriptions/:id', async (req, res) => {
   }
 });
 
-// ============ STOCK API (Medicine Inventory) ============
-
-app.get('/api/stock', async (req, res) => {
-  try {
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 20;
-    const offset = (page - 1) * limit;
-
-    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM stock');
-    const total = countResult[0].total;
-
-    // Use pool.query (not pool.execute): LIMIT/OFFSET causes mysql2 prepared statement cache to mismatch
-    const [rows] = await pool.query(
-      'SELECT * FROM stock ORDER BY Name ASC LIMIT ? OFFSET ?',
-      [Number(limit), Number(offset)]
-    );
-
-    res.json({
-      data: rows.map(convertRowDates),
-      meta: {
-        total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit)
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/api/stock', async (req, res) => {
-  try {
-    const { id, name, category, quantity, price, lowStockThreshold } = req.body;
-    const createdAt = new Date().toISOString();
-
-    await pool.execute(
-      'INSERT INTO stock (ID, Name, Category, Quantity, Price, LowStockThreshold, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [id, name, category, quantity, price, lowStockThreshold || 10, createdAt]
-    );
-
-    res.json({ success: true, id });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.put('/api/stock/:id', async (req, res) => {
-  try {
-    const { name, category, quantity, price, lowStockThreshold } = req.body;
-
-    await pool.execute(
-      'UPDATE stock SET Name=?, Category=?, Quantity=?, Price=?, LowStockThreshold=? WHERE ID=?',
-      [name, category, quantity, price, lowStockThreshold, req.params.id]
-    );
-
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.delete('/api/stock/:id', async (req, res) => {
-  try {
-    await pool.execute('DELETE FROM stock WHERE ID = ?', [req.params.id]);
-    res.json({ success: true });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
 
 // ============ CLINICAL MEDICINES API (Master List) ============
 
@@ -4709,7 +4709,7 @@ app.post('/api/patient-services', async (req, res) => {
       const { date, status, search, page = 1, limit = 20 } = req.query;
       const offset = (parseInt(page) - 1) * parseInt(limit);
 
-      let whereClause = 'WHERE 1=1';
+      let whereClause = 'WHERE DeletedAt IS NULL';
       const params = [];
 
       if (date) {
@@ -4756,6 +4756,23 @@ app.post('/api/patient-services', async (req, res) => {
     }
   });
 
+  const resequenceTokens = async (date) => {
+    try {
+      const [rows] = await pool.query(
+        "SELECT ID FROM Appointments WHERE ApptDate = ? AND DeletedAt IS NULL ORDER BY ApptTime ASC, CreatedAt ASC",
+        [date]
+      );
+      for (let i = 0; i < rows.length; i++) {
+        await pool.execute(
+          "UPDATE Appointments SET TokenNumber = ? WHERE ID = ?",
+          [i + 1, rows[i].ID]
+        );
+      }
+    } catch (error) {
+      console.error('Error resequencing tokens:', error);
+    }
+  };
+
   // POST /api/appointments — book a new appointment (auto-assigns daily token)
   app.post('/api/appointments', async (req, res) => {
     try {
@@ -4765,20 +4782,24 @@ app.post('/api/patient-services', async (req, res) => {
         return res.status(400).json({ error: 'Name, phone, date and time are required.' });
       }
 
-      // Auto-calculate next token number for the given date
-      const [tokenRows] = await pool.execute(
-        'SELECT COALESCE(MAX(TokenNumber), 0) + 1 AS nextToken FROM Appointments WHERE ApptDate = ?',
-        [date]
-      );
-      const tokenNumber = tokenRows[0].nextToken;
+      const finalTime = time;
 
       const apptId = id || `APPT-${Date.now().toString(36).toUpperCase()}`;
 
+      // Insert with temporary token 0, then resequence
+      const createdAt = new Date().toISOString();
       await pool.execute(
-        `INSERT INTO Appointments (ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Service, Status, Notes, TokenNumber, CreatedBy)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'Confirmed', ?, ?, ?)`,
-        [apptId, (patientId && patientId !== '') ? patientId : null, name, phone, date, time, service || 'Consultation', notes || null, tokenNumber, createdBy || null]
+        `INSERT INTO Appointments (ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Service, Status, Notes, TokenNumber, CreatedBy, CreatedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'Confirmed', ?, 0, ?, ?)`,
+        [apptId, (patientId && patientId !== '') ? patientId : null, name, phone, date, finalTime, service || 'Consultation', notes || null, createdBy || null, createdAt]
       );
+
+      // Re-sequence tokens chronologically by time for this day
+      await resequenceTokens(date);
+
+      // Fetch the newly assigned token number for response
+      const [finalAppt] = await pool.query("SELECT TokenNumber FROM Appointments WHERE ID = ?", [apptId]);
+      const tokenNumber = finalAppt[0]?.TokenNumber || 0;
 
       // ⚡ Flush Appointment Cache
       flushAppointmentCache();
@@ -4808,6 +4829,10 @@ app.post('/api/patient-services', async (req, res) => {
       if (Service !== undefined) { updates.push('Service = ?'); params.push(Service); }
       if (Notes !== undefined) { updates.push('Notes = ?'); params.push(Notes); }
       if (PatientID !== undefined) { updates.push('PatientID = ?'); params.push(PatientID); }
+      
+      // Always update UpdatedAt
+      updates.push('UpdatedAt = ?');
+      params.push(new Date().toISOString());
 
       if (updates.length === 0) {
         return res.json({ success: true });
@@ -4815,6 +4840,17 @@ app.post('/api/patient-services', async (req, res) => {
 
       params.push(id);
       await pool.query(`UPDATE Appointments SET ${updates.join(', ')} WHERE ID = ?`, params);
+
+      // If date or time changed, re-sequence the tokens
+      if (ApptDate || ApptTime) {
+        // Find the date of this appointment to re-sequence (use provided ApptDate or fetch current if needed)
+        // For simplicity, if ApptDate was provided, use it. Otherwise we'd need to fetch.
+        // Usually ApptTime changes within the same day.
+        const [currentAppt] = await pool.query("SELECT ApptDate FROM Appointments WHERE ID = ?", [id]);
+        if (currentAppt.length > 0) {
+          await resequenceTokens(currentAppt[0].ApptDate);
+        }
+      }
 
       // ⚡ Flush Appointment Cache
       flushAppointmentCache();
@@ -4826,15 +4862,34 @@ app.post('/api/patient-services', async (req, res) => {
     }
   });
 
-  // DELETE /api/appointments/:id
+  // DELETE /api/appointments/:id — Soft Delete
   app.delete('/api/appointments/:id', async (req, res) => {
     try {
-      await pool.execute('DELETE FROM Appointments WHERE ID = ?', [req.params.id]);
+      const { id } = req.params;
+      const deletedBy = req.user?.username || 'Unknown';
+      const deleteTime = new Date().toISOString();
       
+      // Get the date first so we can re-sequence after deletion
+      const [appt] = await pool.query("SELECT ApptDate FROM Appointments WHERE ID = ? AND DeletedAt IS NULL", [id]);
+      const apptDate = appt.length > 0 ? appt[0].ApptDate : null;
+
+      if (!apptDate) {
+        return res.status(404).json({ error: 'Appointment not found or already deleted.' });
+      }
+
+      // Soft delete by updating DeletedAt and DeletedBy
+      await pool.execute(
+        'UPDATE Appointments SET DeletedAt = ?, DeletedBy = ?, TokenNumber = 0 WHERE ID = ?', 
+        [deleteTime, deletedBy, id]
+      );
+      
+      // Re-sequence tokens for the day to fill the gap
+      await resequenceTokens(apptDate);
+
       // ⚡ Flush Appointment Cache
       flushAppointmentCache();
 
-      res.json({ success: true });
+      res.json({ success: true, message: 'Appointment soft-deleted successfully.' });
     } catch (error) {
       console.error('Error deleting appointment:', error);
       res.status(500).json({ error: error.message });
