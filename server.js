@@ -354,6 +354,21 @@ function convertRowDates(row) {
   return row;
 }
 
+// ============ PKT DATE HELPERS (GLOBAL) ============
+const getPktDayBounds = (dateStr) => {
+  // Input: '2026-02-26'. Target PKT is +05:00
+  const startPkt = new Date(`${dateStr}T00:00:00+05:00`);
+  const endPkt = new Date(`${dateStr}T23:59:59.999+05:00`);
+  return { startUtc: startPkt.toISOString(), endUtc: endPkt.toISOString() };
+};
+
+const getNowPKT = () => {
+  // Return the current ISO string but ensuring we treat the system clock as Z 
+  // and manually creating the PKT representation if needed, 
+  // but for storage we usually just use .toISOString() (UTC)
+  return new Date().toISOString();
+};
+
 // Initialize database tables
 async function initializeDatabase() {
   try {
@@ -1330,27 +1345,43 @@ app.put('/api/settings/:id', async (req, res) => {
 // ============ DASHBOARD STATS API ============
 app.get('/api/dashboard/stats', async (req, res) => {
   try {
-    const today = req.query.date || new Date().toISOString().split('T')[0];
+    // Determine target date in PKT
+    const nowInPkt = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Karachi' }));
+    const todayDateStr = req.query.date || (nowInPkt.getFullYear() + '-' + String(nowInPkt.getMonth() + 1).padStart(2, '0') + '-' + String(nowInPkt.getDate()).padStart(2, '0'));
+    
+    const { startUtc, endUtc } = getPktDayBounds(todayDateStr);
     
     // We execute these in parallel for maximum performance
     const [
       [patientCount],
-      [paymentSum],
+      [clinicPaymentSum],
+      [labPaymentSum],
       [prescCount],
       [lowStockRows]
     ] = await Promise.all([
-      pool.query("SELECT COUNT(*) as total FROM Patients WHERE CreatedAt LIKE ?", [`${today}%`]),
-      pool.query("SELECT SUM(TotalAmount) as total FROM Payments WHERE CreatedAt LIKE ?", [`${today}%`]),
+      // Use PKT boundaries for Today's Patients
+      pool.query("SELECT COUNT(*) as total FROM Patients WHERE CreatedAt BETWEEN ? AND ?", [startUtc, endUtc]),
+      // Use PKT boundaries for Today's Clinic Collection
+      pool.query("SELECT SUM(TotalAmount) as total FROM Payments WHERE CreatedAt BETWEEN ? AND ?", [startUtc, endUtc]),
+      // Use PKT boundaries for Today's Lab Collection
+      pool.query("SELECT SUM(PaidAmount) as total FROM labpaymenthistory WHERE CreatedAt BETWEEN ? AND ?", [startUtc, endUtc]),
       pool.query("SELECT COUNT(*) as total FROM Prescriptions"),
       pool.query("SELECT ID, Name, Category, Quantity, LowStockThreshold FROM Stock WHERE Quantity <= LowStockThreshold")
     ]);
 
+    const clinicTotal = parseFloat(clinicPaymentSum[0].total) || 0;
+    // We still query lab but won't add it to the main 'todayCollection' total as requested
+    const labTotal = parseFloat(labPaymentSum[0].total) || 0;
+
     res.json({
       todayPatients: Number(patientCount[0].total) || 0,
-      todayCollection: parseFloat(paymentSum[0].total) || 0,
+      todayCollection: clinicTotal, // Reverted to Clinic only
+      clinicCollection: clinicTotal,
+      labCollection: labTotal,
       totalPrescriptions: Number(prescCount[0].total) || 0,
       lowStockItems: lowStockRows,
-      serverTimeUTC: new Date().toISOString()
+      serverTimeUTC: new Date().toISOString(),
+      pktToday: todayDateStr
     });
   } catch (error) {
     console.error('Error fetching dashboard stats:', error);
@@ -1457,12 +1488,7 @@ app.get('/api/patients', cacheMiddleware, async (req, res) => {
     let params = [];
 
     // Helper to calculate exact PKT boundaries in UTC
-    const getPktDayBounds = (dateStr) => {
-      // Input: '2026-02-26'. Target PKT is +05:00
-      const startPkt = new Date(`${dateStr}T00:00:00+05:00`);
-      const endPkt = new Date(`${dateStr}T23:59:59.999+05:00`);
-      return { startUtc: startPkt.toISOString(), endUtc: endPkt.toISOString() };
-    };
+
 
     if (search) {
       whereClause = 'WHERE (Name LIKE ? OR ID LIKE ? OR Phone LIKE ? OR MRN LIKE ?)';
@@ -2162,11 +2188,7 @@ app.get('/api/lab-patients', async (req, res) => {
     let whereClause = '';
     let params = [];
 
-    const getPktDayBounds = (dateStr) => {
-      const startPkt = new Date(`${dateStr}T00:00:00+05:00`);
-      const endPkt = new Date(`${dateStr}T23:59:59.999+05:00`);
-      return { startUtc: startPkt.toISOString(), endUtc: endPkt.toISOString() };
-    };
+
 
     if (search) {
       whereClause = 'WHERE (Name LIKE ? OR ID LIKE ? OR Phone LIKE ?)';
@@ -2357,11 +2379,7 @@ app.get('/api/lab-history', async (req, res) => {
     let whereClause = '';
     let params = [];
 
-    const getPktDayBounds = (dateStr) => {
-      const startPkt = new Date(`${dateStr}T00:00:00+05:00`);
-      const endPkt = new Date(`${dateStr}T23:59:59.999+05:00`);
-      return { startUtc: startPkt.toISOString(), endUtc: endPkt.toISOString() };
-    };
+
 
     if (search) {
       whereClause = 'WHERE (PatientName LIKE ? OR LabPatientID LIKE ?)';
@@ -2649,13 +2667,7 @@ app.get('/api/payments', async (req, res) => {
     let whereClause = '';
     let params = [];
 
-    // Helper to calculate exact PKT boundaries in UTC
-    const getPktDayBounds = (dateStr) => {
-      // Input: '2026-02-26'. Target PKT is +05:00
-      const startPkt = new Date(`${dateStr}T00:00:00+05:00`);
-      const endPkt = new Date(`${dateStr}T23:59:59.999+05:00`);
-      return { startUtc: startPkt.toISOString(), endUtc: endPkt.toISOString() };
-    };
+
 
     if (recent24h && !fromDate && !toDate) {
       // 24 hours rolling
