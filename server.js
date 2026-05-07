@@ -30,12 +30,24 @@ const apiCache = new NodeCache({ stdTTL: 60, checkperiod: 120 }); // Cache for 6
 // Helper to flush all patient-related cache keys
 function flushPatientCache() {
   const keys = apiCache.keys();
-  const patientKeys = keys.filter(k => k.includes('/api/patients') || k.includes('/api/profile'));
-  if (patientKeys.length > 0) {
-    console.log(`[CACHE] Flushing ${patientKeys.length} patient-related keys:`);
-    patientKeys.forEach(k => console.log(`  - 🗑️ ${k}`));
-    apiCache.del(patientKeys);
-  }
+  console.log(`[CACHE] Flushing ${keys.length} patient-related keys:`);
+  keys.forEach(key => {
+    if (key.includes('/api/patients') || key.includes('/api/profile')) {
+      console.log(`  - 🗑️ ${key}`);
+      apiCache.del(key);
+    }
+  });
+}
+
+function flushStockCache() {
+  const keys = apiCache.keys();
+  console.log(`[CACHE] Flushing stock-related keys:`);
+  keys.forEach(key => {
+    if (key.includes('/api/stock')) {
+      console.log(`  - 🗑️ ${key}`);
+      apiCache.del(key);
+    }
+  });
 }
 
 // Helper to flush expense-related cache keys
@@ -479,9 +491,66 @@ async function initializeDatabase() {
         Quantity INT DEFAULT 0,
         Price DECIMAL(10, 2) DEFAULT 0,
         LowStockThreshold INT DEFAULT 10,
-        CreatedAt VARCHAR(50)
+        CreatedAt VARCHAR(50),
+        CreatedBy VARCHAR(100) DEFAULT 'System',
+        UpdatedAt VARCHAR(50),
+        UpdatedBy VARCHAR(100),
+        IsDeleted TINYINT(1) DEFAULT 0,
+        DeletedAt VARCHAR(50),
+        DeletedBy VARCHAR(100),
+        Unit VARCHAR(50) DEFAULT 'units'
       )
     `);
+
+    // Migrations for Stock table
+    const migrateStock = async (query) => {
+      try {
+        await pool.execute(query);
+        console.log(`[MIGRATION] Applied: ${query}`);
+      } catch (e) {
+        if (!e.message.includes('Duplicate column name')) {
+          console.error(`[MIGRATION ERROR] Failed: ${query}`, e.message);
+        }
+      }
+    };
+
+    await migrateStock("ALTER TABLE Stock ADD COLUMN CreatedBy VARCHAR(100) DEFAULT 'System'");
+    await migrateStock("ALTER TABLE Stock ADD COLUMN UpdatedAt VARCHAR(50)");
+    await migrateStock("ALTER TABLE Stock ADD COLUMN UpdatedBy VARCHAR(100)");
+    await migrateStock("ALTER TABLE Stock ADD COLUMN IsDeleted TINYINT(1) DEFAULT 0");
+    await migrateStock("ALTER TABLE Stock ADD COLUMN DeletedAt VARCHAR(50)");
+    await migrateStock("ALTER TABLE Stock ADD COLUMN DeletedBy VARCHAR(100)");
+    await migrateStock("ALTER TABLE Stock ADD COLUMN Unit VARCHAR(50) DEFAULT 'units'");
+
+    // StockHistory table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS StockHistory (
+        LogID INT AUTO_INCREMENT PRIMARY KEY,
+        StockID VARCHAR(50),
+        Action VARCHAR(50),
+        QuantityChange INT,
+        Details TEXT,
+        PerformedBy VARCHAR(100),
+        PerformedAt VARCHAR(50),
+        OldQuantity INT DEFAULT 0,
+        FOREIGN KEY (StockID) REFERENCES Stock(ID) ON DELETE CASCADE
+      )
+    `);
+
+    // Migration for StockHistory
+    const migrateStockHistory = async (query) => {
+      try {
+        await pool.execute(query);
+        console.log(`[STOCK HISTORY MIGRATION] Applied: ${query}`);
+      } catch (e) {
+        if (!e.message.includes('Duplicate column name')) {
+          console.error(`[STOCK HISTORY MIGRATION ERROR] Failed: ${query}`, e.message);
+        }
+      }
+    };
+    await migrateStockHistory("ALTER TABLE StockHistory ADD COLUMN OldQuantity INT DEFAULT 0");
+
+    try { await pool.execute("CREATE INDEX idx_stockhistory_stockid ON StockHistory(StockID)"); } catch (e) { }
 
     // Payments table
     await pool.execute(`
@@ -1366,7 +1435,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
       // Use PKT boundaries for Today's Lab Collection
       pool.query("SELECT SUM(PaidAmount) as total FROM labpaymenthistory WHERE CreatedAt BETWEEN ? AND ?", [startUtc, endUtc]),
       pool.query("SELECT COUNT(*) as total FROM Prescriptions"),
-      pool.query("SELECT ID, Name, Category, Quantity, LowStockThreshold FROM Stock WHERE Quantity <= LowStockThreshold")
+      pool.query("SELECT ID, Name, Category, Quantity, LowStockThreshold FROM Stock WHERE Quantity <= LowStockThreshold AND IsDeleted = 0")
     ]);
 
     const clinicTotal = parseFloat(clinicPaymentSum[0].total) || 0;
@@ -2584,12 +2653,12 @@ app.get('/api/stock', cacheMiddleware, async (req, res) => {
     const limit = parseInt(req.query.limit) || 20;
     const offset = (page - 1) * limit;
 
-    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM stock');
+    const [countResult] = await pool.execute('SELECT COUNT(*) as total FROM Stock WHERE IsDeleted = 0');
     const total = countResult[0].total;
 
-    // Use pool.query (not pool.execute) for LIMIT/OFFSET
+    // Sort by most recently updated OR created first
     const [rows] = await pool.query(
-      'SELECT ID, Name, Category, Quantity, Price, LowStockThreshold, CreatedAt FROM stock ORDER BY Name ASC LIMIT ? OFFSET ?',
+      'SELECT ID, Name, Category, Quantity, Price, LowStockThreshold, CreatedAt, CreatedBy, UpdatedAt, UpdatedBy, Unit FROM Stock WHERE IsDeleted = 0 ORDER BY COALESCE(UpdatedAt, CreatedAt) DESC LIMIT ? OFFSET ?',
       [Number(limit), Number(offset)]
     );
 
@@ -2610,15 +2679,42 @@ app.get('/api/stock', cacheMiddleware, async (req, res) => {
 
 app.post('/api/stock', async (req, res) => {
   try {
-    const { id, name, category, quantity, price, lowStockThreshold } = req.body;
+    const { id, name, category, quantity, price, lowStockThreshold, unit } = req.body;
     const createdAt = new Date().toISOString();
 
+    const q = parseInt(quantity);
+    const p = parseFloat(price);
+    const lst = parseInt(lowStockThreshold);
+
+    // Capitalize first letter of name
+    const formattedName = name ? name.charAt(0).toUpperCase() + name.slice(1) : 'Unknown Item';
+
+    const createdBy = req.user ? `${req.user.name || req.user.username || 'Staff'} (${req.user.role || 'User'})` : 'System';
+
+    const finalId = id || `STK-${Math.floor(Math.random() * 900000) + 100000}`;
+
     await pool.execute(
-      'INSERT INTO stock (ID, Name, Category, Quantity, Price, LowStockThreshold, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [id, name, category, quantity, price, lowStockThreshold || 10, createdAt]
+      'INSERT INTO Stock (ID, Name, Category, Quantity, Price, LowStockThreshold, CreatedAt, CreatedBy, Unit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        finalId, 
+        formattedName, 
+        category || 'Other', 
+        isNaN(q) ? 0 : q, 
+        isNaN(p) ? 0 : p, 
+        isNaN(lst) ? 10 : lst, 
+        createdAt,
+        createdBy,
+        unit || 'units'
+      ]
     );
 
-    res.json({ success: true, id });
+    await pool.execute(
+      'INSERT INTO StockHistory (StockID, Action, QuantityChange, Details, PerformedBy, PerformedAt, OldQuantity) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [finalId, 'Created', isNaN(q) ? 0 : q, `Initial stock registered (Unit: ${unit || 'Units'}).`, createdBy, createdAt, 0]
+    );
+
+    flushStockCache();
+    res.json({ success: true, id: finalId });
   } catch (error) {
     console.error('Error adding stock item:', error);
     res.status(500).json({ error: error.message });
@@ -2627,13 +2723,79 @@ app.post('/api/stock', async (req, res) => {
 
 app.put('/api/stock/:id', async (req, res) => {
   try {
-    const { name, category, quantity, price, lowStockThreshold } = req.body;
+    const { name, category, quantity, price, lowStockThreshold, unit } = req.body;
+    const updates = [];
+    const params = [];
 
+    if (name !== undefined) { 
+      const formattedName = name ? name.charAt(0).toUpperCase() + name.slice(1) : 'Unknown Item';
+      updates.push('Name = ?'); 
+      params.push(formattedName); 
+    }
+    if (category !== undefined) { updates.push('Category = ?'); params.push(category || 'Other'); }
+    if (quantity !== undefined) {
+      const q = parseInt(quantity);
+      updates.push('Quantity = ?');
+      params.push(isNaN(q) ? 0 : q);
+    }
+    if (price !== undefined) {
+      const p = parseFloat(price);
+      updates.push('Price = ?');
+      params.push(isNaN(p) ? 0 : p);
+    }
+    if (lowStockThreshold !== undefined) {
+      const lst = parseInt(lowStockThreshold);
+      updates.push('LowStockThreshold = ?');
+      params.push(isNaN(lst) ? 10 : lst);
+    }
+    if (unit !== undefined) {
+      updates.push('Unit = ?');
+      params.push(unit || 'units');
+    }
+
+    // Audit Info
+    const updatedAt = new Date().toISOString();
+    const updatedBy = req.user ? `${req.user.name || req.user.username || 'Staff'} (${req.user.role || 'User'})` : 'System';
+    updates.push('UpdatedAt = ?', 'UpdatedBy = ?');
+    params.push(updatedAt, updatedBy);
+
+    if (updates.length === 0) return res.json({ success: true });
+
+    // Fetch previous state for history log
+    const [existing] = await pool.query('SELECT Quantity, Unit FROM Stock WHERE ID = ?', [req.params.id]);
+    const oldQuantity = existing[0] ? existing[0].Quantity : 0;
+    const medicineUnit = existing[0] ? existing[0].Unit : 'Units';
+    
+    params.push(req.params.id);
     await pool.execute(
-      'UPDATE stock SET Name = ?, Category = ?, Quantity = ?, Price = ?, LowStockThreshold = ? WHERE ID = ?',
-      [name, category, quantity, price, lowStockThreshold, req.params.id]
+      `UPDATE Stock SET ${updates.join(', ')} WHERE ID = ?`,
+      params
     );
 
+    // If quantity was explicitly provided in body
+    if (quantity !== undefined) {
+      const q = parseInt(quantity);
+      const newQuantity = isNaN(q) ? 0 : q;
+      const change = newQuantity - oldQuantity;
+      
+      let detailsStr = `Details updated.`;
+      if (change !== 0) {
+        detailsStr = `Quantity ${change > 0 ? 'increased' : 'decreased'} by ${Math.abs(change)} ${medicineUnit}.`;
+      }
+
+      await pool.execute(
+        'INSERT INTO StockHistory (StockID, Action, QuantityChange, Details, PerformedBy, PerformedAt, OldQuantity) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [req.params.id, 'Updated', change, detailsStr, updatedBy, updatedAt, oldQuantity]
+      );
+    } else {
+      // Just some other details changed
+      await pool.execute(
+        'INSERT INTO StockHistory (StockID, Action, QuantityChange, Details, PerformedBy, PerformedAt, OldQuantity) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [req.params.id, 'Updated', 0, 'Details updated.', updatedBy, updatedAt, oldQuantity]
+      );
+    }
+
+    flushStockCache();
     res.json({ success: true });
   } catch (error) {
     console.error('Error updating stock item:', error);
@@ -2643,10 +2805,33 @@ app.put('/api/stock/:id', async (req, res) => {
 
 app.delete('/api/stock/:id', async (req, res) => {
   try {
-    await pool.execute('DELETE FROM stock WHERE ID = ?', [req.params.id]);
+    const deletedAt = new Date().toISOString();
+    const deletedBy = req.user ? `${req.user.name || req.user.username || 'Staff'} (${req.user.role || 'User'})` : 'System';
+
+    await pool.execute(
+      'UPDATE Stock SET IsDeleted = 1, DeletedAt = ?, DeletedBy = ? WHERE ID = ?', 
+      [deletedAt, deletedBy, req.params.id]
+    );
+
+    await pool.execute(
+      'INSERT INTO StockHistory (StockID, Action, QuantityChange, Details, PerformedBy, PerformedAt) VALUES (?, ?, ?, ?, ?, ?)',
+      [req.params.id, 'Deleted', 0, 'Stock record deleted.', deletedBy, deletedAt]
+    );
+
+    flushStockCache();
     res.json({ success: true });
   } catch (error) {
     console.error('Error deleting stock item:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/stock/:id/history', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM StockHistory WHERE StockID = ? ORDER BY PerformedAt DESC', [req.params.id]);
+    res.json(rows);
+  } catch (error) {
+    console.error('Error fetching stock history:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3421,8 +3606,23 @@ app.post('/api/patient-services', async (req, res) => {
       }
     }
 
-      flushPatientCache();
-      res.json({ success: true, id });
+    // 3. Update Stock if Pharmacy services are used
+    if (services && services.pharmacy && services.pharmacy.enabled && Array.isArray(services.pharmacy.medicines)) {
+      for (const med of services.pharmacy.medicines) {
+        if (med.stockId && med.quantity > 0) {
+          console.log(`[STOCK] Reducing stock for ID: ${med.stockId} by quantity: ${med.quantity}`);
+          // Using GREATEST(0, ...) ensures stock doesn't go negative
+          await pool.execute(
+            'UPDATE Stock SET Quantity = GREATEST(0, Quantity - ?) WHERE ID = ?',
+            [med.quantity, med.stockId]
+          );
+        }
+      }
+    }
+
+    flushPatientCache();
+    flushStockCache();
+    res.json({ success: true, id });
     } catch (error) {
       res.status(500).json({ error: error.message });
     }
@@ -4019,7 +4219,7 @@ app.post('/api/patient-services', async (req, res) => {
 
         // Generate the JWT token with a 1 hour expiration
         const token = jwt.sign(
-          { id: user.ID, username: user.Username, role: user.Role },
+          { id: user.ID, username: user.Username, name: user.Name, role: user.Role },
           JWT_SECRET,
           { expiresIn: '1h' }
         );
