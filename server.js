@@ -821,6 +821,8 @@ async function initializeDatabase() {
 
     // Migrations for LabPatients
     try { await pool.execute("ALTER TABLE LabPatients ADD COLUMN SelectedTests JSON NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabPatients ADD COLUMN CreatedBy VARCHAR(100) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabVisits ADD COLUMN CreatedBy VARCHAR(100) NULL"); } catch (e) { }
 
     // LabResults Priority migration
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN Priority VARCHAR(50) DEFAULT 'Normal'"); } catch (e) { }
@@ -2846,38 +2848,75 @@ app.get('/api/payments', async (req, res) => {
 
     // Filters
     const recent24h = req.query.recent24h === 'true';
-    const fromDate = req.query.fromDate; // Expected format: YYYY-MM-DD
-    const toDate = req.query.toDate;     // Expected format: YYYY-MM-DD
+    const fromDate = req.query.fromDate; 
+    const toDate = req.query.toDate;     
+    const search = req.query.search;
+    const paymentMode = req.query.paymentMode;
+    const status = req.query.status; // 'Full' or 'Short'
 
-    let whereClause = '';
+    let whereConditions = [];
     let params = [];
 
+    if (search) {
+      whereConditions.push("(p.PatientName LIKE ? OR p.PatientID LIKE ? OR p.ID LIKE ? OR pat.Phone LIKE ? OR pat.MRN LIKE ?)");
+      const searchPattern = `%${search}%`;
+      params.push(searchPattern, searchPattern, searchPattern, searchPattern, searchPattern);
+    } else {
+      // Standard filters only apply if NOT searching
+      if (fromDate && toDate) {
+        const { startUtc } = getPktDayBounds(fromDate);
+        const { endUtc } = getPktDayBounds(toDate);
+        whereConditions.push("p.CreatedAt BETWEEN ? AND ?");
+        params.push(startUtc, endUtc);
+      } else if (fromDate) {
+        const { startUtc } = getPktDayBounds(fromDate);
+        whereConditions.push("p.CreatedAt >= ?");
+        params.push(startUtc);
+      } else if (toDate) {
+        const { endUtc } = getPktDayBounds(toDate);
+        whereConditions.push("p.CreatedAt <= ?");
+        params.push(endUtc);
+      } else if (recent24h) {
+        whereConditions.push('p.CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)');
+      }
 
+      if (paymentMode && paymentMode !== 'All') {
+        whereConditions.push("p.PaymentMode = ?");
+        params.push(paymentMode);
+      }
 
-    if (recent24h && !fromDate && !toDate) {
-      // 24 hours rolling
-      whereClause = 'WHERE p.CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)';
-    } else if (fromDate && toDate) {
-      const { startUtc } = getPktDayBounds(fromDate);
-      const { endUtc } = getPktDayBounds(toDate);
-      whereClause = "WHERE p.CreatedAt BETWEEN ? AND ?";
-      params.push(startUtc, endUtc);
-    } else if (fromDate) {
-      const { startUtc } = getPktDayBounds(fromDate);
-      whereClause = "WHERE p.CreatedAt >= ?";
-      params.push(startUtc);
-    } else if (toDate) {
-      const { endUtc } = getPktDayBounds(toDate);
-      whereClause = "WHERE p.CreatedAt <= ?";
-      params.push(endUtc);
+      if (status === 'Short') {
+        whereConditions.push("p.TotalAmount < (p.ConsultationFee + p.LabFee + p.MedicineFee)");
+      } else if (status === 'Full') {
+        whereConditions.push("p.TotalAmount >= (p.ConsultationFee + p.LabFee + p.MedicineFee)");
+      }
+
+      const serviceType = req.query.serviceType;
+      if (serviceType && serviceType !== 'All') {
+        if (serviceType === 'Consultation') {
+          whereConditions.push("p.ConsultationFee > 0");
+        } else if (serviceType === 'Lab') {
+          whereConditions.push("p.LabFee > 0");
+        } else if (serviceType === 'Pharmacy') {
+          whereConditions.push("p.MedicineFee > 0");
+        }
+      }
     }
 
+    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+
     // 1. Get total count and sum of collections
-    // We clone the params object because the second execute() will otherwise re-use and expect the same params
     const summaryParams = [...params];
-    // Use pool.query (not pool.execute): dynamic whereClause means the SQL text changes per request,
-    // causing mysql2's prepared statement cache to mismatch (Incorrect arguments to mysqld_stmt_execute)
-    const [summaryResult] = await pool.query(`SELECT COUNT(*) as total, SUM(TotalAmount) as totalCollection, SUM(LabFee) as totalLabFee, SUM(ConsultationFee) as totalConsultationFee FROM Payments p ${whereClause}`, summaryParams);
+    const [summaryResult] = await pool.query(`
+      SELECT COUNT(*) as total, 
+             SUM(p.TotalAmount) as totalCollection, 
+             SUM(p.LabFee) as totalLabFee, 
+             SUM(p.ConsultationFee) as totalConsultationFee 
+      FROM Payments p
+      LEFT JOIN Patients pat ON p.PatientID = pat.ID
+      ${whereClause}
+    `, summaryParams);
+
     const total = summaryResult[0].total;
     const totalCollection = summaryResult[0].totalCollection || 0;
     const totalLabFee = summaryResult[0].totalLabFee || 0;
@@ -3648,10 +3687,10 @@ app.post('/api/patient-services', async (req, res) => {
 
   app.post('/api/lab-visits', async (req, res) => {
     try {
-      const { id, labPatientId, visitDate, selectedTests, status = 'Pending', totalAmount = 0 } = req.body;
+      const { id, labPatientId, visitDate, status = 'Pending', selectedTests, totalAmount = 0, createdBy } = req.body;
       await pool.query(
-        'INSERT INTO LabVisits (ID, LabPatientID, VisitDate, Status, SelectedTests, TotalAmount, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [id, labPatientId, visitDate, status, JSON.stringify(selectedTests || []), totalAmount, new Date().toISOString()]
+        'INSERT INTO LabVisits (ID, LabPatientID, VisitDate, Status, SelectedTests, TotalAmount, CreatedAt, CreatedBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        [id, labPatientId, visitDate, status, JSON.stringify(selectedTests || []), totalAmount, new Date().toISOString(), createdBy || null]
       );
       res.status(201).json({ success: true, id });
     } catch (error) {
@@ -3661,7 +3700,7 @@ app.post('/api/patient-services', async (req, res) => {
 
   app.get('/api/lab-visits', async (req, res) => {
     try {
-      const { labPatientId, search, recent24h, fromDate, toDate } = req.query;
+      const { labPatientId, search, recent24h, fromDate, toDate, status } = req.query;
 
       let whereConditions = [];
       let queryParams = [];
@@ -3669,6 +3708,15 @@ app.post('/api/patient-services', async (req, res) => {
       if (labPatientId) {
         whereConditions.push('v.LabPatientID = ?');
         queryParams.push(labPatientId);
+      }
+
+      if (status) {
+        if (status === 'Fully Paid') {
+          whereConditions.push('v.PaymentStatus = ?');
+          queryParams.push('Paid');
+        } else if (status === 'Total Discount') {
+          whereConditions.push('v.DiscountAmount > 0');
+        }
       }
 
       if (search) {
@@ -3696,7 +3744,7 @@ app.post('/api/patient-services', async (req, res) => {
       // Legacy behavior for fetching patient specific visits without pagination limits
       if (labPatientId && !req.query.page && !req.query.limit && !search && !recent24h && !fromDate && !toDate) {
         const [rows] = await pool.query(
-          `SELECT v.*, p.Name as PatientName, p.Age, p.Gender, p.Phone FROM LabVisits v JOIN LabPatients p ON v.LabPatientID = p.ID ${whereClause} ORDER BY v.CreatedAt DESC`,
+          `SELECT v.*, p.Name as PatientName, p.GuardianName, p.Age, p.Gender, p.Phone FROM LabVisits v JOIN LabPatients p ON v.LabPatientID = p.ID ${whereClause} ORDER BY v.CreatedAt DESC`,
           queryParams
         );
         return res.json(rows.map(convertRowDates));
@@ -3718,9 +3766,9 @@ app.post('/api/patient-services', async (req, res) => {
       const total = countResult[0].total;
 
       // 2. Fetch paginated data
-      const columns = 'v.ID, v.LabPatientID, v.VisitDate, v.Status, v.TotalAmount, v.DiscountAmount, v.PaidAmount, v.PaymentStatus, v.CreatedAt, v.SelectedTests';
+      const columns = 'v.ID, v.LabPatientID, v.VisitDate, v.Status, v.TotalAmount, v.DiscountAmount, v.PaidAmount, v.PaymentStatus, v.CreatedAt, v.SelectedTests, v.CreatedBy';
       const dataQuery = `
-      SELECT ${columns}, p.Name as PatientName, p.Age, p.Gender, p.Phone 
+      SELECT ${columns}, p.Name as PatientName, p.GuardianName, p.Age, p.Gender, p.Phone 
       FROM LabVisits v 
       JOIN LabPatients p ON v.LabPatientID = p.ID
       ${whereClause}
@@ -3728,11 +3776,16 @@ app.post('/api/patient-services', async (req, res) => {
     `;
       const [rows] = await pool.query(dataQuery, [...queryParams, limit, offset]);
 
-      // 3. Calculate summary stats (totalCollection, totalDiscount) using the SAME whereClause
+      // 3. Calculate summary stats (totalCollection, totalDiscount, totalTests) using the SAME whereClause
       const statsQuery = `
       SELECT 
         SUM(v.PaidAmount) as totalCollection, 
         SUM(v.DiscountAmount) as totalDiscount,
+        SUM(CASE 
+          WHEN v.SelectedTests IS NULL OR v.SelectedTests = '' THEN 0 
+          WHEN JSON_VALID(v.SelectedTests) THEN JSON_LENGTH(v.SelectedTests)
+          ELSE 0 
+        END) as totalTests,
         COUNT(v.ID) as totalVisits
       FROM LabVisits v 
       JOIN LabPatients p ON v.LabPatientID = p.ID
@@ -3752,7 +3805,7 @@ app.post('/api/patient-services', async (req, res) => {
           totalPages: Math.ceil(total / limit),
           totalCollection,
           totalDiscount,
-          totalTests: totalVisits
+          totalTests: statsResult[0].totalTests || 0
         }
       });
     } catch (error) {
