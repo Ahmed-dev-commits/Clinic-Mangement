@@ -3315,7 +3315,7 @@ app.get('/api/lab-results', async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
     const offset = (page - 1) * limit;
-    const { labPatientId, status, fromDate, toDate } = req.query;
+    const { labPatientId, status, fromDate, toDate, dateRange } = req.query;
 
     let whereClause = '';
     let params = [];
@@ -3324,6 +3324,39 @@ app.get('/api/lab-results', async (req, res) => {
       const startPkt = new Date(`${dateStr}T00:00:00+05:00`);
       const endPkt = new Date(`${dateStr}T23:59:59.999+05:00`);
       return { startUtc: startPkt.toISOString(), endUtc: endPkt.toISOString() };
+    };
+
+    const getPktRanges = (rangeOpt) => {
+      const now = new Date();
+      const pktNow = new Date(now.getTime() + (5 * 60 * 60 * 1000));
+      const pad = (n) => String(n).padStart(2, '0');
+      const pktTodayStr = `${pktNow.getUTCFullYear()}-${pad(pktNow.getUTCMonth() + 1)}-${pad(pktNow.getUTCDate())}`;
+
+      let startUtc, endUtc;
+
+      if (rangeOpt === 'today') {
+        startUtc = new Date(`${pktTodayStr}T00:00:00+05:00`).toISOString();
+        endUtc = new Date(`${pktTodayStr}T23:59:59.999+05:00`).toISOString();
+      } else if (rangeOpt === 'last24h') {
+        startUtc = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
+        endUtc = now.toISOString();
+      } else if (rangeOpt === '7days') {
+        const d = new Date(pktNow.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const dateStr = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+        startUtc = new Date(`${dateStr}T00:00:00+05:00`).toISOString();
+        endUtc = new Date(`${pktTodayStr}T23:59:59.999+05:00`).toISOString();
+      } else if (rangeOpt === '30days') {
+        const d = new Date(pktNow.getTime() - 30 * 24 * 60 * 60 * 1000);
+        const dateStr = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
+        startUtc = new Date(`${dateStr}T00:00:00+05:00`).toISOString();
+        endUtc = new Date(`${pktTodayStr}T23:59:59.999+05:00`).toISOString();
+      } else if (rangeOpt === 'month') {
+        const startOfMonthStr = `${pktNow.getUTCFullYear()}-${pad(pktNow.getUTCMonth() + 1)}-01`;
+        startUtc = new Date(`${startOfMonthStr}T00:00:00+05:00`).toISOString();
+        endUtc = new Date(`${pktTodayStr}T23:59:59.999+05:00`).toISOString();
+      }
+
+      return { startUtc, endUtc };
     };
 
     if (labPatientId) {
@@ -3337,17 +3370,23 @@ app.get('/api/lab-results', async (req, res) => {
       params.push(...statusList);
     }
 
-    if (fromDate && toDate) {
-      const { startUtc } = getPktDayBounds(fromDate);
-      const { endUtc } = getPktDayBounds(toDate);
+    let startUtc, endUtc;
+    if (dateRange && dateRange !== 'custom') {
+      const ranges = getPktRanges(dateRange);
+      startUtc = ranges.startUtc;
+      endUtc = ranges.endUtc;
+    } else {
+      if (fromDate) startUtc = getPktDayBounds(fromDate).startUtc;
+      if (toDate) endUtc = getPktDayBounds(toDate).endUtc;
+    }
+
+    if (startUtc && endUtc) {
       whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'CreatedAt BETWEEN ? AND ?';
       params.push(startUtc, endUtc);
-    } else if (fromDate) {
-      const { startUtc } = getPktDayBounds(fromDate);
+    } else if (startUtc) {
       whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'CreatedAt >= ?';
       params.push(startUtc);
-    } else if (toDate) {
-      const { endUtc } = getPktDayBounds(toDate);
+    } else if (endUtc) {
       whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'CreatedAt <= ?';
       params.push(endUtc);
     }
