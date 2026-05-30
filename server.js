@@ -70,6 +70,18 @@ function flushAppointmentCache() {
   }
 }
 
+// Helper to flush catalog-related cache keys
+function flushCatalogCache() {
+  const keys = apiCache.keys();
+  console.log(`[CACHE] Flushing catalog-related keys:`);
+  keys.forEach(key => {
+    if (key.includes('/api/lab-tests-catalog') || key.includes('/api/patient-services')) {
+      console.log(`  - 🗑️ ${key}`);
+      apiCache.del(key);
+    }
+  });
+}
+
 const app = express();
 
 // ============ SIMPLE FILE LOGGER ============
@@ -724,7 +736,11 @@ async function initializeDatabase() {
         Status VARCHAR(50) DEFAULT 'Active',
         IsProfile TINYINT(1) DEFAULT 0,
         ProfileTests JSON,
-        CreatedAt VARCHAR(50)
+        Machine VARCHAR(100) NULL,
+        CreatedAt VARCHAR(50),
+        CreatedBy VARCHAR(100) NULL,
+        UpdatedAt VARCHAR(50) NULL,
+        UpdatedBy VARCHAR(100) NULL
       )
     `);
 
@@ -739,6 +755,9 @@ async function initializeDatabase() {
     try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN Status VARCHAR(50) DEFAULT 'Active'"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN IsProfile TINYINT(1) DEFAULT 0"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN ProfileTests JSON"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN CreatedBy VARCHAR(100) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN UpdatedBy VARCHAR(100) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabTestsCatalog ADD COLUMN UpdatedAt VARCHAR(50) NULL"); } catch (e) { }
 
 
     // Attempt to add Approval tracking columns to AdvancePayments (Migration)
@@ -3518,21 +3537,25 @@ app.post('/api/lab-tests-catalog', async (req, res) => {
       status, isProfile, profileTests, machine
     } = req.body;
 
+    const createdBy = req.user ? `${req.user.name || req.user.username || 'Staff'} (${req.user.role || 'User'})` : 'System';
+    const createdAt = new Date().toISOString();
+
     await pool.execute(
       `INSERT INTO LabTestsCatalog (
         ID, Name, Category, Unit, NormalRange, Price,
         ReferenceRangeMale, ReferenceRangeFemale, ReferenceRangeChild,
         CriticalValueRange, SampleType, Method, TurnaroundTime,
-        Status, IsProfile, ProfileTests, Machine
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        Status, IsProfile, ProfileTests, Machine, CreatedAt, CreatedBy
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id, name, category, unit, normalRange, price || 0,
         referenceRangeMale || null, referenceRangeFemale || null, referenceRangeChild || null,
         criticalValueRange || null, sampleType || null, method || null, turnaroundTime || null,
         status || 'Active', isProfile ? 1 : 0, profileTests ? JSON.stringify(profileTests) : null,
-        machine || null
+        machine || null, createdAt, createdBy
       ]
     );
+    flushCatalogCache();
     res.json({ success: true, id });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -3548,22 +3571,27 @@ app.put('/api/lab-tests-catalog/:id', async (req, res) => {
       status, isProfile, profileTests, machine
     } = req.body;
 
+    const updatedBy = req.user ? `${req.user.name || req.user.username || 'Staff'} (${req.user.role || 'User'})` : 'System';
+    const updatedAt = new Date().toISOString();
+
     await pool.execute(
       `UPDATE LabTestsCatalog SET 
         Name = ?, Category = ?, Unit = ?, NormalRange = ?, Price = ?,
         ReferenceRangeMale = ?, ReferenceRangeFemale = ?, ReferenceRangeChild = ?,
         CriticalValueRange = ?, SampleType = ?, Method = ?, TurnaroundTime = ?,
-        Status = ?, IsProfile = ?, ProfileTests = ?, Machine = ?
+        Status = ?, IsProfile = ?, ProfileTests = ?, Machine = ?,
+        UpdatedAt = ?, UpdatedBy = ?
        WHERE ID = ?`,
       [
         name, category, unit, normalRange, price || 0,
         referenceRangeMale || null, referenceRangeFemale || null, referenceRangeChild || null,
         criticalValueRange || null, sampleType || null, method || null, turnaroundTime || null,
         status || 'Active', isProfile ? 1 : 0, profileTests ? JSON.stringify(profileTests) : null,
-        machine || null,
+        machine || null, updatedAt, updatedBy,
         req.params.id
       ]
     );
+    flushCatalogCache();
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -3573,6 +3601,7 @@ app.put('/api/lab-tests-catalog/:id', async (req, res) => {
 app.delete('/api/lab-tests-catalog/:id', async (req, res) => {
   try {
     await pool.execute('DELETE FROM LabTestsCatalog WHERE ID = ?', [req.params.id]);
+    flushCatalogCache();
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
