@@ -780,6 +780,7 @@ async function initializeDatabase() {
         ReferredBy VARCHAR(255) DEFAULT 'Self',
         NotifiedAt VARCHAR(50) NULL,
         CollectedAt VARCHAR(50) NULL,
+        CollectorName VARCHAR(255) NULL,
         CreatedAt VARCHAR(50)
       )
     `);
@@ -796,6 +797,7 @@ async function initializeDatabase() {
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN NotifiedAt VARCHAR(50) NULL"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN CollectedAt VARCHAR(50) NULL"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN ReferredBy VARCHAR(255) DEFAULT 'Self'"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN CollectorName VARCHAR(255) NULL"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults DROP COLUMN ClinicPatientID"); } catch (e) { }
     try { await pool.execute("ALTER TABLE LabResults DROP COLUMN PatientID"); } catch (e) { }
 
@@ -835,6 +837,22 @@ async function initializeDatabase() {
         Tests JSON NULL,
         CreatedAt VARCHAR(50),
         FinalizedAt VARCHAR(50) NULL
+      )
+    `);
+
+    // LabVisits table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS LabVisits (
+        ID VARCHAR(50) PRIMARY KEY,
+        LabPatientID VARCHAR(50) NOT NULL,
+        VisitDate DATE NOT NULL,
+        Status VARCHAR(50) DEFAULT 'Pending',
+        SelectedTests JSON NULL,
+        TotalAmount DECIMAL(10, 2) DEFAULT 0.00,
+        DiscountAmount DECIMAL(10, 2) DEFAULT 0.00,
+        PaidAmount DECIMAL(10, 2) DEFAULT 0.00,
+        PaymentStatus VARCHAR(50) DEFAULT 'Unpaid',
+        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
@@ -3420,8 +3438,29 @@ app.get('/api/lab-results', async (req, res) => {
       [...params, Number(limit), Number(offset)]
     );
 
+    // Fetch payment status for the retrieved lab results in batch
+    const patientIds = rows.map(r => r.LabPatientID).filter(Boolean);
+    const paymentStatuses = {};
+    if (patientIds.length > 0) {
+      const [visitRows] = await pool.query(
+        `SELECT LabPatientID, PaymentStatus FROM LabVisits WHERE LabPatientID IN (${patientIds.map(() => '?').join(',')})`,
+        patientIds
+      );
+      visitRows.forEach(v => {
+        paymentStatuses[v.LabPatientID] = v.PaymentStatus;
+      });
+    }
+
+    const data = rows.map(r => {
+      const row = convertRowDates(r);
+      const statusVal = paymentStatuses[r.LabPatientID] || 'Paid';
+      row.PaymentStatus = statusVal;
+      row.paymentStatus = statusVal;
+      return row;
+    });
+
     res.json({
-      data: rows.map(convertRowDates),
+      data,
       meta: {
         total,
         page,
@@ -3437,15 +3476,15 @@ app.get('/api/lab-results', async (req, res) => {
 app.post('/api/lab-results', async (req, res) => {
   try {
     console.log('📝 Creating Lab Result. Body:', JSON.stringify(req.body, null, 2));
-    const { id, labPatientId, patientName, patientAge, testDate, reportDate, tests, notes, technician, status, referredBy, patientId } = req.body;
+    const { id, labPatientId, patientName, patientAge, testDate, reportDate, tests, notes, technician, status, referredBy, patientId, collectorName } = req.body;
     const createdAt = new Date().toISOString();
 
     // Use labPatientId if present, otherwise fallback to patientId (which is what clinic calls it)
     const finalPatientId = labPatientId || patientId || null;
 
     await pool.execute(
-      'INSERT INTO LabResults (ID, LabPatientID, PatientName, PatientAge, TestDate, ReportDate, Tests, Notes, Technician, Status, ReferredBy, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-      [id, finalPatientId, patientName, patientAge || null, testDate, reportDate || null, JSON.stringify(tests), notes || null, technician || null, status || 'Pending', referredBy || 'Self', createdAt]
+      'INSERT INTO LabResults (ID, LabPatientID, PatientName, PatientAge, TestDate, ReportDate, Tests, Notes, Technician, Status, ReferredBy, CreatedAt, CollectorName) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, finalPatientId, patientName, patientAge || null, testDate, reportDate || null, JSON.stringify(tests), notes || null, technician || null, status || 'Pending', referredBy || 'Self', createdAt, collectorName || null]
     );
 
     res.json({ success: true, id });
@@ -3484,11 +3523,11 @@ app.put('/api/lab-results/:id/status', async (req, res) => {
 // Full update for lab results
 app.put('/api/lab-results/:id', async (req, res) => {
   try {
-    const { testDate, reportDate, tests, notes, technician, status, labPatientId } = req.body;
+    const { testDate, reportDate, tests, notes, technician, status, labPatientId, collectorName } = req.body;
 
     await pool.execute(
-      'UPDATE LabResults SET TestDate = ?, ReportDate = ?, Tests = ?, Notes = ?, Technician = ?, Status = ?, LabPatientID = ? WHERE ID = ?',
-      [testDate, reportDate || null, JSON.stringify(tests), notes || null, technician || null, status, labPatientId || null, req.params.id]
+      'UPDATE LabResults SET TestDate = ?, ReportDate = ?, Tests = ?, Notes = ?, Technician = ?, Status = ?, LabPatientID = ?, CollectorName = ? WHERE ID = ?',
+      [testDate, reportDate || null, JSON.stringify(tests), notes || null, technician || null, status, labPatientId || null, collectorName || null, req.params.id]
     );
 
     res.json({ success: true });
