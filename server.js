@@ -863,6 +863,9 @@ async function initializeDatabase() {
 
     // LabResults Priority migration
     try { await pool.execute("ALTER TABLE LabResults ADD COLUMN Priority VARCHAR(50) DEFAULT 'Normal'"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN IsDeleted INT DEFAULT 0"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN DeletedAt VARCHAR(50) NULL"); } catch (e) { }
+    try { await pool.execute("ALTER TABLE LabResults ADD COLUMN DeletedBy VARCHAR(50) NULL"); } catch (e) { }
 
     // HR Upgrade Migrations
     try { await pool.execute("ALTER TABLE Employees ADD COLUMN StandardDailyHours INT DEFAULT 8"); } catch (e) { }
@@ -2330,14 +2333,17 @@ app.get('/api/lab-patients', async (req, res) => {
     const [countRows] = await pool.query(`SELECT COUNT(*) as total FROM LabPatients ${whereClause}`, params);
     const total = countRows[0].total;
 
-    const columns = 'ID, Name, GuardianName, Age, AgeMonths, AgeDays, Gender, Phone, Address, CNIC, ReferringDoctorName, Priority, SelectedTests, CreatedAt';
+    const columns = 'ID, Name, GuardianName, Age, AgeMonths, AgeDays, Gender, Phone, Address, CNIC, ReferringDoctorName, Priority, SelectedTests, CreatedAt, (SELECT MAX(VisitDate) FROM LabVisits WHERE LabPatientID = LabPatients.ID) as VisitDate';
     const [rows] = await pool.query(
       `SELECT ${columns} FROM LabPatients ${whereClause} ORDER BY CreatedAt DESC LIMIT ? OFFSET ?`,
       [...params, Number(limit), Number(offset)]
     );
 
     res.json({
-      data: rows.map(convertRowDates),
+      data: rows.map(convertRowDates).map(r => {
+        if (r) delete r.visitDate;
+        return r;
+      }),
       meta: {
         total,
         page,
@@ -2357,11 +2363,17 @@ app.get('/api/lab-patients/lookup', async (req, res) => {
 
     // Search by exact ID or exact Phone
     const [rows] = await pool.execute(
-      'SELECT * FROM LabPatients WHERE ID = ? OR Phone = ? LIMIT 1',
+      'SELECT *, (SELECT MAX(VisitDate) FROM LabVisits WHERE LabPatientID = LabPatients.ID) as VisitDate FROM LabPatients WHERE ID = ? OR Phone = ? LIMIT 1',
       [query, query]
     );
 
-    res.json(rows.length > 0 ? convertRowDates(rows[0]) : null);
+    if (rows.length > 0) {
+      const patient = convertRowDates(rows[0]);
+      if (patient) delete patient.visitDate;
+      res.json(patient);
+    } else {
+      res.json(null);
+    }
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -2377,7 +2389,10 @@ app.get('/api/lab-patients/:id/profile', async (req, res) => {
     const profile = profiles[0];
 
     // 2. Fetch Visits
-    const [visits] = await pool.query('SELECT * FROM LabVisits WHERE LabPatientID = ? ORDER BY CreatedAt DESC', [patientId]);
+    const [visits] = await pool.query(
+      `SELECT *, (SELECT COALESCE(ABS(SUM(AmountPaid)), 0) FROM LabFeesLedger WHERE VisitID = LabVisits.ID AND AmountPaid < 0) as RefundedAmount FROM LabVisits WHERE LabPatientID = ? ORDER BY CreatedAt DESC`,
+      [patientId]
+    );
 
     // 3. Fetch Lab Results
     let labResults = [];
@@ -3354,7 +3369,7 @@ app.get('/api/lab-results', async (req, res) => {
     const offset = (page - 1) * limit;
     const { labPatientId, status, fromDate, toDate, dateRange } = req.query;
 
-    let whereClause = '';
+    let whereClause = 'WHERE (IsDeleted = 0 OR IsDeleted IS NULL)';
     let params = [];
 
     const getPktDayBounds = (dateStr) => {
@@ -3397,7 +3412,7 @@ app.get('/api/lab-results', async (req, res) => {
     };
 
     if (labPatientId) {
-      whereClause = 'WHERE LabPatientID = ?';
+      whereClause += (whereClause ? ' AND ' : 'WHERE ') + 'LabPatientID = ?';
       params.push(labPatientId);
     }
 
@@ -3533,6 +3548,74 @@ app.put('/api/lab-results/:id', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/lab-results/:id', async (req, res) => {
+  const connection = await pool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    const deletedAt = new Date().toISOString();
+    const deletedBy = req.query.deletedBy || 'System';
+
+    // 1. Fetch the lab result first
+    const [results] = await connection.query('SELECT * FROM LabResults WHERE ID = ?', [req.params.id]);
+    if (results.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ error: 'Lab Result not found' });
+    }
+    const labResult = results[0];
+
+    // 2. Soft-delete the lab result
+    await connection.execute(
+      'UPDATE LabResults SET IsDeleted = 1, DeletedAt = ?, DeletedBy = ? WHERE ID = ?',
+      [deletedAt, deletedBy, req.params.id]
+    );
+
+    // 3. Find the associated LabVisit (latest visit for this lab patient)
+    const [visits] = await connection.query(
+      'SELECT * FROM LabVisits WHERE LabPatientID = ? ORDER BY CreatedAt DESC LIMIT 1',
+      [labResult.LabPatientID]
+    );
+
+    if (visits.length > 0) {
+      const visit = visits[0];
+      const paidAmount = Number(visit.PaidAmount || 0);
+
+      // If patient paid any amount, we perform a refund
+      if (paidAmount > 0) {
+        // Create refund ledger entry
+        const paymentId = `LPMT-REF-${Date.now().toString(36).toUpperCase()}`;
+        const refundNotes = `Refunded due to discarded lab order (ID: ${req.params.id}) by ${deletedBy}`;
+        
+        await connection.query(
+          'INSERT INTO LabFeesLedger (ID, LabPatientID, VisitID, AmountPaid, PaymentMethod, Notes, PaymentDate) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          [paymentId, labResult.LabPatientID, visit.ID, -paidAmount, 'Refund', refundNotes, new Date().toISOString()]
+        );
+
+        // Update the visit amounts and status (keep PaidAmount, TotalAmount, and DiscountAmount)
+        await connection.query(
+          'UPDATE LabVisits SET PaymentStatus = "Refunded" WHERE ID = ?',
+          [visit.ID]
+        );
+      } else {
+        // If unpaid, just set status to Cancelled and keep amounts
+        await connection.query(
+          'UPDATE LabVisits SET PaidAmount = 0, PaymentStatus = "Cancelled" WHERE ID = ?',
+          [visit.ID]
+        );
+      }
+    }
+
+    await connection.commit();
+    res.json({ success: true });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error soft-deleting lab result & refunding:', error);
+    res.status(500).json({ error: error.message });
+  } finally {
+    connection.release();
   }
 });
 
@@ -3851,7 +3934,7 @@ app.post('/api/patient-services', async (req, res) => {
       // Legacy behavior for fetching patient specific visits without pagination limits
       if (labPatientId && !req.query.page && !req.query.limit && !search && !recent24h && !fromDate && !toDate) {
         const [rows] = await pool.query(
-          `SELECT v.*, p.Name as PatientName, p.GuardianName, p.Age, p.Gender, p.Phone FROM LabVisits v JOIN LabPatients p ON v.LabPatientID = p.ID ${whereClause} ORDER BY v.CreatedAt DESC`,
+          `SELECT v.*, (SELECT COALESCE(ABS(SUM(AmountPaid)), 0) FROM LabFeesLedger WHERE VisitID = v.ID AND AmountPaid < 0) as RefundedAmount, p.Name as PatientName, p.GuardianName, p.Age, p.Gender, p.Phone FROM LabVisits v JOIN LabPatients p ON v.LabPatientID = p.ID ${whereClause} ORDER BY v.CreatedAt DESC`,
           queryParams
         );
         return res.json(rows.map(convertRowDates));
@@ -3873,7 +3956,7 @@ app.post('/api/patient-services', async (req, res) => {
       const total = countResult[0].total;
 
       // 2. Fetch paginated data
-      const columns = 'v.ID, v.LabPatientID, v.VisitDate, v.Status, v.TotalAmount, v.DiscountAmount, v.PaidAmount, v.PaymentStatus, v.CreatedAt, v.SelectedTests, v.CreatedBy';
+      const columns = 'v.ID, v.LabPatientID, v.VisitDate, v.Status, v.TotalAmount, v.DiscountAmount, v.PaidAmount, v.PaymentStatus, v.CreatedAt, v.SelectedTests, v.CreatedBy, (SELECT COALESCE(ABS(SUM(AmountPaid)), 0) FROM LabFeesLedger WHERE VisitID = v.ID AND AmountPaid < 0) as RefundedAmount';
       const dataQuery = `
       SELECT ${columns}, p.Name as PatientName, p.GuardianName, p.Age, p.Gender, p.Phone 
       FROM LabVisits v 
@@ -3886,8 +3969,8 @@ app.post('/api/patient-services', async (req, res) => {
       // 3. Calculate summary stats (totalCollection, totalDiscount, totalTests) using the SAME whereClause
       const statsQuery = `
       SELECT 
-        SUM(v.PaidAmount) as totalCollection, 
-        SUM(v.DiscountAmount) as totalDiscount,
+        SUM(CASE WHEN v.PaymentStatus = 'Refunded' OR v.PaymentStatus = 'Cancelled' THEN 0 ELSE v.PaidAmount END) as totalCollection, 
+        SUM(CASE WHEN v.PaymentStatus = 'Refunded' OR v.PaymentStatus = 'Cancelled' THEN 0 ELSE v.DiscountAmount END) as totalDiscount,
         SUM(CASE 
           WHEN v.SelectedTests IS NULL OR v.SelectedTests = '' THEN 0 
           WHEN JSON_VALID(v.SelectedTests) THEN JSON_LENGTH(v.SelectedTests)
@@ -3922,7 +4005,7 @@ app.post('/api/patient-services', async (req, res) => {
 
   app.put('/api/lab-visits/:id', async (req, res) => {
     try {
-      const { status, selectedTests, totalAmount, discountAmount, paidAmount, balanceAmount, paymentStatus } = req.body;
+      const { status, selectedTests, totalAmount, discountAmount, paidAmount, paymentStatus } = req.body;
       // Build dynamic update query
       let updateFields = [];
       let queryParams = [];
@@ -3946,10 +4029,6 @@ app.post('/api/patient-services', async (req, res) => {
       if (paidAmount !== undefined) {
         updateFields.push('PaidAmount = ?');
         queryParams.push(paidAmount);
-      }
-      if (balanceAmount !== undefined) {
-        updateFields.push('BalanceAmount = ?');
-        queryParams.push(balanceAmount);
       }
       if (paymentStatus !== undefined) {
         updateFields.push('PaymentStatus = ?');
