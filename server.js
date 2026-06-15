@@ -1258,6 +1258,44 @@ async function initializeDatabase() {
       console.log('✅ Default Global Settings initialized');
     }
 
+    // AppSettings migration to fix welcome message banned words
+    try {
+      const [settingsRows] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
+      if (settingsRows.length > 0) {
+        let dataStr = settingsRows[0].Data;
+        let modified = false;
+        
+        let settingsObj = null;
+        if (typeof dataStr === 'string') {
+          try {
+            settingsObj = JSON.parse(dataStr);
+          } catch (e) {}
+        } else if (typeof dataStr === 'object' && dataStr !== null) {
+          settingsObj = dataStr;
+        }
+
+        if (settingsObj && settingsObj.whatsappConfig && settingsObj.whatsappConfig.welcomeMessageTemplate) {
+          let template = settingsObj.whatsappConfig.welcomeMessageTemplate;
+          if (template.includes('Welcome') || template.includes('confirmed')) {
+            template = template
+              .replace(/Welcome/g, 'Greetings')
+              .replace(/welcome/g, 'greetings')
+              .replace(/confirmed/g, 'completed')
+              .replace(/confirm/g, 'complete');
+            settingsObj.whatsappConfig.welcomeMessageTemplate = template;
+            modified = true;
+          }
+        }
+
+        if (modified) {
+          await pool.execute("UPDATE AppSettings SET Data = ? WHERE ID = 'GLOBAL'", [JSON.stringify(settingsObj)]);
+          console.log("✅ Migrated welcome template to remove banned words from AppSettings");
+        }
+      }
+    } catch (e) {
+      console.error("Failed to migrate AppSettings template:", e.message);
+    }
+
     // Insert Default Salary Configuration if not exists
     const [salaryConfigCount] = await pool.execute("SELECT COUNT(*) as count FROM AppSettings WHERE ID = 'SALARY_CONFIG'");
     if (salaryConfigCount[0].count === 0) {
@@ -5350,7 +5388,7 @@ app.post('/api/patient-services', async (req, res) => {
   // ============ WHATSAPP API ============
   app.post('/api/whatsappsms', async (req, res) => {
     try {
-      const { to, message } = req.body;
+      const { to, message, filename, document } = req.body;
 
       // Get GLOBAL settings to extract UltraMsg credentials
       const [settings] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
@@ -5375,11 +5413,24 @@ app.post('/api/patient-services', async (req, res) => {
 
       // Use dynamic import or require
       const axios = require('axios');
-      const response = await axios.post(`https://api.ultramsg.com/${waConfig.instanceId}/messages/chat`, {
-        token: waConfig.token,
-        to: `+${toPhone}`,
-        body: message
-      }, { timeout: 10000 });
+      let response;
+      if (document) {
+        // Send document (PDF/etc) via UltraMsg messages/document endpoint
+        response = await axios.post(`https://api.ultramsg.com/${waConfig.instanceId}/messages/document`, {
+          token: waConfig.token,
+          to: `+${toPhone}`,
+          filename: filename || 'report.pdf',
+          document: document, // base64 string or public URL
+          caption: message || ''
+        }, { timeout: 20000 });
+      } else {
+        // Send standard chat message
+        response = await axios.post(`https://api.ultramsg.com/${waConfig.instanceId}/messages/chat`, {
+          token: waConfig.token,
+          to: `+${toPhone}`,
+          body: message
+        }, { timeout: 10000 });
+      }
 
       res.json({ success: true, data: response.data });
     } catch (error) {
@@ -5395,6 +5446,10 @@ app.post('/api/patient-services', async (req, res) => {
   app.post('/api/smsapi', async (req, res) => {
     try {
       const { to, message } = req.body;
+      const cleanMessage = (message || '')
+        .replace(/welcome/gi, 'Greetings')
+        .replace(/confirmed/gi, 'completed')
+        .replace(/confirm/gi, 'complete');
 
       // Get GLOBAL settings to extract SMS credentials
       const [settings] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
@@ -5407,27 +5462,66 @@ app.post('/api/patient-services', async (req, res) => {
       if (!smsConfig || !smsConfig.enabled) {
         return res.status(400).json({ error: 'SMS integration is currently disabled in Settings.' });
       }
-      if (!smsConfig.providerUrlTemplate) {
-        return res.status(400).json({ error: 'SMS provider URL template is missing.' });
-      }
 
-      // Format phone number to string (remove symbols, ensure leading 92 depending on standard usually required by bulkSMS, 
-      // bulksms.com.pk usually wants e.g. 923001234567, but let's just strip formatting first)
+      // Format phone number to string (remove symbols, ensure leading 92)
       let toPhone = (to || '').replace(/\D/g, '');
       if (toPhone.startsWith('0')) {
         toPhone = '92' + toPhone.substring(1);
       }
 
-      // Replace URL template strings
-      let targetUrl = smsConfig.providerUrlTemplate
-        .replace('{phone}', toPhone)
-        .replace('{message}', encodeURIComponent(message));
-
-      // Some providers might mis-use `{{phone}}` or `[phone]`. The simple replace handles exact `{phone}` string.
-
-      // Execute request
+      // Execute request to Branded SMS Pakistan
       const axios = require('axios');
-      const response = await axios.get(targetUrl, { timeout: 10000 });
+      const qs = require('qs');
+      
+      let targetUrl = smsConfig.providerUrlTemplate || 'https://app.brandedsmspakistan.com/api/send';
+      
+      // Normalize root domain to the correct API endpoint
+      if (targetUrl.trim() === 'https://app.brandedsmspakistan.com/' || targetUrl.trim() === 'https://app.brandedsmspakistan.com') {
+        targetUrl = 'https://app.brandedsmspakistan.com/api/send';
+      }
+
+      let response;
+      if (targetUrl.includes('brandedsmspakistan.com')) {
+        // Branded SMS Pakistan API expects a GET request for sending messages
+        const emailParam = (smsConfig.email || '').trim();
+        const keyParam = (smsConfig.key || '').trim();
+        const maskParam = (smsConfig.mask || 'INFO SHARE').trim();
+
+        console.log(`[SMS] Sending GET request to Branded SMS Pakistan. Email: "${emailParam}", Mask: "${maskParam}", To: "${toPhone}"`);
+
+        response = await axios.get(targetUrl, {
+          params: {
+            email: emailParam,
+            key: keyParam,
+            mask: maskParam,
+            to: toPhone,
+            message: cleanMessage
+          },
+          timeout: 15000
+        });
+      } else {
+        // Other SMS gateways or endpoints that support POST
+        const emailParam = (smsConfig.email || '').trim();
+        const keyParam = (smsConfig.key || '').trim();
+        const maskParam = (smsConfig.mask || 'INFO SHARE').trim();
+
+        console.log(`[SMS] Sending POST request to ${targetUrl}. Email: "${emailParam}", Mask: "${maskParam}", To: "${toPhone}"`);
+
+        const payload = qs.stringify({
+          email: emailParam,
+          key: keyParam,
+          mask: maskParam,
+          to: toPhone,
+          message: cleanMessage
+        });
+        
+        response = await axios.post(targetUrl, payload, {
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded'
+          },
+          timeout: 15000
+        });
+      }
 
       res.json({ success: true, data: response.data });
     } catch (error) {
@@ -5435,6 +5529,36 @@ app.post('/api/patient-services', async (req, res) => {
       res.status(500).json({ error: 'Failed to send SMS message.' });
     }
   });
+
+  // ============ PDF REPORT UPLOAD ============
+  app.post('/api/reports/upload/:visitId', express.raw({ type: 'application/pdf', limit: '10mb' }), async (req, res) => {
+    try {
+      const { visitId } = req.params;
+      
+      const reportsDir = path.join(__dirname, 'public', 'reports');
+      if (!fs.existsSync(reportsDir)) {
+        fs.mkdirSync(reportsDir, { recursive: true });
+      }
+
+      const filePath = path.join(reportsDir, `${visitId}.pdf`);
+      
+      // Write raw binary data from req.body
+      await fs.promises.writeFile(filePath, req.body);
+      
+      const host = req.get('host');
+      const protocol = req.protocol;
+      
+      // Return the public URL
+      const fileUrl = `${protocol}://${host}/public/reports/${visitId}.pdf`;
+      res.json({ success: true, url: fileUrl });
+    } catch (error) {
+      console.error('Failed to save report PDF:', error);
+      res.status(500).json({ error: 'Failed to save report PDF.' });
+    }
+  });
+
+  // Serve static PDF files from public reports folder
+  app.use('/public/reports', express.static(path.join(__dirname, 'public', 'reports')));
 
   // ============ CHAT API ENDPOINTS ============
 
