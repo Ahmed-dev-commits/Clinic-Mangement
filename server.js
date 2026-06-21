@@ -1060,6 +1060,21 @@ async function initializeDatabase() {
       )
     `);
 
+    // CommunicationLogs table for tracking notifications sent to patients
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS CommunicationLogs (
+        ID INT AUTO_INCREMENT PRIMARY KEY,
+        ReferenceID VARCHAR(50) NOT NULL,
+        Type VARCHAR(50) NOT NULL,
+        Recipient VARCHAR(50) NOT NULL,
+        Message TEXT NOT NULL,
+        Status VARCHAR(50) NOT NULL,
+        ErrorCode VARCHAR(50) NULL,
+        SentBy VARCHAR(100) NULL,
+        SentAt VARCHAR(50) NOT NULL
+      )
+    `);
+
     // ==========================================
     // DATABASE PERFORMANCE INDEXES (Phase 5)
     // ==========================================
@@ -5523,10 +5538,60 @@ app.post('/api/patient-services', async (req, res) => {
         });
       }
 
-      res.json({ success: true, data: response.data });
+      // Map gateway response codes to user-friendly messages
+      let responseData = response.data;
+      if (responseData && responseData.sms) {
+        if (responseData.sms.code === '101' || responseData.sms.code === 101) {
+          responseData.sms.response = 'Phone Number Is Invalid Cannot Send the Msg';
+        }
+      }
+
+      res.json({ success: true, data: responseData });
     } catch (error) {
       console.error('SMS sending error:', error?.response?.data || error.message);
       res.status(500).json({ error: 'Failed to send SMS message.' });
+    }
+  });
+
+  // ============ COMMUNICATION LOGS API ============
+  app.post('/api/communication-logs', async (req, res) => {
+    try {
+      const { ReferenceID, Type, Recipient, Message, Status, ErrorCode, SentBy } = req.body;
+      const referenceId = ReferenceID || req.body.referenceId;
+      const type = Type || req.body.type;
+      const recipient = Recipient || req.body.recipient;
+      const message = Message || req.body.message;
+      const status = Status || req.body.status;
+      const errorCode = ErrorCode !== undefined ? ErrorCode : req.body.errorCode;
+      const sentBy = SentBy || req.body.sentBy;
+
+      if (!referenceId || !type || !recipient || !message || !status) {
+        return res.status(400).json({ error: 'Missing required communication log fields.' });
+      }
+      const sentAt = new Date().toISOString();
+      await pool.execute(
+        `INSERT INTO CommunicationLogs (ReferenceID, Type, Recipient, Message, Status, ErrorCode, SentBy, SentAt) 
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [referenceId, type, recipient, message, status, errorCode || null, sentBy || 'System', sentAt]
+      );
+      res.json({ success: true });
+    } catch (error) {
+      console.error('Failed to create communication log:', error);
+      res.status(500).json({ error: 'Failed to create communication log.' });
+    }
+  });
+
+  app.get('/api/communication-logs/:referenceId', async (req, res) => {
+    try {
+      const { referenceId } = req.params;
+      const [rows] = await pool.query(
+        'SELECT * FROM CommunicationLogs WHERE ReferenceID = ? ORDER BY SentAt DESC',
+        [referenceId]
+      );
+      res.json(rows);
+    } catch (error) {
+      console.error('Failed to fetch communication logs:', error);
+      res.status(500).json({ error: 'Failed to fetch communication logs.' });
     }
   });
 
