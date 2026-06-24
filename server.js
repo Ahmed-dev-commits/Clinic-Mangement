@@ -187,10 +187,12 @@ const authenticateToken = async (req, res, next) => {
         const currentUserRole = String(user.role || '').trim().toLowerCase();
         console.log(`[MAINTENANCE] Checking access - User: ${user.username}, Role: "${user.role}" (normalized: "${currentUserRole}")`);
         
-        if (currentUserRole !== 'superadmin') {
+        // Allow SuperAdmin AND Admin through so they can disable maintenance mode
+        const bypassRoles = ['superadmin', 'admin'];
+        if (!bypassRoles.includes(currentUserRole)) {
           return res.status(503).json({ error: 'System is under maintenance. Please try again later.' });
         }
-        console.log(`[MAINTENANCE] ACCESS GRANTED for SuperAdmin: ${user.username}`);
+        console.log(`[MAINTENANCE] ACCESS GRANTED for ${user.role}: ${user.username}`);
       }
     } catch (dbErr) {
       // Fallback: If DB check fails, we allow the request to proceed but log the warning
@@ -1401,6 +1403,24 @@ async function initializeDatabase() {
       }
     }
     console.log('✅ Performance indexing complete');
+
+    // ============ AUTO-HEAL: Reset stuck maintenance mode on startup ============
+    // If the server was restarted while maintenance mode was accidentally left ON,
+    // this ensures production never starts in a locked-down state.
+    try {
+      const [mRows] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
+      if (mRows.length > 0) {
+        const mData = typeof mRows[0].Data === 'string' ? JSON.parse(mRows[0].Data) : mRows[0].Data;
+        if (mData && mData.isMaintenanceMode === true) {
+          mData.isMaintenanceMode = false;
+          await pool.execute("UPDATE AppSettings SET Data = ? WHERE ID = 'GLOBAL'", [JSON.stringify(mData)]);
+          console.log('🔧 AUTO-HEAL: Maintenance mode was ON — automatically reset to OFF on startup.');
+          apiCache.del('internal_maintenance_check');
+        }
+      }
+    } catch (healErr) {
+      console.warn('⚠️ AUTO-HEAL: Could not reset maintenance mode:', healErr.message);
+    }
 
     dbConnected = true;
   } catch (error) {
