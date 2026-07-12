@@ -1535,9 +1535,9 @@ app.get('/api/dashboard/stats', async (req, res) => {
     
     const { startUtc, endUtc } = getPktDayBounds(todayDateStr);
 
-    // Generate last 7 days date strings in PKT format (YYYY-MM-DD)
+    // Generate last 30 days date strings in PKT format (YYYY-MM-DD)
     const trends = [];
-    for (let i = 6; i >= 0; i--) {
+    for (let i = 29; i >= 0; i--) {
       const d = new Date(nowInPkt);
       d.setDate(nowInPkt.getDate() - i);
       const dateStr = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
@@ -1574,7 +1574,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
       pool.query("SELECT SUM(CASE WHEN PaymentStatus = 'Refunded' OR PaymentStatus = 'Cancelled' THEN 0 ELSE PaidAmount END) as total FROM LabVisits WHERE CreatedAt BETWEEN ? AND ?", [startUtc, endUtc]),
       pool.query("SELECT COUNT(*) as total FROM Prescriptions"),
       pool.query("SELECT ID, Name, Category, Quantity, LowStockThreshold FROM Stock WHERE Quantity <= LowStockThreshold AND IsDeleted = 0"),
-      // 7-Day Clinic collection trend query
+      // 30-Day Clinic collection trend query
       pool.query(`
         SELECT 
           DATE_FORMAT(CONVERT_TZ(CAST(REPLACE(SUBSTRING(CreatedAt, 1, 19), 'T', ' ') AS DATETIME), '+00:00', '+05:00'), '%Y-%m-%d') as dateStr, 
@@ -1583,7 +1583,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
         WHERE CreatedAt >= ? 
         GROUP BY dateStr
       `, [startUtcInterval]),
-      // 7-Day Lab collection trend query (using LabVisits as source of truth, CreatedAt is DATETIME, excluding Refunded/Cancelled)
+      // 30-Day Lab collection trend query (using LabVisits as source of truth, CreatedAt is DATETIME, excluding Refunded/Cancelled)
       pool.query(`
         SELECT 
           DATE_FORMAT(CONVERT_TZ(CreatedAt, '+00:00', '+05:00'), '%Y-%m-%d') as dateStr, 
@@ -1592,7 +1592,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
         WHERE CreatedAt >= ? 
         GROUP BY dateStr
       `, [startUtcInterval]),
-      // 7-Day Patient visits trend query
+      // 30-Day Patient visits trend query
       pool.query(`
         SELECT 
           DATE_FORMAT(CONVERT_TZ(CAST(REPLACE(SUBSTRING(CreatedAt, 1, 19), 'T', ' ') AS DATETIME), '+00:00', '+05:00'), '%Y-%m-%d') as dateStr, 
