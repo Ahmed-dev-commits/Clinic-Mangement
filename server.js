@@ -1530,17 +1530,16 @@ app.put('/api/settings/:id', async (req, res) => {
 app.get('/api/dashboard/stats', async (req, res) => {
   try {
     // Determine target date in PKT
-    const nowInPkt = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Karachi' }));
-    const todayDateStr = req.query.date || (nowInPkt.getFullYear() + '-' + String(nowInPkt.getMonth() + 1).padStart(2, '0') + '-' + String(nowInPkt.getDate()).padStart(2, '0'));
+    const todayDateStr = req.query.date || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Karachi' });
     
     const { startUtc, endUtc } = getPktDayBounds(todayDateStr);
 
     // Generate last 30 days date strings in PKT format (YYYY-MM-DD)
     const trends = [];
+    const baseDate = new Date();
     for (let i = 29; i >= 0; i--) {
-      const d = new Date(nowInPkt);
-      d.setDate(nowInPkt.getDate() - i);
-      const dateStr = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+      const d = new Date(baseDate.getTime() - i * 24 * 60 * 60 * 1000);
+      const dateStr = d.toLocaleDateString('en-CA', { timeZone: 'Asia/Karachi' });
       const displayDate = d.toLocaleDateString('en-US', { day: '2-digit', month: 'short', timeZone: 'Asia/Karachi' });
       trends.push({
         date: dateStr,
