@@ -468,6 +468,11 @@ async function initializeDatabase() {
       "ALTER TABLE Appointments ADD COLUMN UpdatedAt VARCHAR(50) NULL"
     ]);
 
+    // v5: PrescriptionTemplates CreatedBy
+    await runMigration(5, 'PrescriptionTemplates CreatedBy', [
+      "ALTER TABLE PrescriptionTemplates ADD COLUMN CreatedBy VARCHAR(100) DEFAULT NULL"
+    ]);
+
     console.log('✅ All migrations verified.');
 
     // Patients table
@@ -640,6 +645,123 @@ async function initializeDatabase() {
         FOREIGN KEY (PrescriptionID) REFERENCES Prescriptions(ID) ON DELETE CASCADE
       )
     `);
+
+    // PrescriptionTemplates table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS PrescriptionTemplates (
+        ID VARCHAR(50) PRIMARY KEY,
+        Name VARCHAR(255) NOT NULL,
+        Category VARCHAR(100) DEFAULT 'General',
+        Diagnosis TEXT,
+        Complaints TEXT,
+        History TEXT,
+        OnExamination TEXT,
+        Precautions TEXT,
+        TreatmentAtHome TEXT,
+        Medicines JSON,
+        LabTests JSON,
+        CreatedBy VARCHAR(100) DEFAULT NULL,
+        CreatedAt VARCHAR(50)
+      )
+    `);
+
+    // Seed built-in templates using INSERT IGNORE
+    try {
+      console.log('🌱 Seeding built-in prescription templates...');
+      const templatesToSeed = [
+        {
+          ID: 'tmpl-flu',
+          Name: 'Flu / URTI Course',
+          Category: 'Infection',
+          Diagnosis: 'URTI (Upper Respiratory Tract Infection)',
+          Complaints: 'Fever, dry cough, runny nose, body aches for 3 days.',
+          History: 'No known drug allergies.',
+          OnExamination: 'Throat congested, chest clear on auscultation.',
+          Precautions: 'Avoid cold beverages, take steam inhalation twice daily.',
+          TreatmentAtHome: 'Rest and warm liquids.',
+          Medicines: JSON.stringify([
+            { name: 'Panadol', dosage: '500mg', frequency: '1+1+1', duration: '5 Days', instructions: 'After meal' },
+            { name: 'Arinac', dosage: '1 Tab', frequency: '1+0+1', duration: '5 Days', instructions: 'After meal' },
+            { name: 'Cofcol Syrup', dosage: '2 tsp', frequency: '1+1+1', duration: '5 Days', instructions: 'After meal' }
+          ]),
+          LabTests: JSON.stringify([])
+        },
+        {
+          ID: 'tmpl-gastro',
+          Name: 'Acute Gastroenteritis (AGE)',
+          Category: 'Infection',
+          Diagnosis: 'Acute Gastroenteritis',
+          Complaints: 'Vomiting, loose motions (4-5 episodes), abdominal pain since yesterday.',
+          History: 'Gastroenteritis symptoms after eating outside food.',
+          OnExamination: 'Abdomen soft, mild generalized tenderness, hydration status fair.',
+          Precautions: 'Drink ORS after every loose stool, avoid spicy and oily food.',
+          TreatmentAtHome: 'Soft diet (khichdi, yogurt).',
+          Medicines: JSON.stringify([
+            { name: 'Flagyl', dosage: '400mg', frequency: '1+1+1', duration: '5 Days', instructions: 'After meal' },
+            { name: 'Gravinate', dosage: '50mg', frequency: '1+0+1', duration: '3 Days', instructions: 'Before meal if vomiting' },
+            { name: 'ORS Sachet', dosage: '1 sachet', frequency: 'As needed', duration: '3 Days', instructions: 'Dissolve in 1 liter clean water' }
+          ]),
+          LabTests: JSON.stringify([])
+        },
+        {
+          ID: 'tmpl-uti',
+          Name: 'UTI Course',
+          Category: 'Infection',
+          Diagnosis: 'Urinary Tract Infection (UTI)',
+          Complaints: 'Burning micturition, increased urinary frequency, mild lower abdominal pain.',
+          History: 'No history of recurrent UTIs.',
+          OnExamination: 'Suprapubic tenderness present.',
+          Precautions: 'Drink plenty of water (10-12 glasses daily), maintain hygiene.',
+          TreatmentAtHome: 'Complete the antibiotic course.',
+          Medicines: JSON.stringify([
+            { name: 'Ciproxin', dosage: '500mg', frequency: '1+0+1', duration: '5 Days', instructions: 'After meal' },
+            { name: 'Cranmax Sachet', dosage: '1 sachet', frequency: '1+0+1', duration: '10 Days', instructions: 'Dissolve in a glass of water' }
+          ]),
+          LabTests: JSON.stringify(['Urine R/E', 'Urine C/S'])
+        },
+        {
+          ID: 'tmpl-hypertension',
+          Name: 'Hypertension Control',
+          Category: 'Chronic',
+          Diagnosis: 'Essential Hypertension',
+          Complaints: 'Mild headache, dizziness, recorded BP of 150/95 mmHg.',
+          History: 'Family history of hypertension.',
+          OnExamination: 'BP: 155/92 mmHg, pulse 78/min.',
+          Precautions: 'Salt restricted diet, walk 30 minutes daily.',
+          TreatmentAtHome: 'Maintain daily BP charting book.',
+          Medicines: JSON.stringify([
+            { name: 'Loprin', dosage: '75mg', frequency: '0+1+0', duration: 'Chronic', instructions: 'After lunch' },
+            { name: 'Concor', dosage: '2.5mg', frequency: '1+0+0', duration: 'Chronic', instructions: 'Empty stomach in morning' }
+          ]),
+          LabTests: JSON.stringify(['Serum Creatinine', 'Lipid Profile', 'ECG'])
+        }
+      ];
+
+      for (const t of templatesToSeed) {
+        const query = `
+          INSERT IGNORE INTO PrescriptionTemplates (ID, Name, Category, Diagnosis, Complaints, History, OnExamination, Precautions, TreatmentAtHome, Medicines, LabTests, CreatedAt)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `;
+        const params = [
+          t.ID,
+          t.Name,
+          t.Category,
+          t.Diagnosis,
+          t.Complaints,
+          t.History,
+          t.OnExamination,
+          t.Precautions,
+          t.TreatmentAtHome,
+          t.Medicines,
+          t.LabTests,
+          new Date().toISOString()
+        ];
+        await pool.query(query, params);
+      }
+      console.log('✅ Seeding complete.');
+    } catch (err) {
+      console.error('❌ Failed to seed templates:', err.message);
+    }
 
     // Visits table
     await pool.execute(`
@@ -3440,6 +3562,113 @@ app.delete('/api/prescriptions/:id', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+
+// ============ PRESCRIPTION TEMPLATES API ============
+
+// Get all templates
+app.get('/api/prescription-templates', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM PrescriptionTemplates ORDER BY CreatedAt DESC');
+    res.json(rows);
+  } catch (error) {
+    console.error('❌ Error fetching prescription templates:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create/Update template
+app.post('/api/prescription-templates', async (req, res) => {
+  try {
+    const id = req.body.ID || req.body.id;
+    const name = req.body.Name || req.body.name;
+    const category = req.body.Category || req.body.category;
+    const diagnosis = req.body.Diagnosis || req.body.diagnosis;
+    const complaints = req.body.Complaints || req.body.complaints;
+    const history = req.body.History || req.body.history;
+    const onExamination = req.body.OnExamination || req.body.onExamination;
+    const precautions = req.body.Precautions || req.body.precautions;
+    const treatmentAtHome = req.body.TreatmentAtHome || req.body.treatmentAtHome;
+    const medicines = req.body.Medicines || req.body.medicines;
+    const labTests = req.body.LabTests || req.body.labTests;
+    const createdBy = req.body.CreatedBy || req.body.createdBy || null;
+
+    if (!name) {
+      return res.status(400).json({ error: 'Template name is required' });
+    }
+
+    const templateId = id || `tmpl-custom-${Date.now()}`;
+    const createdAt = new Date().toISOString();
+
+    // Check if exists
+    const [existing] = await pool.query('SELECT ID FROM PrescriptionTemplates WHERE ID = ?', [templateId]);
+
+    if (existing.length > 0) {
+      // Update template
+      const query = `
+        UPDATE PrescriptionTemplates
+        SET Name = ?, Category = ?, Diagnosis = ?, Complaints = ?, History = ?, OnExamination = ?, Precautions = ?, TreatmentAtHome = ?, Medicines = ?, LabTests = ?
+        WHERE ID = ?
+      `;
+      const params = [
+        name,
+        category || 'General',
+        diagnosis || '',
+        complaints || '',
+        history || '',
+        onExamination || '',
+        precautions || '',
+        treatmentAtHome || '',
+        JSON.stringify(medicines || []),
+        JSON.stringify(labTests || []),
+        templateId
+      ];
+      await pool.query(query, params);
+    } else {
+      // Insert template
+      const query = `
+        INSERT INTO PrescriptionTemplates (ID, Name, Category, Diagnosis, Complaints, History, OnExamination, Precautions, TreatmentAtHome, Medicines, LabTests, CreatedBy, CreatedAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `;
+      const params = [
+        templateId,
+        name,
+        category || 'General',
+        diagnosis || '',
+        complaints || '',
+        history || '',
+        onExamination || '',
+        precautions || '',
+        treatmentAtHome || '',
+        JSON.stringify(medicines || []),
+        JSON.stringify(labTests || []),
+        createdBy,
+        createdAt
+      ];
+      await pool.query(query, params);
+    }
+
+    console.log('✅ Prescription template saved successfully:', templateId);
+    res.json({ success: true, id: templateId });
+  } catch (error) {
+    console.error('❌ Error saving prescription template:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete template
+app.delete('/api/prescription-templates/:id', async (req, res) => {
+  try {
+    const templateId = req.params.id;
+    await pool.query('DELETE FROM PrescriptionTemplates WHERE ID = ?', [templateId]);
+    console.log('✅ Prescription template deleted successfully:', templateId);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('❌ Error deleting prescription template:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 
 
 // ============ CLINICAL MEDICINES API (Master List) ============
