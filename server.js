@@ -6159,19 +6159,34 @@ app.post('/api/patient-services', async (req, res) => {
         targetPatientId = lrCheck[0].LabPatientID;
       }
 
-      // 2. Fetch LabVisits and LabPatients data
-      const [visitRows] = await pool.execute(`
+      // 2. Fetch LabVisits and LabPatients data safely
+      let [visitRows] = await pool.execute(`
         SELECT v.*, p.Name as PatientName, p.Phone, p.Age, p.AgeMonths, p.AgeDays, p.Gender 
         FROM LabVisits v 
         LEFT JOIN LabPatients p ON v.LabPatientID = p.ID
-        WHERE v.ID = ? OR v.LabPatientID = ? OR v.LabPatientID = ? LIMIT 1
-      `, [targetVisitId, targetVisitId, targetPatientId]);
+        WHERE v.ID = ? LIMIT 1
+      `, [targetVisitId]);
+      
+      if (visitRows.length === 0 && targetPatientId) {
+        [visitRows] = await pool.execute(`
+          SELECT v.*, p.Name as PatientName, p.Phone, p.Age, p.AgeMonths, p.AgeDays, p.Gender 
+          FROM LabVisits v 
+          LEFT JOIN LabPatients p ON v.LabPatientID = p.ID
+          WHERE v.LabPatientID = ? ORDER BY v.CreatedAt DESC LIMIT 1
+        `, [targetPatientId]);
+      }
       
       const visitData = visitRows[0] || {};
       const actualPatientId = visitData.LabPatientID || targetPatientId;
       
-      // 3. Fetch LabResults data
-      const [labRows] = await pool.execute('SELECT * FROM LabResults WHERE ID = ? OR LabPatientID = ? LIMIT 1', [visitId, actualPatientId]);
+      // 3. Fetch LabResults data safely (avoiding wrong random results on OR conditions)
+      let [labRows] = await pool.execute('SELECT * FROM LabResults WHERE ID = ? LIMIT 1', [visitId]);
+      
+      if (labRows.length === 0) {
+        // Fallback to getting the latest result for this patient if ID was actually a Patient ID
+        [labRows] = await pool.execute('SELECT * FROM LabResults WHERE LabPatientID = ? ORDER BY CreatedAt DESC LIMIT 1', [actualPatientId]);
+      }
+      
       const labData = labRows[0] || {};
       
       if (!visitData.ID && !labData.ID) {
@@ -6232,7 +6247,7 @@ app.post('/api/patient-services', async (req, res) => {
         const currentTime = new Date().getTime();
         const hoursElapsed = (currentTime - reportTime) / (1000 * 60 * 60);
         
-        if (hoursElapsed > 1) {
+        if (hoursElapsed > 3) {
           publicRes.isExpired = true;
           publicRes.isLocked = true; // Lock it to prevent downloading tests
         }
