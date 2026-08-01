@@ -150,8 +150,9 @@ const authenticateToken = async (req, res, next) => {
     // When mounted at '/api', Express strips that prefix — req.path is RELATIVE
     // e.g. POST /api/users/login becomes req.path === '/users/login'
     const openPaths = ['/users/login', '/health', '/status'];
-    // Also allow settings (needed for login page branding before auth)
-    if (openPaths.includes(req.path) || req.path.startsWith('/settings/')) {
+    // Allow settings (needed for login page branding before auth)
+    // Allow public routes (like patient report tracking) - Use originalUrl to be bulletproof against Hostinger's proxy
+    if (openPaths.includes(req.path) || req.path.startsWith('/settings/') || req.originalUrl.includes('/public/')) {
       return next();
     }
 
@@ -2946,6 +2947,58 @@ app.post('/api/lab-result-history', async (req, res) => {
   }
 });
 
+app.post('/api/lab-result-history/recent-tests', async (req, res) => {
+  try {
+    const { patientId, testNames } = req.body;
+    if (!patientId || !Array.isArray(testNames) || testNames.length === 0) {
+      return res.json({});
+    }
+
+    const [rows] = await pool.execute(
+      'SELECT TestsWithResults, FinalizedAt, CreatedAt FROM labresulthistory WHERE LabPatientID = ? ORDER BY CreatedAt DESC',
+      [patientId]
+    );
+
+    const results = {};
+    for (const testName of testNames) {
+      results[testName] = [];
+    }
+
+    for (const row of rows) {
+      let pastTests = [];
+      try {
+        pastTests = typeof row.TestsWithResults === 'string' ? JSON.parse(row.TestsWithResults) : (row.TestsWithResults || []);
+      } catch (e) {
+        pastTests = [];
+      }
+      
+      const dateStr = row.FinalizedAt || row.CreatedAt;
+      
+      for (const testName of testNames) {
+        if (results[testName].length >= 3) continue;
+        
+        const match = pastTests.find(pt => pt.name === testName || pt.testName === testName);
+        const val = match?.value || match?.resultValue;
+        if (val !== undefined && val !== null && val !== '') {
+          results[testName].push({
+            value: String(val),
+            date: dateStr
+          });
+        }
+      }
+      
+      if (testNames.every(name => results[name].length >= 3)) {
+        break;
+      }
+    }
+
+    res.json(results);
+  } catch (error) {
+    console.error('Error fetching recent tests:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/lab-result-history/:labPatientId', async (req, res) => {
   try {
     const { labPatientId } = req.params;
@@ -5512,16 +5565,32 @@ app.post('/api/patient-services', async (req, res) => {
   // Favicon Handler
   app.get('/favicon.ico', (req, res) => res.status(204).end());
 
+  app.get('/debug-paths', (req, res) => {
+    res.json({
+      serverDirectory: __dirname,
+      checkedPaths: possiblePaths,
+      finalSelectedPath: publicHtmlDistPath,
+      finalIndexPath: publicHtmlIndexPath,
+      fileExists: fs.existsSync(publicHtmlIndexPath),
+      frontendEnv: process.env.FRONTEND_PATH || 'Not Set'
+    });
+  });
+
   // ============ SERVE REACT FRONTEND ============
   // This hybrid logic ensures the frontend works regardless of whether backend is 
   // in the same folder as the build, or in a sibling nodejs/public_html structure.
   const possiblePaths = [
-    path.join(__dirname, '..', 'public_html', 'dist'),          // Sibling public_html (Previous structure)
-    path.join(__dirname, 'dist'),                              // Local dist folder (Flash/NodeJS folder)
-    path.join(__dirname, '..', 'public_html'),                 // Sibling public_html root
-    path.join(__dirname, 'build'),                             // Local build folder
-    __dirname                                                  // Flat in current folder
-  ];
+    process.env.FRONTEND_PATH || '',
+    "/home/u345939801/public_html",
+    "/home/u345939801/domains/staging.salamaatclinic.com/public_html",
+    "/home/u345939801/domains/staging.salamaatclinic.com/public_html/dist",
+    path.resolve(__dirname, "..", "public_html"),
+    "/home/u345939801/public_html/dist",
+    path.resolve(__dirname, "..", "public_html", "dist"),
+    path.resolve(__dirname, "public_html"),
+    path.resolve(__dirname, "dist"),
+    path.resolve(__dirname, ".")
+  ].filter(Boolean);
 
   let publicHtmlDistPath = path.join(__dirname, '..', 'public_html', 'dist'); // Default fallback
   let publicHtmlIndexPath = path.join(publicHtmlDistPath, 'index.html');
@@ -6076,6 +6145,114 @@ app.post('/api/patient-services', async (req, res) => {
     }
   });
 
+  // --- PUBLIC API ROUTES ---
+  app.get('/api/public/track-report/:visitId', async (req, res) => {
+    try {
+      const { visitId } = req.params;
+      
+      // 1. Try to find the Patient ID from either LabVisits or LabResults
+      let targetPatientId = visitId;
+      let targetVisitId = visitId;
+      
+      const [lrCheck] = await pool.execute('SELECT LabPatientID FROM LabResults WHERE ID = ? LIMIT 1', [visitId]);
+      if (lrCheck.length > 0) {
+        targetPatientId = lrCheck[0].LabPatientID;
+      }
+
+      // 2. Fetch LabVisits and LabPatients data
+      const [visitRows] = await pool.execute(`
+        SELECT v.*, p.Name as PatientName, p.Phone, p.Age, p.AgeMonths, p.AgeDays, p.Gender 
+        FROM LabVisits v 
+        LEFT JOIN LabPatients p ON v.LabPatientID = p.ID
+        WHERE v.ID = ? OR v.LabPatientID = ? OR v.LabPatientID = ? LIMIT 1
+      `, [targetVisitId, targetVisitId, targetPatientId]);
+      
+      const visitData = visitRows[0] || {};
+      const actualPatientId = visitData.LabPatientID || targetPatientId;
+      
+      // 3. Fetch LabResults data
+      const [labRows] = await pool.execute('SELECT * FROM LabResults WHERE ID = ? OR LabPatientID = ? LIMIT 1', [visitId, actualPatientId]);
+      const labData = labRows[0] || {};
+      
+      if (!visitData.ID && !labData.ID) {
+        return res.status(404).json({ error: 'Report not found' });
+      }
+      
+      // 4. Calculate Payment & Status
+      const totalAmt = Number(visitData.TotalAmount || 0);
+      const discount = Number(visitData.DiscountAmount || 0);
+      const paid = Number(visitData.PaidAmount || 0);
+      
+      const balance = totalAmt - discount - paid;
+      const isPaid = visitData.PaymentStatus === 'Paid' || balance <= 0;
+      
+      const status = labData.ResultStatus || labData.Status || visitData.Status || 'Pending';
+      const isFinalized = status === 'Finalized' || status === 'Completed' || status === 'Ready';
+      
+      // If we don't have a patient name from visits, we might have it in LabResults
+      let patientName = visitData.PatientName || labData.PatientName;
+      if (!patientName) {
+         // Fallback query if PatientName was missing but we have LabPatientID
+         const [pRows] = await pool.execute('SELECT Name, Age, AgeMonths, AgeDays, Gender, Phone FROM LabPatients WHERE ID = ? LIMIT 1', [actualPatientId]);
+         if (pRows.length > 0) {
+           patientName = pRows[0].Name;
+           visitData.Age = pRows[0].Age;
+           visitData.AgeMonths = pRows[0].AgeMonths;
+           visitData.AgeDays = pRows[0].AgeDays;
+           visitData.Gender = pRows[0].Gender;
+           visitData.Phone = pRows[0].Phone;
+         } else {
+           patientName = 'Unknown Patient';
+         }
+      }
+
+      const publicRes = {
+        patientName: patientName,
+        labPatientId: actualPatientId,
+        date: labData.TestDate || labData.ReportDate || visitData.VisitDate || visitData.CreatedAt,
+        status: status,
+        paymentStatus: visitData.PaymentStatus || 'Unpaid',
+        isLocked: !isPaid || !isFinalized,
+        totalAmount: totalAmt,
+        paidAmount: paid,
+        balance: Math.max(0, balance),
+        age: visitData.Age || labData.PatientAge || 0,
+        ageMonths: visitData.AgeMonths || 0,
+        ageDays: visitData.AgeDays || 0,
+        gender: visitData.Gender || 'Other',
+        phone: visitData.Phone || 'N/A',
+        technician: labData.Technician || 'System',
+        referredBy: labData.ReferredBy || 'Self',
+        isExpired: false,
+      };
+      
+      // Calculate Expiry
+      if (isFinalized) {
+        const reportTime = new Date(labData.ReportDate || labData.TestDate || visitData.VisitDate || visitData.CreatedAt).getTime();
+        const currentTime = new Date().getTime();
+        const hoursElapsed = (currentTime - reportTime) / (1000 * 60 * 60);
+        
+        if (hoursElapsed > 1) {
+          publicRes.isExpired = true;
+          publicRes.isLocked = true; // Lock it to prevent downloading tests
+        }
+      }
+      
+      if (!publicRes.isLocked && !publicRes.isExpired) {
+        try {
+          publicRes.tests = typeof labData.Tests === 'string' ? JSON.parse(labData.Tests) : labData.Tests;
+        } catch (e) {
+          publicRes.tests = [];
+        }
+      }
+      
+      res.json(publicRes);
+    } catch (error) {
+      console.error('Public track API error:', error);
+      res.status(500).json({ error: 'Server error' });
+    }
+  });
+
   // 1. Serve Static Assets (JS, CSS, Images, Fonts) with long-term caching
   // Since Vite uses content hashing, it's safe to cache these indefinitely.
   app.use('/assets', express.static(path.join(publicHtmlDistPath, 'assets'), {
@@ -6116,6 +6293,7 @@ app.post('/api/patient-services', async (req, res) => {
   const http = require('http');
   const { Server } = require('socket.io');
   const httpServer = http.createServer(app);
+  httpServer.setMaxListeners(50); // Prevent Node warning during Socket.io reconnect storms
   const io = new Server(httpServer, {
     cors: {
       origin: "*",
@@ -6336,13 +6514,18 @@ app.post('/api/patient-services', async (req, res) => {
 
     // --- START SERVER ---
     try {
-      const serverInstance = httpServer.listen(PORT, '0.0.0.0', () => {
+      const isNumericPort = !isNaN(PORT) && !isNaN(parseFloat(PORT));
+      const listenCallback = () => {
         console.log('-------------------------------------------');
         console.log('✅ SERVER ONLINE');
-        console.log(`🏥 Hospital Management Backend: http://0.0.0.0:${PORT}`);
+        console.log(`🏥 Hospital Management Backend: ${isNumericPort ? `http://0.0.0.0:${PORT}` : PORT}`);
         console.log(`💬 Real-time Chat: Enabled (Socket.io)`);
         console.log('-------------------------------------------');
-      });
+      };
+
+      const serverInstance = isNumericPort
+        ? httpServer.listen(Number(PORT), '0.0.0.0', listenCallback)
+        : httpServer.listen(PORT, listenCallback);
 
       serverInstance.on('error', (err) => {
         if (err.code === 'EADDRINUSE') {
@@ -6353,13 +6536,20 @@ app.post('/api/patient-services', async (req, res) => {
         }
       });
 
-      // Single Graceful Shutdown Handler
+      // Single Graceful Shutdown Handler (with debounce for Windows)
+      let isShuttingDown = false;
+      process.removeAllListeners('SIGINT');
       process.on('SIGINT', () => {
+        if (isShuttingDown) return;
+        isShuttingDown = true;
         console.log('\n🛑 Shutdown signal received. Closing server...');
         serverInstance.close(() => {
           console.log('👋 Server stopped.');
           process.exit(0);
         });
+        
+        // Force exit after 3 seconds if graceful shutdown hangs
+        setTimeout(() => process.exit(0), 3000);
       });
     } catch (error) {
       console.error('🔥 CRITICAL ERROR during startup:', error);
