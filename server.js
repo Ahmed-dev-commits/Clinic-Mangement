@@ -2977,7 +2977,7 @@ app.post('/api/lab-result-history/recent-tests', async (req, res) => {
       const dateStr = row.FinalizedAt || row.CreatedAt;
       
       for (const testName of testNames) {
-        if (results[testName].length >= 3) continue;
+        if (results[testName].length >= 2) continue;
         
         const match = pastTests.find(pt => pt.name === testName || pt.testName === testName);
         const val = match?.value || match?.resultValue;
@@ -2989,7 +2989,7 @@ app.post('/api/lab-result-history/recent-tests', async (req, res) => {
         }
       }
       
-      if (testNames.every(name => results[name].length >= 3)) {
+      if (testNames.every(name => results[name].length >= 2)) {
         break;
       }
     }
