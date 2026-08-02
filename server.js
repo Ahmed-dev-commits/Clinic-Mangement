@@ -1381,6 +1381,7 @@ async function initializeDatabase() {
         phone: '+91 98765 43210',
         email: 'care@salamaat.com',
         logo: null,
+        reportExpiryHours: 3,
         isChatRestricted: false,
         pdfSettings: {
           primaryColor: '#1a56db',
@@ -1573,6 +1574,7 @@ app.get('/api/settings/:id', cacheMiddleware, async (req, res) => {
           phone: '+91 98765 43210',
           email: 'care@salamaat.com',
           logo: null,
+          reportExpiryHours: 3,
           pdfSettings: {
             primaryColor: '#1a56db',
             secondaryColor: '#64748b',
@@ -6241,15 +6243,43 @@ app.post('/api/patient-services', async (req, res) => {
         isExpired: false,
       };
       
+      // Fetch global settings for reportExpiryHours
+      let globalData = {};
+      try {
+        const [gRows] = await pool.execute('SELECT Data FROM AppSettings WHERE ID = "GLOBAL" LIMIT 1');
+        if (gRows.length > 0) {
+          globalData = typeof gRows[0].Data === 'string' ? JSON.parse(gRows[0].Data) : (gRows[0].Data || {});
+        }
+      } catch (e) {
+        console.error("Error loading global settings in track-report:", e);
+      }
+
       // Calculate Expiry
-      if (isFinalized) {
-        const reportTime = new Date(labData.ReportDate || labData.TestDate || visitData.VisitDate || visitData.CreatedAt).getTime();
-        const currentTime = new Date().getTime();
-        const hoursElapsed = (currentTime - reportTime) / (1000 * 60 * 60);
-        
-        if (hoursElapsed > 3) {
-          publicRes.isExpired = true;
-          publicRes.isLocked = true; // Lock it to prevent downloading tests
+      const expiryHours = Number(globalData.reportExpiryHours) || 3;
+      publicRes.expiryHours = expiryHours;
+      
+      const normalizedStatus = String(status || '').trim().toLowerCase();
+      const isStatusFinal = ['finalized', 'completed', 'ready', 'delivered'].includes(normalizedStatus);
+
+      if (isStatusFinal) {
+        const dateRaw = labData.ReportDate || labData.TestDate || visitData.VisitDate || visitData.CreatedAt;
+        let reportTime = NaN;
+        if (dateRaw) {
+          const parsed = new Date(dateRaw);
+          reportTime = parsed.getTime();
+          if (isNaN(reportTime) && typeof dateRaw === 'string') {
+            const fallbackParsed = new Date(dateRaw.replace(' ', 'T'));
+            reportTime = fallbackParsed.getTime();
+          }
+        }
+
+        const currentTime = Date.now();
+        if (!isNaN(reportTime)) {
+          const hoursElapsed = (currentTime - reportTime) / (1000 * 60 * 60);
+          if (hoursElapsed > expiryHours) {
+            publicRes.isExpired = true;
+            publicRes.isLocked = true; // Lock it to prevent downloading tests
+          }
         }
       }
       
