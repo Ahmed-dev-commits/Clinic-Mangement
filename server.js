@@ -2949,6 +2949,30 @@ app.post('/api/lab-result-history', async (req, res) => {
   }
 });
 
+app.put('/api/lab-result-history/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { TestsWithResults, Technician, ResultStatus } = req.body;
+
+    await pool.execute(
+      `UPDATE labresulthistory 
+       SET TestsWithResults = ?, Technician = ?, ResultStatus = ?
+       WHERE ID = ?`,
+      [
+        typeof TestsWithResults === 'string' ? TestsWithResults : JSON.stringify(TestsWithResults),
+        Technician,
+        ResultStatus || 'Finalized',
+        id
+      ]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating lab result history:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/lab-result-history/recent-tests', async (req, res) => {
   try {
     const { patientId, testNames } = req.body;
