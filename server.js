@@ -252,7 +252,7 @@ async function createPool() {
   const dbConfig = {
     connectTimeout: 30000, // 30s to establish connection
     waitForConnections: true,
-    connectionLimit: process.env.DB_CONNECTION_LIMIT || 10,
+    connectionLimit: process.env.DB_CONNECTION_LIMIT || 5,
     queueLimit: 0,
     enableKeepAlive: true,
     keepAliveInitialDelay: 10000, // 10s delay
@@ -6605,21 +6605,30 @@ app.post('/api/patient-services', async (req, res) => {
         }
       });
 
-      // Single Graceful Shutdown Handler (with debounce for Windows)
+      // Graceful Shutdown Handlers for Hostinger (SIGTERM & SIGINT)
       let isShuttingDown = false;
-      process.removeAllListeners('SIGINT');
-      process.on('SIGINT', () => {
+      const gracefulShutdown = (signal) => {
         if (isShuttingDown) return;
         isShuttingDown = true;
-        console.log('\n🛑 Shutdown signal received. Closing server...');
-        serverInstance.close(() => {
-          console.log('👋 Server stopped.');
+        console.log(`\n🛑 ${signal} received. Closing server & database pool...`);
+        
+        serverInstance.close(async () => {
+          console.log('👋 HTTP server closed.');
+          try {
+            if (pool) await pool.end();
+            console.log('🔌 Database connection pool closed.');
+          } catch (e) {}
           process.exit(0);
         });
         
         // Force exit after 3 seconds if graceful shutdown hangs
         setTimeout(() => process.exit(0), 3000);
-      });
+      };
+
+      process.removeAllListeners('SIGINT');
+      process.removeAllListeners('SIGTERM');
+      process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+      process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
     } catch (error) {
       console.error('🔥 CRITICAL ERROR during startup:', error);
       process.exit(1);
