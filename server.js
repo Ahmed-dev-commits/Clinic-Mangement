@@ -288,6 +288,20 @@ async function createPool() {
     });
   }
 
+  // Auto-verify PatientAccessLogs table
+  try {
+    pool.query(`
+      CREATE TABLE IF NOT EXISTS PatientAccessLogs (
+        ID INT AUTO_INCREMENT PRIMARY KEY,
+        VisitID VARCHAR(100) NOT NULL,
+        Action VARCHAR(50) NOT NULL,
+        CreatedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+        IPAddress VARCHAR(50),
+        INDEX idx_visit (VisitID)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    `).catch(() => {});
+  } catch (e) {}
+
   // --- POOL EVENT LOGGING & RESILIENCE ---
   pool.on('connection', (connection) => {
     console.log('📡 New database connection established');
@@ -3032,7 +3046,22 @@ app.get('/api/lab-result-history/:labPatientId', async (req, res) => {
       'SELECT * FROM labresulthistory WHERE LabPatientID = ? ORDER BY CreatedAt DESC',
       [labPatientId]
     );
-    res.json(rows.map(convertRowDates));
+    
+    const historyData = rows.map(convertRowDates);
+    for (const record of historyData) {
+      try {
+        const targetId = record.ID || record.LabReportID;
+        const [logs] = await pool.execute(
+          'SELECT Action, CreatedAt FROM PatientAccessLogs WHERE VisitID = ? OR VisitID = ? ORDER BY CreatedAt ASC',
+          [targetId, record.LabPatientID]
+        );
+        record.accessLogs = logs.map(convertRowDates);
+      } catch (e) {
+        record.accessLogs = [];
+      }
+    }
+
+    res.json(historyData);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -4397,7 +4426,7 @@ app.post('/api/patient-services', async (req, res) => {
       // Legacy behavior for fetching patient specific visits without pagination limits
       if (labPatientId && !req.query.page && !req.query.limit && !search && !recent24h && !fromDate && !toDate) {
         const [rows] = await pool.query(
-          `SELECT v.*, (SELECT COALESCE(ABS(SUM(AmountPaid)), 0) FROM LabFeesLedger WHERE VisitID = v.ID AND AmountPaid < 0) as RefundedAmount, p.Name as PatientName, p.GuardianName, p.Age, p.Gender, p.Phone FROM LabVisits v JOIN LabPatients p ON v.LabPatientID = p.ID ${whereClause} ORDER BY v.CreatedAt DESC`,
+          `SELECT v.*, (SELECT COALESCE(ABS(SUM(AmountPaid)), 0) FROM LabFeesLedger WHERE VisitID = v.ID AND AmountPaid < 0) as RefundedAmount, (SELECT Notes FROM LabFeesLedger WHERE VisitID = v.ID AND Notes LIKE '%Waived Off%' ORDER BY PaymentDate DESC LIMIT 1) as WaivedOffReason, p.Name as PatientName, p.GuardianName, p.Age, p.Gender, p.Phone FROM LabVisits v JOIN LabPatients p ON v.LabPatientID = p.ID ${whereClause} ORDER BY v.CreatedAt DESC`,
           queryParams
         );
         return res.json(rows.map(convertRowDates));
@@ -4419,7 +4448,7 @@ app.post('/api/patient-services', async (req, res) => {
       const total = countResult[0].total;
 
       // 2. Fetch paginated data
-      const columns = 'v.ID, v.LabPatientID, v.VisitDate, v.Status, v.TotalAmount, v.DiscountAmount, v.PaidAmount, v.PaymentStatus, v.CreatedAt, v.SelectedTests, v.CreatedBy, (SELECT COALESCE(ABS(SUM(AmountPaid)), 0) FROM LabFeesLedger WHERE VisitID = v.ID AND AmountPaid < 0) as RefundedAmount';
+      const columns = "v.ID, v.LabPatientID, v.VisitDate, v.Status, v.TotalAmount, v.DiscountAmount, v.PaidAmount, v.PaymentStatus, v.CreatedAt, v.SelectedTests, v.CreatedBy, (SELECT COALESCE(ABS(SUM(AmountPaid)), 0) FROM LabFeesLedger WHERE VisitID = v.ID AND AmountPaid < 0) as RefundedAmount, (SELECT Notes FROM LabFeesLedger WHERE VisitID = v.ID AND Notes LIKE '%Waived Off%' ORDER BY PaymentDate DESC LIMIT 1) as WaivedOffReason";
       const dataQuery = `
       SELECT ${columns}, p.Name as PatientName, p.GuardianName, p.Age, p.Gender, p.Phone 
       FROM LabVisits v 
@@ -4534,8 +4563,8 @@ app.post('/api/patient-services', async (req, res) => {
         [newDiscount, newPaid, paymentStatus, visitId]
       );
 
-      // 4. Create ledger entry if some money actually changed hands
-      if (Number(amountPaid) > 0) {
+      // 4. Create ledger entry if some money actually changed hands or a discount/waiver was applied
+      if (Number(amountPaid) > 0 || Number(discountAmount) > 0 || (notes && notes.toLowerCase().includes('waived off'))) {
         const paymentId = `LPMT-${Date.now().toString(36).toUpperCase()}`;
         await pool.query(
           'INSERT INTO LabFeesLedger (ID, LabPatientID, VisitID, AmountPaid, PaymentMethod, Notes, PaymentDate) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -6172,9 +6201,50 @@ app.post('/api/patient-services', async (req, res) => {
   });
 
   // --- PUBLIC API ROUTES ---
+  app.post('/api/public/track-event', async (req, res) => {
+    try {
+      const { visitId, action } = req.body;
+      if (!visitId || !action) {
+        return res.status(400).json({ error: 'Missing visitId or action' });
+      }
+      
+      const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString();
+      await pool.execute(
+        'INSERT INTO PatientAccessLogs (VisitID, Action, CreatedAt, IPAddress) VALUES (?, ?, NOW(), ?)',
+        [visitId, String(action).toUpperCase(), ip]
+      );
+      res.json({ success: true });
+    } catch (e) {
+      console.error('Error logging patient access event:', e);
+      res.status(500).json({ error: 'Failed to log event' });
+    }
+  });
+
+  app.get('/api/public/track-logs/:visitId', async (req, res) => {
+    try {
+      const { visitId } = req.params;
+      const [logs] = await pool.execute(
+        'SELECT Action, CreatedAt, IPAddress FROM PatientAccessLogs WHERE VisitID = ? ORDER BY CreatedAt DESC',
+        [visitId]
+      );
+      res.json({ success: true, logs: logs.map(convertRowDates) });
+    } catch (e) {
+      res.status(500).json({ error: e.message, logs: [] });
+    }
+  });
+
   app.get('/api/public/track-report/:visitId', async (req, res) => {
     try {
       const { visitId } = req.params;
+
+      // Auto-log SCANNED event
+      try {
+        const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString();
+        await pool.execute(
+          'INSERT INTO PatientAccessLogs (VisitID, Action, CreatedAt, IPAddress) VALUES (?, "SCANNED", NOW(), ?)',
+          [visitId, ip]
+        );
+      } catch (logErr) {}
       
       // 1. Try to find the Patient ID from either LabVisits or LabResults
       let targetPatientId = visitId;
@@ -6187,7 +6257,8 @@ app.post('/api/patient-services', async (req, res) => {
 
       // 2. Fetch LabVisits and LabPatients data safely
       let [visitRows] = await pool.execute(`
-        SELECT v.*, p.Name as PatientName, p.Phone, p.Age, p.AgeMonths, p.AgeDays, p.Gender 
+        SELECT v.*, p.Name as PatientName, p.Phone, p.Age, p.AgeMonths, p.AgeDays, p.Gender,
+        (SELECT Notes FROM LabFeesLedger WHERE VisitID = v.ID AND Notes LIKE '%Waived Off%' ORDER BY PaymentDate DESC LIMIT 1) as WaivedOffReason
         FROM LabVisits v 
         LEFT JOIN LabPatients p ON v.LabPatientID = p.ID
         WHERE v.ID = ? LIMIT 1
@@ -6195,7 +6266,8 @@ app.post('/api/patient-services', async (req, res) => {
       
       if (visitRows.length === 0 && targetPatientId) {
         [visitRows] = await pool.execute(`
-          SELECT v.*, p.Name as PatientName, p.Phone, p.Age, p.AgeMonths, p.AgeDays, p.Gender 
+          SELECT v.*, p.Name as PatientName, p.Phone, p.Age, p.AgeMonths, p.AgeDays, p.Gender,
+          (SELECT Notes FROM LabFeesLedger WHERE VisitID = v.ID AND Notes LIKE '%Waived Off%' ORDER BY PaymentDate DESC LIMIT 1) as WaivedOffReason
           FROM LabVisits v 
           LEFT JOIN LabPatients p ON v.LabPatientID = p.ID
           WHERE v.LabPatientID = ? ORDER BY v.CreatedAt DESC LIMIT 1
@@ -6252,7 +6324,8 @@ app.post('/api/patient-services', async (req, res) => {
         labPatientId: actualPatientId,
         date: labData.TestDate || labData.ReportDate || visitData.VisitDate || visitData.CreatedAt,
         status: status,
-        paymentStatus: visitData.PaymentStatus || 'Unpaid',
+        paymentStatus: visitData.WaivedOffReason ? 'Waived Off' : (visitData.PaymentStatus || 'Unpaid'),
+        waivedOffReason: visitData.WaivedOffReason || null,
         isLocked: !isPaid || !isFinalized,
         totalAmount: totalAmt,
         paidAmount: paid,
