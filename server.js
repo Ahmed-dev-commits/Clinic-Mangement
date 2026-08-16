@@ -2989,45 +2989,137 @@ app.put('/api/lab-result-history/:id', async (req, res) => {
 
 app.post('/api/lab-result-history/recent-tests', async (req, res) => {
   try {
-    const { patientId, testNames } = req.body;
+    const patientId = req.body.patientId || req.body.LabPatientID || req.body.labPatientId || req.body.PatientID;
+    const testNames = req.body.testNames;
     if (!patientId || !Array.isArray(testNames) || testNames.length === 0) {
       return res.json({});
     }
 
-    const [rows] = await pool.execute(
-      'SELECT TestsWithResults, FinalizedAt, CreatedAt FROM labresulthistory WHERE LabPatientID = ? ORDER BY CreatedAt DESC',
-      [patientId]
-    );
+    const cleanPid = String(patientId).replace(/^(LPAT-|PAT-)/i, '').trim();
+    const pidPattern = `%${cleanPid}%`;
 
+    // 1. Fetch records from LabResults table
+    let labResultsRows = [];
+    try {
+      const [rows] = await pool.execute(
+        'SELECT ID, Tests, ReportDate, TestDate, CreatedAt FROM LabResults WHERE (LabPatientID = ? OR LabPatientID LIKE ?) AND (IsDeleted IS NULL OR IsDeleted = 0) ORDER BY CreatedAt DESC',
+        [patientId, pidPattern]
+      );
+      labResultsRows = rows;
+    } catch (e) {
+      console.warn('Could not query LabResults for recent-tests:', e.message);
+    }
+
+    // 2. Fetch records from labresulthistory table
+    let historyRows = [];
+    try {
+      const [rows] = await pool.execute(
+        'SELECT ID, LabReportID, TestsWithResults, FinalizedAt, CreatedAt FROM labresulthistory WHERE (LabPatientID = ? OR LabPatientID LIKE ?) ORDER BY CreatedAt DESC',
+        [patientId, pidPattern]
+      );
+      historyRows = rows;
+    } catch (e) {
+      console.warn('Could not query labresulthistory for recent-tests:', e.message);
+    }
+
+    // 3. Combine and normalize all records
+    const combinedRecords = [];
+
+    for (const r of labResultsRows) {
+      let tests = [];
+      try {
+        tests = typeof r.Tests === 'string' ? JSON.parse(r.Tests) : (r.Tests || []);
+      } catch (e) {
+        tests = [];
+      }
+      const d = r.ReportDate || r.TestDate || r.CreatedAt;
+      combinedRecords.push({
+        id: r.ID,
+        reportId: r.ID,
+        tests: Array.isArray(tests) ? tests : [],
+        date: d
+      });
+    }
+
+    for (const r of historyRows) {
+      let tests = [];
+      try {
+        tests = typeof r.TestsWithResults === 'string' ? JSON.parse(r.TestsWithResults) : (r.TestsWithResults || []);
+      } catch (e) {
+        tests = [];
+      }
+      const d = r.FinalizedAt || r.CreatedAt;
+      combinedRecords.push({
+        id: r.ID,
+        reportId: r.LabReportID || r.ID,
+        tests: Array.isArray(tests) ? tests : [],
+        date: d
+      });
+    }
+
+    // 4. Sort all records by timestamp descending (newest first)
+    combinedRecords.sort((a, b) => {
+      const tA = a.date ? new Date(a.date).getTime() : 0;
+      const tB = b.date ? new Date(b.date).getTime() : 0;
+      return tB - tA;
+    });
+
+    // 5. Extract results for each requested test parameter
     const results = {};
     for (const testName of testNames) {
       results[testName] = [];
     }
 
-    for (const row of rows) {
-      let pastTests = [];
-      try {
-        pastTests = typeof row.TestsWithResults === 'string' ? JSON.parse(row.TestsWithResults) : (row.TestsWithResults || []);
-      } catch (e) {
-        pastTests = [];
+    const seenReportsPerTest = {};
+
+    const matchTestName = (ptName, targetName) => {
+      if (!ptName || !targetName) return false;
+
+      const ptRaw = String(ptName).trim();
+      const targetRaw = String(targetName).trim();
+
+      if (ptRaw.toLowerCase() === targetRaw.toLowerCase()) return true;
+
+      const ptHasPipe = ptRaw.includes('|');
+      const targetHasPipe = targetRaw.includes('|');
+
+      if (ptHasPipe && targetHasPipe) {
+        const [ptProf, ptSub] = ptRaw.split('|').map(s => s.trim().toLowerCase());
+        const [targetProf, targetSub] = targetRaw.split('|').map(s => s.trim().toLowerCase());
+        return ptProf === targetProf && ptSub === targetSub;
       }
-      
-      const dateStr = row.FinalizedAt || row.CreatedAt;
-      
+
+      const ptSub = ptHasPipe ? ptRaw.split('|')[1].trim().toLowerCase() : ptRaw.toLowerCase();
+      const targetSub = targetHasPipe ? targetRaw.split('|')[1].trim().toLowerCase() : targetRaw.toLowerCase();
+
+      return ptSub === targetSub;
+    };
+
+    for (const record of combinedRecords) {
       for (const testName of testNames) {
-        if (results[testName].length >= 2) continue;
-        
-        const match = pastTests.find(pt => pt.name === testName || pt.testName === testName);
+        if (!seenReportsPerTest[testName]) seenReportsPerTest[testName] = new Set();
+        if (results[testName].length >= 5) continue;
+
+        if (record.reportId && seenReportsPerTest[testName].has(record.reportId)) continue;
+
+        const match = record.tests.find(pt => {
+          const ptName = pt.name || pt.testName || '';
+          return matchTestName(ptName, testName);
+        });
+
         const val = match?.value || match?.resultValue;
         if (val !== undefined && val !== null && val !== '') {
+          if (record.reportId) seenReportsPerTest[testName].add(record.reportId);
           results[testName].push({
+            id: record.id,
+            reportId: record.reportId,
             value: String(val),
-            date: dateStr
+            date: record.date
           });
         }
       }
-      
-      if (testNames.every(name => results[name].length >= 2)) {
+
+      if (testNames.every(name => results[name].length >= 5)) {
         break;
       }
     }
