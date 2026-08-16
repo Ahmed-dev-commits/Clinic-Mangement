@@ -3057,10 +3057,26 @@ app.post('/api/lab-result-history/recent-tests', async (req, res) => {
       });
     }
 
+    const safeParseMs = (dateVal) => {
+      if (!dateVal) return 0;
+      if (dateVal instanceof Date) return dateVal.getTime();
+      let s = String(dateVal).trim();
+      let d = new Date(s);
+      if (!isNaN(d.getTime())) return d.getTime();
+
+      d = new Date(s.replace(/-/g, '/'));
+      if (!isNaN(d.getTime())) return d.getTime();
+
+      d = new Date(s.replace(' ', 'T'));
+      if (!isNaN(d.getTime())) return d.getTime();
+
+      return 0;
+    };
+
     // 4. Sort all records by timestamp descending (newest first)
     combinedRecords.sort((a, b) => {
-      const tA = a.date ? new Date(a.date).getTime() : 0;
-      const tB = b.date ? new Date(b.date).getTime() : 0;
+      const tA = safeParseMs(a.date);
+      const tB = safeParseMs(b.date);
       return tB - tA;
     });
 
@@ -3071,17 +3087,15 @@ app.post('/api/lab-result-history/recent-tests', async (req, res) => {
     }
 
     const seenReportsPerTest = {};
-
     const cleanSubtest = (name) => {
       if (!name) return '';
       const s = String(name).trim();
-      return s.includes('|') ? s.split('|')[1].trim().toLowerCase() : s.toLowerCase();
+      return s.includes('|') ? s.split('|').pop().trim().toLowerCase() : s.toLowerCase();
     };
 
-    const getProfileWords = (name) => {
-      if (!name || !name.includes('|')) return [];
-      const prof = name.split('|')[0].trim().toLowerCase();
-      return prof.match(/[a-z0-9]+/g) || [];
+    const getProfile = (name) => {
+      if (!name || !name.includes('|')) return '';
+      return name.split('|')[0].trim().toLowerCase();
     };
 
     const matchTestName = (ptName, targetName) => {
@@ -3097,15 +3111,16 @@ app.post('/api/lab-result-history/recent-tests', async (req, res) => {
 
       if (!ptSub || !targetSub || ptSub !== targetSub) return false;
 
-      const ptWords = getProfileWords(ptName);
-      const targetWords = getProfileWords(targetName);
+      const ptProf = getProfile(ptName);
+      const targetProf = getProfile(targetName);
 
-      if (ptWords.length > 0 && targetWords.length > 0) {
-        const hasCommonWord = ptWords.some(w => targetWords.includes(w));
-        if (!hasCommonWord) return false;
-      }
+      if (!ptProf || !targetProf || ptProf === targetProf) return true;
 
-      return true;
+      if (ptProf.includes(targetProf) || targetProf.includes(ptProf)) return true;
+
+      const p1Words = ptProf.match(/[a-z0-9]+/g) || [];
+      const p2Words = targetProf.match(/[a-z0-9]+/g) || [];
+      return p1Words.some(w => w.length > 1 && p2Words.includes(w));
     };
 
     for (const record of combinedRecords) {
@@ -4091,13 +4106,28 @@ app.post('/api/lab-results', async (req, res) => {
     const { id, labPatientId, patientName, patientAge, testDate, reportDate, tests, notes, technician, status, referredBy, patientId, collectorName } = req.body;
     const createdAt = new Date().toISOString();
 
-    // Use labPatientId if present, otherwise fallback to patientId (which is what clinic calls it)
     const finalPatientId = labPatientId || patientId || null;
 
     await pool.execute(
       'INSERT INTO LabResults (ID, LabPatientID, PatientName, PatientAge, TestDate, ReportDate, Tests, Notes, Technician, Status, ReferredBy, CreatedAt, CollectorName) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [id, finalPatientId, patientName, patientAge || null, testDate, reportDate || null, JSON.stringify(tests), notes || null, technician || null, status || 'Pending', referredBy || 'Self', createdAt, collectorName || null]
     );
+
+    // 🛡️ Auto-sync to labresulthistory table when report is finalized / ready
+    const normalizedStatus = String(status || '').trim().toLowerCase();
+    if (['finalized', 'ready', 'completed', 'delivered'].includes(normalizedStatus)) {
+      try {
+        const historyId = `LRH-${Date.now()}`;
+        const finalizedAt = reportDate || testDate || createdAt;
+        await pool.execute(
+          `INSERT INTO labresulthistory (ID, LabPatientID, LabReportID, PatientName, FinalizedAt, TestsWithResults, Technician, ResultStatus, CreatedAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [historyId, finalPatientId, id, patientName || '', finalizedAt, JSON.stringify(tests || []), technician || '', status || 'Finalized', createdAt]
+        );
+      } catch (hErr) {
+        console.warn('⚠️ Could not auto-sync to labresulthistory:', hErr.message);
+      }
+    }
 
     res.json({ success: true, id });
   } catch (error) {
@@ -4124,7 +4154,6 @@ app.put('/api/lab-results/:id/status', async (req, res) => {
     query += ' WHERE ID = ?';
     params.push(req.params.id);
 
-    // Use pool.query: query string is dynamically built (conditionally appends NotifiedAt/CollectedAt)
     await pool.query(query, params);
     res.json({ success: true });
   } catch (error) {
@@ -4141,6 +4170,22 @@ app.put('/api/lab-results/:id', async (req, res) => {
       'UPDATE LabResults SET TestDate = ?, ReportDate = ?, Tests = ?, Notes = ?, Technician = ?, Status = ?, LabPatientID = ?, CollectorName = ? WHERE ID = ?',
       [testDate, reportDate || null, JSON.stringify(tests), notes || null, technician || null, status, labPatientId || null, collectorName || null, req.params.id]
     );
+
+    // 🛡️ Auto-sync to labresulthistory table when report is finalized / ready
+    const normalizedStatus = String(status || '').trim().toLowerCase();
+    if (['finalized', 'ready', 'completed', 'delivered'].includes(normalizedStatus)) {
+      try {
+        const historyId = `LRH-${Date.now()}`;
+        const finalizedAt = reportDate || testDate || new Date().toISOString();
+        await pool.execute(
+          `INSERT INTO labresulthistory (ID, LabPatientID, LabReportID, PatientName, FinalizedAt, TestsWithResults, Technician, ResultStatus, CreatedAt)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [historyId, labPatientId || null, req.params.id, '', finalizedAt, JSON.stringify(tests || []), technician || '', status || 'Finalized', finalizedAt]
+        );
+      } catch (hErr) {
+        console.warn('⚠️ Could not auto-sync to labresulthistory:', hErr.message);
+      }
+    }
 
     res.json({ success: true });
   } catch (error) {
