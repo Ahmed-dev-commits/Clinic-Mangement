@@ -3072,27 +3072,40 @@ app.post('/api/lab-result-history/recent-tests', async (req, res) => {
 
     const seenReportsPerTest = {};
 
+    const cleanSubtest = (name) => {
+      if (!name) return '';
+      const s = String(name).trim();
+      return s.includes('|') ? s.split('|')[1].trim().toLowerCase() : s.toLowerCase();
+    };
+
+    const getProfileWords = (name) => {
+      if (!name || !name.includes('|')) return [];
+      const prof = name.split('|')[0].trim().toLowerCase();
+      return prof.match(/[a-z0-9]+/g) || [];
+    };
+
     const matchTestName = (ptName, targetName) => {
       if (!ptName || !targetName) return false;
 
-      const ptRaw = String(ptName).trim();
-      const targetRaw = String(targetName).trim();
+      const ptRaw = String(ptName).trim().toLowerCase();
+      const targetRaw = String(targetName).trim().toLowerCase();
 
-      if (ptRaw.toLowerCase() === targetRaw.toLowerCase()) return true;
+      if (ptRaw === targetRaw) return true;
 
-      const ptHasPipe = ptRaw.includes('|');
-      const targetHasPipe = targetRaw.includes('|');
+      const ptSub = cleanSubtest(ptName);
+      const targetSub = cleanSubtest(targetName);
 
-      if (ptHasPipe && targetHasPipe) {
-        const [ptProf, ptSub] = ptRaw.split('|').map(s => s.trim().toLowerCase());
-        const [targetProf, targetSub] = targetRaw.split('|').map(s => s.trim().toLowerCase());
-        return ptProf === targetProf && ptSub === targetSub;
+      if (!ptSub || !targetSub || ptSub !== targetSub) return false;
+
+      const ptWords = getProfileWords(ptName);
+      const targetWords = getProfileWords(targetName);
+
+      if (ptWords.length > 0 && targetWords.length > 0) {
+        const hasCommonWord = ptWords.some(w => targetWords.includes(w));
+        if (!hasCommonWord) return false;
       }
 
-      const ptSub = ptHasPipe ? ptRaw.split('|')[1].trim().toLowerCase() : ptRaw.toLowerCase();
-      const targetSub = targetHasPipe ? targetRaw.split('|')[1].trim().toLowerCase() : targetRaw.toLowerCase();
-
-      return ptSub === targetSub;
+      return true;
     };
 
     for (const record of combinedRecords) {
