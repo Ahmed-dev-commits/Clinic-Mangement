@@ -167,38 +167,38 @@ const authenticateToken = async (req, res, next) => {
       if (err) {
         return res.status(401).json({ error: 'Session expired or invalid token. Please log in again.' });
       }
-      
+
       req.user = user;
 
-    // 🛡️ MAINTENANCE MODE CHECK (Phase 4) - OPTIMIZED WITH CACHE
-    try {
-      const maintenanceCacheKey = 'internal_maintenance_check';
-      let globalData = apiCache.get(maintenanceCacheKey);
-      
-      if (!globalData) {
-        const [settingsRows] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
-        if (settingsRows.length > 0) {
-          globalData = typeof settingsRows[0].Data === 'string' ? JSON.parse(settingsRows[0].Data) : settingsRows[0].Data;
-          // Cache maintenance status for 10 seconds to reduce DB load
-          apiCache.set(maintenanceCacheKey, globalData, 10);
-        }
-      }
+      // 🛡️ MAINTENANCE MODE CHECK (Phase 4) - OPTIMIZED WITH CACHE
+      try {
+        const maintenanceCacheKey = 'internal_maintenance_check';
+        let globalData = apiCache.get(maintenanceCacheKey);
 
-      if (globalData && globalData.isMaintenanceMode) {
-        const currentUserRole = String(user.role || '').trim().toLowerCase();
-        console.log(`[MAINTENANCE] Checking access - User: ${user.username}, Role: "${user.role}" (normalized: "${currentUserRole}")`);
-        
-        // Allow SuperAdmin AND Admin through so they can disable maintenance mode
-        const bypassRoles = ['superadmin', 'admin'];
-        if (!bypassRoles.includes(currentUserRole)) {
-          return res.status(503).json({ error: 'System is under maintenance. Please try again later.' });
+        if (!globalData) {
+          const [settingsRows] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
+          if (settingsRows.length > 0) {
+            globalData = typeof settingsRows[0].Data === 'string' ? JSON.parse(settingsRows[0].Data) : settingsRows[0].Data;
+            // Cache maintenance status for 10 seconds to reduce DB load
+            apiCache.set(maintenanceCacheKey, globalData, 10);
+          }
         }
-        console.log(`[MAINTENANCE] ACCESS GRANTED for ${user.role}: ${user.username}`);
+
+        if (globalData && globalData.isMaintenanceMode) {
+          const currentUserRole = String(user.role || '').trim().toLowerCase();
+          console.log(`[MAINTENANCE] Checking access - User: ${user.username}, Role: "${user.role}" (normalized: "${currentUserRole}")`);
+
+          // Allow SuperAdmin AND Admin through so they can disable maintenance mode
+          const bypassRoles = ['superadmin', 'admin'];
+          if (!bypassRoles.includes(currentUserRole)) {
+            return res.status(503).json({ error: 'System is under maintenance. Please try again later.' });
+          }
+          console.log(`[MAINTENANCE] ACCESS GRANTED for ${user.role}: ${user.username}`);
+        }
+      } catch (dbErr) {
+        // Fallback: If DB check fails, we allow the request to proceed but log the warning
+        console.warn('⚠️ Could not check maintenance status:', dbErr.message);
       }
-    } catch (dbErr) {
-      // Fallback: If DB check fails, we allow the request to proceed but log the warning
-      console.warn('⚠️ Could not check maintenance status:', dbErr.message);
-    }
 
       next();
     });
@@ -299,8 +299,8 @@ async function createPool() {
         IPAddress VARCHAR(50),
         INDEX idx_visit (VisitID)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-    `).catch(() => {});
-  } catch (e) {}
+    `).catch(() => { });
+  } catch (e) { }
 
   // --- POOL EVENT LOGGING & RESILIENCE ---
   pool.on('connection', (connection) => {
@@ -367,7 +367,7 @@ function convertRowDates(row) {
   };
 
   const dateFields = [
-    'CreatedAt', 'UpdatedAt', 'VisitDate', 'TestDate', 'ReportDate', 
+    'CreatedAt', 'UpdatedAt', 'VisitDate', 'TestDate', 'ReportDate',
     'FollowUpDate', 'ApprovalTime', 'FinalizedAt', 'LastUpdatedAt', 'CollectedAt',
     'Date'
   ];
@@ -387,7 +387,7 @@ function convertRowDates(row) {
     if (row[field] && typeof row[field] === 'string') {
       const trimmed = row[field].trim();
       if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-        try { row[field] = JSON.parse(trimmed); } catch (e) {}
+        try { row[field] = JSON.parse(trimmed); } catch (e) { }
       }
     }
   }
@@ -808,7 +808,7 @@ async function initializeDatabase() {
     try { await pool.execute("ALTER TABLE ClinicalForms MODIFY COLUMN FormData JSON"); } catch (e) { }
 
     // --- CHAT MODULE TABLES ---
-    
+
     // 1. Conversations
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS ChatConversations (
@@ -852,8 +852,32 @@ async function initializeDatabase() {
     `);
 
     // Performance Index for Chat History
-    try { 
-      await pool.execute("CREATE INDEX idx_chat_history ON ChatMessages (ConversationID, CreatedAt DESC)"); 
+    try {
+      await pool.execute("CREATE INDEX idx_chat_history ON ChatMessages (ConversationID, CreatedAt)");
+    } catch (e) { }
+
+    // Notifications table
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS Notifications (
+        ID VARCHAR(100) PRIMARY KEY,
+        UserID VARCHAR(100) NULL,
+        TargetRole VARCHAR(50) NULL,
+        Type VARCHAR(50) NOT NULL,
+        Title VARCHAR(255) NOT NULL,
+        Message TEXT NOT NULL,
+        Link VARCHAR(255) NULL,
+        IsRead TINYINT(1) DEFAULT 0,
+        CreatedAt VARCHAR(50) NOT NULL,
+        INDEX idx_user_read (UserID, IsRead),
+        INDEX idx_role_read (TargetRole, IsRead),
+        INDEX idx_created (CreatedAt)
+      )
+    `);
+    try {
+      await pool.execute("ALTER TABLE Notifications ADD COLUMN IsDismissed TINYINT(1) DEFAULT 0");
+    } catch (e) { }
+    try {
+      await pool.execute("UPDATE Notifications SET Title = REPLACE(Title, 'Lab Lab ', 'Lab ') WHERE Title LIKE '%Lab Lab %'");
     } catch (e) { }
 
     // LabTestsCatalog table
@@ -1287,7 +1311,7 @@ async function initializeDatabase() {
         }
       }
     }
-    
+
     // Seed SuperAdmin role if missing
     const [saRoleExists] = await pool.execute("SELECT COUNT(*) as count FROM Roles WHERE Name = 'SuperAdmin'");
     if (saRoleExists[0].count === 0) {
@@ -1307,7 +1331,7 @@ async function initializeDatabase() {
         'page_pathology', 'page_users', 'page_expenses', 'page_settings', 'page_hr', 'page_salary_settings',
         'btn_manage_staff', 'page_clinical_forms'
       ];
-      
+
       for (const perm of saPermissions) {
         await pool.execute(
           'INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES (?, ?)',
@@ -1335,7 +1359,7 @@ async function initializeDatabase() {
         );
       }
     }
-    
+
     // Seed SuperAdmin if owner is missing (works even if other users exist)
     const [ownerRows] = await pool.execute("SELECT ID FROM Users WHERE Username = 'owner'");
     if (ownerRows.length === 0) {
@@ -1419,12 +1443,12 @@ async function initializeDatabase() {
       if (settingsRows.length > 0) {
         let dataStr = settingsRows[0].Data;
         let modified = false;
-        
+
         let settingsObj = null;
         if (typeof dataStr === 'string') {
           try {
             settingsObj = JSON.parse(dataStr);
-          } catch (e) {}
+          } catch (e) { }
         } else if (typeof dataStr === 'object' && dataStr !== null) {
           settingsObj = dataStr;
         }
@@ -1651,7 +1675,7 @@ app.put('/api/settings/:id', async (req, res) => {
 
     // 🧹 Cache Invalidation
     apiCache.del(`/api/settings/${id}`);
-    apiCache.del('internal_maintenance_check'); 
+    apiCache.del('internal_maintenance_check');
 
     // Real-time broadcast for global settings changes
     if (id === 'GLOBAL') {
@@ -1670,7 +1694,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
   try {
     // Determine target date in PKT
     const todayDateStr = req.query.date || new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Karachi' });
-    
+
     const { startUtc, endUtc } = getPktDayBounds(todayDateStr);
 
     // Generate last 30 days date strings in PKT format (YYYY-MM-DD)
@@ -1691,7 +1715,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
 
     const startDateStr = trends[0].date;
     const { startUtc: startUtcInterval } = getPktDayBounds(startDateStr);
-    
+
     // We execute these in parallel for maximum performance
     const [
       [patientCount],
@@ -2188,7 +2212,7 @@ app.post('/api/patients', async (req, res) => {
     // Use literal PKT string (Standard Local Strategy)
     // Use standard UTC ISO string (Pure UTC Strategy)
     const now = new Date().toISOString();
-    
+
     // For VisitDate, we also use the current moment's UTC string.
     const finalVisitDate = visitDate || now;
 
@@ -2386,7 +2410,7 @@ app.get('/api/chat/messages/:conversationId', async (req, res) => {
   try {
     const { conversationId } = req.params;
     const { limit = 50, beforeId } = req.query;
-    
+
     let query = `
       SELECT m.*, m.IsRead as isRead, u.Username as SenderName 
       FROM ChatMessages m
@@ -2453,7 +2477,7 @@ app.put('/api/chat/messages/:conversationId/read', async (req, res) => {
       'UPDATE ChatMessages SET IsRead = 1 WHERE ConversationID = ? AND SenderID != ?',
       [conversationId, userId]
     );
-    
+
     // Notify others in the room that messages were read
     const io = req.app.get('io');
     if (io) {
@@ -2739,6 +2763,25 @@ app.post('/api/lab-patients', async (req, res) => {
       referringDoctorName || null, priority || 'Normal', selectedTests ? JSON.stringify(selectedTests) : null, createdAt
     ]);
 
+    // 🔔 Notify LabTechnician of new test order
+    if (priority === 'Urgent') {
+      createAndSendNotification({
+        targetRoles: ['LabTechnician', 'LabTech', 'Admin'],
+        type: 'urgent_order',
+        title: `⚡ URGENT Lab Order: ${name || id}`,
+        message: `Urgent lab order registered for patient ${name || id}. Immediate testing required.`,
+        link: `/pathology`
+      });
+    } else {
+      createAndSendNotification({
+        targetRoles: ['LabTechnician', 'LabTech'],
+        type: 'new_lab_order',
+        title: `New Lab Order: ${name || id}`,
+        message: `New lab order registered for patient ${name || id}.`,
+        link: `/pathology`
+      });
+    }
+
     res.json({ success: true, id });
   } catch (error) {
     console.error('Error creating lab patient:', error);
@@ -2875,6 +2918,36 @@ app.post('/api/lab-history', async (req, res) => {
       ]
     );
 
+    // 🔔 Notification Triggers for Payment
+    const pendingAmount = Number(totalAmount) - Number(discountAmount) - Number(paidAmount);
+    if (pendingAmount > 0) {
+      createAndSendNotification({
+        targetRole: 'Receptionist',
+        type: 'payment_due',
+        title: `Payment Due: ${patientName || labPatientID}`,
+        message: `Lab order for ${patientName || labPatientID} has a pending balance of Rs. ${pendingAmount.toLocaleString()}.`,
+        link: `/lab-fees?search=${encodeURIComponent(labPatientID || id)}`
+      });
+    } else if (paymentStatus === 'Paid') {
+      createAndSendNotification({
+        targetRole: 'Receptionist',
+        type: 'payment_completed',
+        title: `Payment Completed: ${patientName || labPatientID}`,
+        message: `Full payment of Rs. ${Number(paidAmount).toLocaleString()} received for ${patientName || labPatientID}.`,
+        link: `/lab-fees?search=${encodeURIComponent(labPatientID || id)}`
+      });
+    }
+
+    if (Number(discountAmount) > 0) {
+      createAndSendNotification({
+        targetRole: 'Admin',
+        type: 'payment_waived',
+        title: `Discount Applied: ${patientName || labPatientID}`,
+        message: `Discount/Waiver of Rs. ${Number(discountAmount).toLocaleString()} applied for ${patientName || labPatientID}.`,
+        link: `/lab-fees?search=${encodeURIComponent(labPatientID || id)}`
+      });
+    }
+
     res.json({ success: true, id });
   } catch (error) {
     console.error('Error creating lab history:', error);
@@ -2902,7 +2975,6 @@ app.put('/api/lab-history/:id', async (req, res) => {
     Object.keys(updates).forEach(key => {
       let colName = validColumns.find(c => c.toLowerCase() === key.toLowerCase() || c === key || c.charAt(0).toLowerCase() + c.slice(1) === key);
 
-      // Handle legacy mapping for tests
       if (!colName && (key.toLowerCase() === 'testswithresults' || key === 'tests')) colName = 'Tests';
 
       if (colName) {
@@ -2917,9 +2989,30 @@ app.put('/api/lab-history/:id', async (req, res) => {
 
     if (setClause.length > 0) {
       values.push(id);
-      values.push(id); // For the OR LabPatientID = ?
-      // Use pool.query: dynamic SET clause means SQL text changes per request
+      values.push(id);
       await pool.query(`UPDATE labpaymenthistory SET ${setClause.join(', ')} WHERE ID = ? OR LabPatientID = ?`, values);
+
+      // 🔔 Notification Trigger on Update
+      if (updates.PaymentStatus || updates.PaidAmount !== undefined || updates.paidAmount !== undefined) {
+        const pStatus = updates.PaymentStatus || updates.paymentStatus;
+        if (pStatus === 'Paid') {
+          createAndSendNotification({
+            targetRole: 'Receptionist',
+            type: 'payment_completed',
+            title: `Payment Settlement Completed`,
+            message: `Payment status updated to Paid for order #${id}.`,
+            link: `/lab-fees?search=${encodeURIComponent(id)}`
+          });
+        } else if (pStatus === 'Partial') {
+          createAndSendNotification({
+            targetRole: 'Receptionist',
+            type: 'payment_partial',
+            title: `Partial Payment Updated`,
+            message: `Partial payment recorded for order #${id}.`,
+            link: `/lab-fees?search=${encodeURIComponent(id)}`
+          });
+        }
+      }
     }
 
     res.json({ success: true });
@@ -3094,8 +3187,59 @@ app.post('/api/lab-result-history/recent-tests', async (req, res) => {
     };
 
     const getProfile = (name) => {
-      if (!name || !name.includes('|')) return '';
-      return name.split('|')[0].trim().toLowerCase();
+      if (!name) return '';
+      const s = String(name).trim();
+      return s.includes('|') ? s.split('|')[0].trim().toLowerCase() : '';
+    };
+
+    const isUrineCategory = (prof) => {
+      if (!prof) return false;
+      const p = String(prof).toLowerCase();
+      return p.includes('urine') || p.includes('u/r') || p.includes('ur/e') || p.includes('ur-e');
+    };
+
+    const isBloodCategory = (prof) => {
+      if (!prof) return false;
+      const p = String(prof).toLowerCase();
+      return p.includes('cbc') || p.includes('blood') || p.includes('cp') || p.includes('haematology') || p.includes('hematology');
+    };
+
+    const isLftCategory = (prof) => {
+      if (!prof) return false;
+      const p = String(prof).toLowerCase();
+      return p.includes('lft') || p.includes('liver');
+    };
+
+    const isRftCategory = (prof) => {
+      if (!prof) return false;
+      const p = String(prof).toLowerCase();
+      return p.includes('rft') || p.includes('renal') || p.includes('kidney');
+    };
+
+    const profilesMatch = (prof1, prof2) => {
+      if (!prof1 && !prof2) return true;
+
+      const p1 = (prof1 || '').trim().toLowerCase();
+      const p2 = (prof2 || '').trim().toLowerCase();
+
+      if (p1 === p2) return true;
+
+      if (p1 && p2) {
+        // Strict domain boundary checks: URINE vs BLOOD (CBC) vs LFT vs RFT
+        if (isUrineCategory(p1) !== isUrineCategory(p2)) return false;
+        if (isBloodCategory(p1) !== isBloodCategory(p2)) return false;
+        if (isLftCategory(p1) !== isLftCategory(p2)) return false;
+        if (isRftCategory(p1) !== isRftCategory(p2)) return false;
+
+        if (p1.includes(p2) || p2.includes(p1)) return true;
+
+        const w1 = p1.match(/[a-z0-9]+/g) || [];
+        const w2 = p2.match(/[a-z0-9]+/g) || [];
+        return w1.some(w => w.length > 2 && w2.includes(w));
+      }
+
+      // If one test belongs to a specific profile/test group and the other doesn't, do not cross-match
+      return false;
     };
 
     const matchTestName = (ptName, targetName) => {
@@ -3114,13 +3258,7 @@ app.post('/api/lab-result-history/recent-tests', async (req, res) => {
       const ptProf = getProfile(ptName);
       const targetProf = getProfile(targetName);
 
-      if (!ptProf || !targetProf || ptProf === targetProf) return true;
-
-      if (ptProf.includes(targetProf) || targetProf.includes(ptProf)) return true;
-
-      const p1Words = ptProf.match(/[a-z0-9]+/g) || [];
-      const p2Words = targetProf.match(/[a-z0-9]+/g) || [];
-      return p1Words.some(w => w.length > 1 && p2Words.includes(w));
+      return profilesMatch(ptProf, targetProf);
     };
 
     for (const record of combinedRecords) {
@@ -3166,7 +3304,7 @@ app.get('/api/lab-result-history/:labPatientId', async (req, res) => {
       'SELECT * FROM labresulthistory WHERE LabPatientID = ? ORDER BY CreatedAt DESC',
       [labPatientId]
     );
-    
+
     const historyData = rows.map(convertRowDates);
     for (const record of historyData) {
       try {
@@ -3255,12 +3393,12 @@ app.post('/api/stock', async (req, res) => {
     await pool.execute(
       'INSERT INTO Stock (ID, Name, Category, Quantity, Price, LowStockThreshold, CreatedAt, CreatedBy, Unit) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       [
-        finalId, 
-        formattedName, 
-        category || 'Other', 
-        isNaN(q) ? 0 : q, 
-        isNaN(p) ? 0 : p, 
-        isNaN(lst) ? 10 : lst, 
+        finalId,
+        formattedName,
+        category || 'Other',
+        isNaN(q) ? 0 : q,
+        isNaN(p) ? 0 : p,
+        isNaN(lst) ? 10 : lst,
         createdAt,
         createdBy,
         unit || 'units'
@@ -3286,10 +3424,10 @@ app.put('/api/stock/:id', async (req, res) => {
     const updates = [];
     const params = [];
 
-    if (name !== undefined) { 
+    if (name !== undefined) {
       const formattedName = name ? name.charAt(0).toUpperCase() + name.slice(1) : 'Unknown Item';
-      updates.push('Name = ?'); 
-      params.push(formattedName); 
+      updates.push('Name = ?');
+      params.push(formattedName);
     }
     if (category !== undefined) { updates.push('Category = ?'); params.push(category || 'Other'); }
     if (quantity !== undefined) {
@@ -3324,7 +3462,7 @@ app.put('/api/stock/:id', async (req, res) => {
     const [existing] = await pool.query('SELECT Quantity, Unit FROM Stock WHERE ID = ?', [req.params.id]);
     const oldQuantity = existing[0] ? existing[0].Quantity : 0;
     const medicineUnit = existing[0] ? existing[0].Unit : 'Units';
-    
+
     params.push(req.params.id);
     await pool.execute(
       `UPDATE Stock SET ${updates.join(', ')} WHERE ID = ?`,
@@ -3336,7 +3474,7 @@ app.put('/api/stock/:id', async (req, res) => {
       const q = parseInt(quantity);
       const newQuantity = isNaN(q) ? 0 : q;
       const change = newQuantity - oldQuantity;
-      
+
       let detailsStr = `Details updated.`;
       if (change !== 0) {
         detailsStr = `Quantity ${change > 0 ? 'increased' : 'decreased'} by ${Math.abs(change)} ${medicineUnit}.`;
@@ -3368,7 +3506,7 @@ app.delete('/api/stock/:id', async (req, res) => {
     const deletedBy = req.user ? `${req.user.name || req.user.username || 'Staff'} (${req.user.role || 'User'})` : 'System';
 
     await pool.execute(
-      'UPDATE Stock SET IsDeleted = 1, DeletedAt = ?, DeletedBy = ? WHERE ID = ?', 
+      'UPDATE Stock SET IsDeleted = 1, DeletedAt = ?, DeletedBy = ? WHERE ID = ?',
       [deletedAt, deletedBy, req.params.id]
     );
 
@@ -3405,8 +3543,8 @@ app.get('/api/payments', async (req, res) => {
 
     // Filters
     const recent24h = req.query.recent24h === 'true';
-    const fromDate = req.query.fromDate; 
-    const toDate = req.query.toDate;     
+    const fromDate = req.query.fromDate;
+    const toDate = req.query.toDate;
     const search = req.query.search;
     const paymentMode = req.query.paymentMode;
     const status = req.query.status; // 'Full' or 'Short'
@@ -4124,6 +4262,14 @@ app.post('/api/lab-results', async (req, res) => {
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [historyId, finalPatientId, id, patientName || '', finalizedAt, JSON.stringify(tests || []), technician || '', status || 'Finalized', createdAt]
         );
+
+        createAndSendNotification({
+          targetRole: 'Doctor',
+          type: 'lab_finalized',
+          title: `Lab Report Finalized: ${patientName || finalPatientId}`,
+          message: `Report #${id} for ${patientName || finalPatientId} has been finalized.`,
+          link: `/pathology`
+        });
       } catch (hErr) {
         console.warn('⚠️ Could not auto-sync to labresulthistory:', hErr.message);
       }
@@ -4230,7 +4376,7 @@ app.delete('/api/lab-results/:id', async (req, res) => {
         // Create refund ledger entry
         const paymentId = `LPMT-REF-${Date.now().toString(36).toUpperCase()}`;
         const refundNotes = `Refunded due to discarded lab order (ID: ${req.params.id}) by ${deletedBy}`;
-        
+
         await connection.query(
           'INSERT INTO LabFeesLedger (ID, LabPatientID, VisitID, AmountPaid, PaymentMethod, Notes, PaymentDate) VALUES (?, ?, ?, ?, ?, ?, ?)',
           [paymentId, labResult.LabPatientID, visit.ID, -paidAmount, 'Refund', refundNotes, new Date().toISOString()]
@@ -4433,13 +4579,13 @@ app.get('/api/patient-services/:patientId', async (req, res) => {
 });
 
 app.post('/api/patient-services', async (req, res) => {
-    try {
-      const { id, patientId, services, grandTotal, status, isRevisit } = req.body;
+  try {
+    const { id, patientId, services, grandTotal, status, isRevisit } = req.body;
     const now = new Date().toISOString();
 
     // 1. Insert Service Record
     // Standard UTC Strategy: Store the exact universal moment.
-    
+
     await pool.execute(
       'INSERT INTO PatientServices (ID, PatientID, Services, GrandTotal, Status, CreatedAt, UpdatedAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
       [id, patientId, JSON.stringify(services), grandTotal, status || 'Draft', now, now]
@@ -4494,122 +4640,122 @@ app.post('/api/patient-services', async (req, res) => {
     flushPatientCache();
     flushStockCache();
     res.json({ success: true, id });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/patient-services/:id', async (req, res) => {
+  try {
+    const { services, grandTotal, status } = req.body;
+
+    const pktNow = getNowPKT();
+    await pool.execute(
+      'UPDATE PatientServices SET Services = ?, GrandTotal = ?, Status = ?, UpdatedAt = ? WHERE ID = ?',
+      [JSON.stringify(services), grandTotal, status, pktNow, req.params.id]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ LAB VISITS API ============
+
+app.post('/api/lab-visits', async (req, res) => {
+  try {
+    const { id, labPatientId, visitDate, status = 'Pending', selectedTests, totalAmount = 0, createdBy } = req.body;
+    await pool.query(
+      'INSERT INTO LabVisits (ID, LabPatientID, VisitDate, Status, SelectedTests, TotalAmount, CreatedAt, CreatedBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, labPatientId, visitDate, status, JSON.stringify(selectedTests || []), totalAmount, new Date().toISOString(), createdBy || null]
+    );
+    res.status(201).json({ success: true, id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/lab-visits', async (req, res) => {
+  try {
+    const { labPatientId, search, recent24h, fromDate, toDate, status } = req.query;
+
+    let whereConditions = [];
+    let queryParams = [];
+
+    if (labPatientId) {
+      whereConditions.push('v.LabPatientID = ?');
+      queryParams.push(labPatientId);
     }
-  });
 
-  app.put('/api/patient-services/:id', async (req, res) => {
-    try {
-      const { services, grandTotal, status } = req.body;
-
-      const pktNow = getNowPKT();
-      await pool.execute(
-        'UPDATE PatientServices SET Services = ?, GrandTotal = ?, Status = ?, UpdatedAt = ? WHERE ID = ?',
-        [JSON.stringify(services), grandTotal, status, pktNow, req.params.id]
-      );
-
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // ============ LAB VISITS API ============
-
-  app.post('/api/lab-visits', async (req, res) => {
-    try {
-      const { id, labPatientId, visitDate, status = 'Pending', selectedTests, totalAmount = 0, createdBy } = req.body;
-      await pool.query(
-        'INSERT INTO LabVisits (ID, LabPatientID, VisitDate, Status, SelectedTests, TotalAmount, CreatedAt, CreatedBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [id, labPatientId, visitDate, status, JSON.stringify(selectedTests || []), totalAmount, new Date().toISOString(), createdBy || null]
-      );
-      res.status(201).json({ success: true, id });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.get('/api/lab-visits', async (req, res) => {
-    try {
-      const { labPatientId, search, recent24h, fromDate, toDate, status } = req.query;
-
-      let whereConditions = [];
-      let queryParams = [];
-
-      if (labPatientId) {
-        whereConditions.push('v.LabPatientID = ?');
-        queryParams.push(labPatientId);
+    if (status) {
+      if (status === 'Fully Paid') {
+        whereConditions.push('v.PaymentStatus = ?');
+        queryParams.push('Paid');
+      } else if (status === 'Total Discount') {
+        whereConditions.push('v.DiscountAmount > 0');
       }
+    }
 
-      if (status) {
-        if (status === 'Fully Paid') {
-          whereConditions.push('v.PaymentStatus = ?');
-          queryParams.push('Paid');
-        } else if (status === 'Total Discount') {
-          whereConditions.push('v.DiscountAmount > 0');
-        }
-      }
-
-      if (search) {
-        const searchTerm = `%${search}%`;
-        whereConditions.push('(v.ID LIKE ? OR p.Name LIKE ? OR v.LabPatientID LIKE ? OR p.Phone LIKE ?)');
-        queryParams.push(searchTerm, searchTerm, searchTerm, searchTerm);
+    if (search) {
+      const searchTerm = `%${search}%`;
+      whereConditions.push('(v.ID LIKE ? OR p.Name LIKE ? OR v.LabPatientID LIKE ? OR p.Phone LIKE ?)');
+      queryParams.push(searchTerm, searchTerm, searchTerm, searchTerm);
+    } else {
+      // Date filters only apply if not searching (matches Patients API behavior)
+      if (recent24h === 'true') {
+        whereConditions.push('v.CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)');
       } else {
-        // Date filters only apply if not searching (matches Patients API behavior)
-        if (recent24h === 'true') {
-          whereConditions.push('v.CreatedAt >= DATE_SUB(UTC_TIMESTAMP(), INTERVAL 1 DAY)');
-        } else {
-          if (fromDate) {
-            whereConditions.push('DATE(v.VisitDate) >= ?');
-            queryParams.push(fromDate);
-          }
-          if (toDate) {
-            whereConditions.push('DATE(v.VisitDate) <= ?');
-            queryParams.push(toDate);
-          }
+        if (fromDate) {
+          whereConditions.push('DATE(v.VisitDate) >= ?');
+          queryParams.push(fromDate);
+        }
+        if (toDate) {
+          whereConditions.push('DATE(v.VisitDate) <= ?');
+          queryParams.push(toDate);
         }
       }
+    }
 
-      const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
+    const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
 
-      // Legacy behavior for fetching patient specific visits without pagination limits
-      if (labPatientId && !req.query.page && !req.query.limit && !search && !recent24h && !fromDate && !toDate) {
-        const [rows] = await pool.query(
-          `SELECT v.*, (SELECT COALESCE(ABS(SUM(AmountPaid)), 0) FROM LabFeesLedger WHERE VisitID = v.ID AND AmountPaid < 0) as RefundedAmount, (SELECT Notes FROM LabFeesLedger WHERE VisitID = v.ID AND Notes LIKE '%Waived Off%' ORDER BY PaymentDate DESC LIMIT 1) as WaivedOffReason, p.Name as PatientName, p.GuardianName, p.Age, p.Gender, p.Phone FROM LabVisits v JOIN LabPatients p ON v.LabPatientID = p.ID ${whereClause} ORDER BY v.CreatedAt DESC`,
-          queryParams
-        );
-        return res.json(rows.map(convertRowDates));
-      }
+    // Legacy behavior for fetching patient specific visits without pagination limits
+    if (labPatientId && !req.query.page && !req.query.limit && !search && !recent24h && !fromDate && !toDate) {
+      const [rows] = await pool.query(
+        `SELECT v.*, (SELECT COALESCE(ABS(SUM(AmountPaid)), 0) FROM LabFeesLedger WHERE VisitID = v.ID AND AmountPaid < 0) as RefundedAmount, (SELECT Notes FROM LabFeesLedger WHERE VisitID = v.ID AND Notes LIKE '%Waived Off%' ORDER BY PaymentDate DESC LIMIT 1) as WaivedOffReason, p.Name as PatientName, p.GuardianName, p.Age, p.Gender, p.Phone FROM LabVisits v JOIN LabPatients p ON v.LabPatientID = p.ID ${whereClause} ORDER BY v.CreatedAt DESC`,
+        queryParams
+      );
+      return res.json(rows.map(convertRowDates));
+    }
 
-      // Pagination for all visits
-      const page = parseInt(req.query.page) || 1;
-      const limit = parseInt(req.query.limit) || 50;
-      const offset = (page - 1) * limit;
+    // Pagination for all visits
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = (page - 1) * limit;
 
-      // 1. Get total count for pagination
-      const countQuery = `
+    // 1. Get total count for pagination
+    const countQuery = `
       SELECT COUNT(*) as total 
       FROM LabVisits v 
       JOIN LabPatients p ON v.LabPatientID = p.ID
       ${whereClause}
     `;
-      const [countResult] = await pool.query(countQuery, queryParams);
-      const total = countResult[0].total;
+    const [countResult] = await pool.query(countQuery, queryParams);
+    const total = countResult[0].total;
 
-      // 2. Fetch paginated data
-      const columns = "v.ID, v.LabPatientID, v.VisitDate, v.Status, v.TotalAmount, v.DiscountAmount, v.PaidAmount, v.PaymentStatus, v.CreatedAt, v.SelectedTests, v.CreatedBy, (SELECT COALESCE(ABS(SUM(AmountPaid)), 0) FROM LabFeesLedger WHERE VisitID = v.ID AND AmountPaid < 0) as RefundedAmount, (SELECT Notes FROM LabFeesLedger WHERE VisitID = v.ID AND Notes LIKE '%Waived Off%' ORDER BY PaymentDate DESC LIMIT 1) as WaivedOffReason";
-      const dataQuery = `
+    // 2. Fetch paginated data
+    const columns = "v.ID, v.LabPatientID, v.VisitDate, v.Status, v.TotalAmount, v.DiscountAmount, v.PaidAmount, v.PaymentStatus, v.CreatedAt, v.SelectedTests, v.CreatedBy, (SELECT COALESCE(ABS(SUM(AmountPaid)), 0) FROM LabFeesLedger WHERE VisitID = v.ID AND AmountPaid < 0) as RefundedAmount, (SELECT Notes FROM LabFeesLedger WHERE VisitID = v.ID AND Notes LIKE '%Waived Off%' ORDER BY PaymentDate DESC LIMIT 1) as WaivedOffReason";
+    const dataQuery = `
       SELECT ${columns}, p.Name as PatientName, p.GuardianName, p.Age, p.Gender, p.Phone 
       FROM LabVisits v 
       JOIN LabPatients p ON v.LabPatientID = p.ID
       ${whereClause}
       ORDER BY v.CreatedAt DESC LIMIT ? OFFSET ?
     `;
-      const [rows] = await pool.query(dataQuery, [...queryParams, limit, offset]);
+    const [rows] = await pool.query(dataQuery, [...queryParams, limit, offset]);
 
-      // 3. Calculate summary stats (totalCollection, totalDiscount, totalTests) using the SAME whereClause
-      const statsQuery = `
+    // 3. Calculate summary stats (totalCollection, totalDiscount, totalTests) using the SAME whereClause
+    const statsQuery = `
       SELECT 
         SUM(CASE WHEN v.PaymentStatus = 'Refunded' OR v.PaymentStatus = 'Cancelled' THEN 0 ELSE v.PaidAmount END) as totalCollection, 
         SUM(CASE WHEN v.PaymentStatus = 'Refunded' OR v.PaymentStatus = 'Cancelled' THEN 0 ELSE v.DiscountAmount END) as totalDiscount,
@@ -4623,1027 +4769,1099 @@ app.post('/api/patient-services', async (req, res) => {
       JOIN LabPatients p ON v.LabPatientID = p.ID
       ${whereClause}
     `;
-      const [statsResult] = await pool.query(statsQuery, queryParams);
-      const totalCollection = statsResult[0].totalCollection || 0;
-      const totalDiscount = statsResult[0].totalDiscount || 0;
-      const totalVisits = statsResult[0].totalVisits || 0;
+    const [statsResult] = await pool.query(statsQuery, queryParams);
+    const totalCollection = statsResult[0].totalCollection || 0;
+    const totalDiscount = statsResult[0].totalDiscount || 0;
+    const totalVisits = statsResult[0].totalVisits || 0;
 
-      res.json({
-        data: rows.map(convertRowDates),
-        meta: {
-          total,
-          page,
-          limit,
-          totalPages: Math.ceil(total / limit),
-          totalCollection,
-          totalDiscount,
-          totalTests: statsResult[0].totalTests || 0
-        }
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+    res.json({
+      data: rows.map(convertRowDates),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+        totalCollection,
+        totalDiscount,
+        totalTests: statsResult[0].totalTests || 0
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/lab-visits/:id', async (req, res) => {
+  try {
+    const { status, selectedTests, totalAmount, discountAmount, paidAmount, paymentStatus } = req.body;
+    // Build dynamic update query
+    let updateFields = [];
+    let queryParams = [];
+
+    if (status !== undefined) {
+      updateFields.push('Status = ?');
+      queryParams.push(status);
     }
-  });
-
-  app.put('/api/lab-visits/:id', async (req, res) => {
-    try {
-      const { status, selectedTests, totalAmount, discountAmount, paidAmount, paymentStatus } = req.body;
-      // Build dynamic update query
-      let updateFields = [];
-      let queryParams = [];
-
-      if (status !== undefined) {
-        updateFields.push('Status = ?');
-        queryParams.push(status);
-      }
-      if (selectedTests !== undefined) {
-        updateFields.push('SelectedTests = ?');
-        queryParams.push(JSON.stringify(selectedTests));
-      }
-      if (totalAmount !== undefined) {
-        updateFields.push('TotalAmount = ?');
-        queryParams.push(totalAmount);
-      }
-      if (discountAmount !== undefined) {
-        updateFields.push('DiscountAmount = ?');
-        queryParams.push(discountAmount);
-      }
-      if (paidAmount !== undefined) {
-        updateFields.push('PaidAmount = ?');
-        queryParams.push(paidAmount);
-      }
-      if (paymentStatus !== undefined) {
-        updateFields.push('PaymentStatus = ?');
-        queryParams.push(paymentStatus);
-      }
-
-      if (updateFields.length > 0) {
-        queryParams.push(req.params.id);
-        await pool.query(
-          `UPDATE LabVisits SET ${updateFields.join(', ')} WHERE ID = ?`,
-          queryParams
-        );
-      }
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+    if (selectedTests !== undefined) {
+      updateFields.push('SelectedTests = ?');
+      queryParams.push(JSON.stringify(selectedTests));
     }
-  });
+    if (totalAmount !== undefined) {
+      updateFields.push('TotalAmount = ?');
+      queryParams.push(totalAmount);
+    }
+    if (discountAmount !== undefined) {
+      updateFields.push('DiscountAmount = ?');
+      queryParams.push(discountAmount);
+    }
+    if (paidAmount !== undefined) {
+      updateFields.push('PaidAmount = ?');
+      queryParams.push(paidAmount);
+    }
+    if (paymentStatus !== undefined) {
+      updateFields.push('PaymentStatus = ?');
+      queryParams.push(paymentStatus);
+    }
 
-  // Record a new payment for a lab visit
-  app.post('/api/lab-visits/:id/payment', async (req, res) => {
-    try {
-      const { labPatientId, amountPaid, paymentMethod, notes, discountAmount } = req.body;
-      const visitId = req.params.id;
-
-      // 1. Fetch current visit
-      const [visits] = await pool.query('SELECT * FROM LabVisits WHERE ID = ?', [visitId]);
-      if (visits.length === 0) return res.status(404).json({ error: 'Visit not found' });
-      const visit = visits[0];
-
-      // 2. Calculate new totals
-      const newDiscount = Number(visit.DiscountAmount) + Number(discountAmount || 0);
-      const newPaid = Number(visit.PaidAmount) + Number(amountPaid || 0);
-      const newBalance = Number(visit.TotalAmount) - newDiscount - newPaid;
-      const paymentStatus = newBalance <= 0 ? 'Paid' : (newPaid > 0 ? 'Partial' : 'Unpaid');
-
-      // 3. Update the Visit record
+    if (updateFields.length > 0) {
+      queryParams.push(req.params.id);
       await pool.query(
-        'UPDATE LabVisits SET DiscountAmount = ?, PaidAmount = ?, PaymentStatus = ? WHERE ID = ?',
-        [newDiscount, newPaid, paymentStatus, visitId]
+        `UPDATE LabVisits SET ${updateFields.join(', ')} WHERE ID = ?`,
+        queryParams
       );
 
-      // 4. Create ledger entry if some money actually changed hands or a discount/waiver was applied
-      if (Number(amountPaid) > 0 || Number(discountAmount) > 0 || (notes && notes.toLowerCase().includes('waived off'))) {
-        const paymentId = `LPMT-${Date.now().toString(36).toUpperCase()}`;
-        await pool.query(
-          'INSERT INTO LabFeesLedger (ID, LabPatientID, VisitID, AmountPaid, PaymentMethod, Notes, PaymentDate) VALUES (?, ?, ?, ?, ?, ?, ?)',
-          [paymentId, labPatientId, visitId, amountPaid, paymentMethod || 'Cash', notes || '', new Date().toISOString()]
-        );
-      }
-
-      res.json({ success: true, paymentStatus });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Get payment ledger for a lab patient
-  app.get('/api/lab-visits/:patientId/payments', async (req, res) => {
-    try {
-      const [rows] = await pool.query(
-        'SELECT h.*, v.TotalAmount, v.DiscountAmount, v.PaidAmount AS VisitPaidAmount ' +
-        'FROM LabFeesLedger h ' +
-        'JOIN LabVisits v ON h.VisitID = v.ID ' +
-        'WHERE h.LabPatientID = ? ORDER BY h.PaymentDate DESC',
-        [req.params.patientId]
-      );
-      res.json(rows.map(convertRowDates));
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.delete('/api/lab-visits/:id', async (req, res) => {
-    try {
-      const [result] = await pool.query('DELETE FROM LabVisits WHERE ID = ?', [req.params.id]);
-      if (result.affectedRows === 0) {
-        return res.status(404).json({ error: 'Lab Visit not found' });
-      }
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-
-
-  // ============ ROLES API ============
-
-  // All available permission keys in the system
-  // Page-based + button-level permissions
-  const ALL_PERMISSIONS = [
-    // ── Pages ──
-    { key: 'page_dashboard', label: 'Dashboard', group: 'Pages' },
-    { key: 'page_super_admin', label: 'Super Admin Dashboard', group: 'Pages' },
-    { key: 'page_appointments', label: 'Appointments', group: 'Pages' },
-    { key: 'page_patients', label: 'Patients', group: 'Pages' },
-    { key: 'page_fees', label: 'Fee Collection', group: 'Pages' },
-    { key: 'page_medicines', label: 'Medicines', group: 'Pages' },
-    { key: 'page_pharmacy', label: 'Pharmacy', group: 'Pages' },
-    { key: 'page_prescriptions', label: 'Prescriptions', group: 'Pages' },
-    { key: 'page_clinical_forms', label: 'Clinical Forms', group: 'Pages' },
-    { key: 'page_lab_registration', label: 'Lab Registration', group: 'Pages' },
-    { key: 'page_lab_fees', label: 'Lab Fees', group: 'Pages' },
-    { key: 'page_pathology', label: 'Pathology', group: 'Pages' },
-    { key: 'page_lab_results', label: 'Lab Results (Legacy)', group: 'Pages' },
-    { key: 'page_lab_management', label: 'Lab Management', group: 'Pages' },
-    { key: 'page_hr', label: 'HR Management', group: 'Pages' },
-    { key: 'page_salary_settings', label: 'Salary Rules', group: 'Pages' },
-    { key: 'page_users', label: 'User Management', group: 'Pages' },
-    { key: 'page_expenses', label: 'Daily Expenses', group: 'Pages' },
-    { key: 'page_settings', label: 'Settings', group: 'Pages' },
-    // ── Button actions ──
-    { key: 'btn_add_patient', label: 'Add Patient', group: 'Actions' },
-    { key: 'btn_edit_patient', label: 'Edit Patient', group: 'Actions' },
-    { key: 'btn_delete_patient', label: 'Delete Patient', group: 'Actions' },
-    { key: 'btn_manage_stock', label: 'Manage Stock', group: 'Actions' },
-    { key: 'btn_add_lab_test', label: 'Add Lab Test', group: 'Actions' },
-    { key: 'btn_edit_lab_test', label: 'Edit Lab Test', group: 'Actions' },
-    { key: 'btn_delete_lab_test', label: 'Delete Lab Test', group: 'Actions' },
-  ];
-
-  // GET /api/permissions - list all available permission keys
-  app.get('/api/permissions', (req, res) => {
-    res.json(ALL_PERMISSIONS);
-  });
-
-  // GET /api/roles - list all roles with their permissions
-  app.get('/api/roles', async (req, res) => {
-    try {
-      const [roles] = await pool.execute('SELECT * FROM Roles ORDER BY IsSystem DESC, Name ASC');
-      const [rolePerms] = await pool.execute('SELECT RoleName, Permission FROM RolePermissions');
-
-      let rolesWithPerms = roles.map(role => ({
-        id: role.ID,
-        name: role.Name,
-        description: role.Description,
-        isSystem: role.IsSystem === 1,
-        createdAt: role.CreatedAt,
-        permissions: rolePerms.filter(rp => rp.RoleName === role.Name).map(rp => rp.Permission),
-      }));
-
-      // STEALTH: Filter out SuperAdmin role if requester is not a SuperAdmin
-      if (!req.user || req.user.role !== 'SuperAdmin') {
-        rolesWithPerms = rolesWithPerms.filter(r => r.name !== 'SuperAdmin');
-      }
-
-      res.json(rolesWithPerms);
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // POST /api/roles - create a new role
-  app.post('/api/roles', async (req, res) => {
-    try {
-      const { name, description, permissions = [] } = req.body;
-      if (!name) return res.status(400).json({ error: 'Role name is required' });
-
-      await pool.execute(
-        'INSERT INTO Roles (Name, Description, IsSystem) VALUES (?, ?, 0)',
-        [name, description || '']
-      );
-
-      // Insert permissions for this role
-      for (const perm of permissions) {
+      if (paymentStatus === 'Refunded' || paymentStatus === 'Cancelled') {
         await pool.execute(
-          'INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES (?, ?)',
-          [name, perm]
+          "DELETE FROM Notifications WHERE (Message LIKE ? OR Link LIKE ?)",
+          [`%${req.params.id}%`, `%${req.params.id}%`]
         );
       }
-
-      res.json({ success: true, message: `Role '${name}' created` });
-    } catch (error) {
-      if (error.code === 'ER_DUP_ENTRY') {
-        return res.status(409).json({ error: 'A role with this name already exists' });
-      }
-      res.status(500).json({ error: error.message });
     }
-  });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-  // PUT /api/roles/:name - update role name/description
-  app.put('/api/roles/:name', async (req, res) => {
-    try {
-      const { name: oldName } = req.params;
-      const { name: newName, description } = req.body;
+// Record a new payment for a lab visit
+app.post('/api/lab-visits/:id/payment', async (req, res) => {
+  try {
+    const { labPatientId, amountPaid, paymentMethod, notes, discountAmount } = req.body;
+    const visitId = req.params.id;
 
-      // Check if it's a system role (cannot rename)
-      const [existing] = await pool.execute('SELECT * FROM Roles WHERE Name = ?', [oldName]);
-      if (!existing[0]) return res.status(404).json({ error: 'Role not found' });
-      if (existing[0].IsSystem && newName && newName !== oldName) {
-        return res.status(403).json({ error: 'System roles cannot be renamed' });
-      }
+    // 1. Fetch current visit
+    const [visits] = await pool.query('SELECT * FROM LabVisits WHERE ID = ?', [visitId]);
+    if (visits.length === 0) return res.status(404).json({ error: 'Visit not found' });
+    const visit = visits[0];
 
-      await pool.execute(
-        'UPDATE Roles SET Name = ?, Description = ? WHERE Name = ?',
-        [newName || oldName, description ?? existing[0].Description, oldName]
+    // 2. Calculate new totals
+    const newDiscount = Number(visit.DiscountAmount) + Number(discountAmount || 0);
+    const newPaid = Number(visit.PaidAmount) + Number(amountPaid || 0);
+    const newBalance = Number(visit.TotalAmount) - newDiscount - newPaid;
+    const paymentStatus = newBalance <= 0 ? 'Paid' : (newPaid > 0 ? 'Partial' : 'Unpaid');
+
+    // 3. Update the Visit record
+    await pool.query(
+      'UPDATE LabVisits SET DiscountAmount = ?, PaidAmount = ?, PaymentStatus = ? WHERE ID = ?',
+      [newDiscount, newPaid, paymentStatus, visitId]
+    );
+
+    // 4. Create ledger entry if some money actually changed hands or a discount/waiver was applied
+    if (Number(amountPaid) > 0 || Number(discountAmount) > 0 || (notes && notes.toLowerCase().includes('waived off'))) {
+      const paymentId = `LPMT-${Date.now().toString(36).toUpperCase()}`;
+      await pool.query(
+        'INSERT INTO LabFeesLedger (ID, LabPatientID, VisitID, AmountPaid, PaymentMethod, Notes, PaymentDate) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        [paymentId, labPatientId, visitId, amountPaid, paymentMethod || 'Cash', notes || '', new Date().toISOString()]
       );
+    }
 
-      // If name changed, update RolePermissions references
-      if (newName && newName !== oldName) {
-        await pool.execute('UPDATE RolePermissions SET RoleName = ? WHERE RoleName = ?', [newName, oldName]);
-        await pool.execute('UPDATE Users SET Role = ? WHERE Role = ?', [newName, oldName]);
+    // 5. Trigger notifications ONLY for:
+    // a) Discount Applied
+    // b) Payment Status: Pending (Unpaid or Partial)
+    // c) Payment Status: Waived Off (with reason)
+    // All other statuses (e.g. full 'Paid' without discount) do NOT generate notifications!
+    try {
+      const pId = labPatientId || visit.LabPatientID;
+      const [pts] = await pool.query('SELECT Name FROM LabPatients WHERE ID = ?', [pId]);
+      const patientName = pts[0]?.Name || pId || 'Patient';
+      const isWaivedOff = notes && notes.toLowerCase().includes('waived off');
+      const addedDiscount = Number(discountAmount || 0);
+
+      // Notification for Fee Waived Off (takes precedence over discount)
+      if (isWaivedOff) {
+        const reasonText = notes.includes('Reason:') ? notes.split('Reason:')[1].trim() : notes;
+        await createAndSendNotification({
+          targetRoles: ['Receptionist', 'Admin'],
+          type: 'payment_waived_off',
+          title: `Lab Payment Waived Off: ${patientName}`,
+          message: `Payment of Rs. ${Number(visit.TotalAmount).toLocaleString()} waived off for patient ${patientName} (MRN: ${pId}). Reason: ${reasonText || 'Fee Waived'}.`,
+          link: `/lab-fees?search=${encodeURIComponent(pId || visitId)}`,
+          emitSocket: true
+        });
+      } else if (addedDiscount > 0) {
+        // Notification for Discount Applied (only when NOT waived off)
+        await createAndSendNotification({
+          targetRoles: ['Receptionist', 'Admin'],
+          type: 'payment_discount',
+          title: `Lab Discount Applied: ${patientName}`,
+          message: `Discount of Rs. ${addedDiscount.toLocaleString()} applied for patient ${patientName} (MRN: ${pId}). Net Balance: Rs. ${Math.max(0, newBalance).toLocaleString()}.`,
+          link: `/lab-fees?search=${encodeURIComponent(pId || visitId)}`,
+          emitSocket: true
+        });
       }
 
-      res.json({ success: true, message: 'Role updated' });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+      // Notification for Partial Payment or Pending Payment
+      if (!isWaivedOff && newBalance > 0) {
+        const isPartial = paymentStatus === 'Partial' || Number(amountPaid) > 0;
+        const notifType = isPartial ? 'payment_partial' : 'payment_pending';
+        const notifTitle = isPartial
+          ? `💳 Partial Payment Received: ${patientName}`
+          : `⏳ Pending Payment: ${patientName}`;
+        const notifMessage = isPartial
+          ? `Partial payment of Rs. ${Number(amountPaid).toLocaleString()} received for patient ${patientName} (MRN: ${pId}). Remaining balance: Rs. ${newBalance.toLocaleString()}.`
+          : `Patient ${patientName} (MRN: ${pId}) has an unpaid balance of Rs. ${newBalance.toLocaleString()}.`;
 
-  // PUT /api/roles/:name/permissions - update default permissions for a role
-  app.put('/api/roles/:name/permissions', async (req, res) => {
-    try {
-      const { name } = req.params;
-      const { permissions = [] } = req.body;
-
-      // Delete existing permissions for this role
-      await pool.execute('DELETE FROM RolePermissions WHERE RoleName = ?', [name]);
-
-      // Insert new permissions
-      for (const perm of permissions) {
+        await createAndSendNotification({
+          targetRoles: ['Receptionist', 'Admin'],
+          type: notifType,
+          title: notifTitle,
+          message: notifMessage,
+          link: `/lab-fees?search=${encodeURIComponent(pId || visitId)}`,
+          emitSocket: true
+        });
+      } else if (newBalance <= 0) {
+        // Balance paid in full: clean up any existing overdue notifications for this visit!
         await pool.execute(
-          'INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES (?, ?)',
-          [name, perm]
+          "DELETE FROM Notifications WHERE (Type = 'payment_overdue_past' OR Type = 'payment_pending' OR Type = 'payment_partial') AND (Message LIKE ? OR Link LIKE ?)",
+          [`%${visitId}%`, `%${pId}%`]
         );
       }
-
-      res.json({ success: true, message: 'Permissions updated' });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+    } catch (e) {
+      console.warn('⚠️ Could not send payment notification:', e.message);
     }
-  });
 
-  // DELETE /api/roles/:name - delete a role (blocked if users are assigned)
-  app.delete('/api/roles/:name', async (req, res) => {
-    try {
-      const { name } = req.params;
+    res.json({ success: true, paymentStatus });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-      // Block deletion of system roles
-      const [existing] = await pool.execute('SELECT * FROM Roles WHERE Name = ?', [name]);
-      if (!existing[0]) return res.status(404).json({ error: 'Role not found' });
-      if (existing[0].IsSystem) return res.status(403).json({ error: 'System roles cannot be deleted' });
+// Get payment ledger for a lab patient
+app.get('/api/lab-visits/:patientId/payments', async (req, res) => {
+  try {
+    const [rows] = await pool.query(
+      'SELECT h.*, v.TotalAmount, v.DiscountAmount, v.PaidAmount AS VisitPaidAmount ' +
+      'FROM LabFeesLedger h ' +
+      'JOIN LabVisits v ON h.VisitID = v.ID ' +
+      'WHERE h.LabPatientID = ? ORDER BY h.PaymentDate DESC',
+      [req.params.patientId]
+    );
+    res.json(rows.map(convertRowDates));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-      // Block if users are assigned to this role
-      const [assignedUsers] = await pool.execute('SELECT COUNT(*) as count FROM Users WHERE Role = ?', [name]);
-      if (assignedUsers[0].count > 0) {
-        return res.status(409).json({ error: `Cannot delete role: ${assignedUsers[0].count} user(s) are assigned to it` });
-      }
-
-      await pool.execute('DELETE FROM RolePermissions WHERE RoleName = ?', [name]);
-      await pool.execute('DELETE FROM Roles WHERE Name = ?', [name]);
-
-      res.json({ success: true, message: `Role '${name}' deleted` });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+app.delete('/api/lab-visits/:id', async (req, res) => {
+  try {
+    const [result] = await pool.query('DELETE FROM LabVisits WHERE ID = ?', [req.params.id]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: 'Lab Visit not found' });
     }
-  });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-  // ============ USERS API ============
 
-  // Get all users (excluding passwords)
-  app.get('/api/users', async (req, res) => {
-    try {
-      const [rows] = await pool.execute(
-        'SELECT ID, Username, Name, Email, Phone, Role, Permissions, IsActive, CreatedBy, CreatedAt, UpdatedAt, LastLogin FROM Users ORDER BY CreatedAt DESC'
-      );
-      
-      let users = rows;
-      // STEALTH: Filter out SuperAdmin users if requester is not a SuperAdmin
-      if (!req.user || req.user.role !== 'SuperAdmin') {
-        users = users.filter(u => u.Role !== 'SuperAdmin');
-      }
-      
-      res.json(users.map(convertRowDates));
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+
+// ============ ROLES API ============
+
+// All available permission keys in the system
+// Page-based + button-level permissions
+const ALL_PERMISSIONS = [
+  // ── Pages ──
+  { key: 'page_dashboard', label: 'Dashboard', group: 'Pages' },
+  { key: 'page_super_admin', label: 'Super Admin Dashboard', group: 'Pages' },
+  { key: 'page_appointments', label: 'Appointments', group: 'Pages' },
+  { key: 'page_patients', label: 'Patients', group: 'Pages' },
+  { key: 'page_fees', label: 'Fee Collection', group: 'Pages' },
+  { key: 'page_medicines', label: 'Medicines', group: 'Pages' },
+  { key: 'page_pharmacy', label: 'Pharmacy', group: 'Pages' },
+  { key: 'page_prescriptions', label: 'Prescriptions', group: 'Pages' },
+  { key: 'page_clinical_forms', label: 'Clinical Forms', group: 'Pages' },
+  { key: 'page_lab_registration', label: 'Lab Registration', group: 'Pages' },
+  { key: 'page_lab_fees', label: 'Lab Fees', group: 'Pages' },
+  { key: 'page_pathology', label: 'Pathology', group: 'Pages' },
+  { key: 'page_lab_results', label: 'Lab Results (Legacy)', group: 'Pages' },
+  { key: 'page_lab_management', label: 'Lab Management', group: 'Pages' },
+  { key: 'page_hr', label: 'HR Management', group: 'Pages' },
+  { key: 'page_salary_settings', label: 'Salary Rules', group: 'Pages' },
+  { key: 'page_users', label: 'User Management', group: 'Pages' },
+  { key: 'page_expenses', label: 'Daily Expenses', group: 'Pages' },
+  { key: 'page_settings', label: 'Settings', group: 'Pages' },
+  // ── Button actions ──
+  { key: 'btn_add_patient', label: 'Add Patient', group: 'Actions' },
+  { key: 'btn_edit_patient', label: 'Edit Patient', group: 'Actions' },
+  { key: 'btn_delete_patient', label: 'Delete Patient', group: 'Actions' },
+  { key: 'btn_manage_stock', label: 'Manage Stock', group: 'Actions' },
+  { key: 'btn_add_lab_test', label: 'Add Lab Test', group: 'Actions' },
+  { key: 'btn_edit_lab_test', label: 'Edit Lab Test', group: 'Actions' },
+  { key: 'btn_delete_lab_test', label: 'Delete Lab Test', group: 'Actions' },
+];
+
+// GET /api/permissions - list all available permission keys
+app.get('/api/permissions', (req, res) => {
+  res.json(ALL_PERMISSIONS);
+});
+
+// GET /api/roles - list all roles with their permissions
+app.get('/api/roles', async (req, res) => {
+  try {
+    const [roles] = await pool.execute('SELECT * FROM Roles ORDER BY IsSystem DESC, Name ASC');
+    const [rolePerms] = await pool.execute('SELECT RoleName, Permission FROM RolePermissions');
+
+    let rolesWithPerms = roles.map(role => ({
+      id: role.ID,
+      name: role.Name,
+      description: role.Description,
+      isSystem: role.IsSystem === 1,
+      createdAt: role.CreatedAt,
+      permissions: rolePerms.filter(rp => rp.RoleName === role.Name).map(rp => rp.Permission),
+    }));
+
+    // STEALTH: Filter out SuperAdmin role if requester is not a SuperAdmin
+    if (!req.user || req.user.role !== 'SuperAdmin') {
+      rolesWithPerms = rolesWithPerms.filter(r => r.name !== 'SuperAdmin');
     }
-  });
 
-  // Get single user by ID
-  app.get('/api/users/:id', async (req, res) => {
-    try {
-      const [rows] = await pool.execute(
-        'SELECT ID, Username, Name, Email, Phone, Role, Permissions, IsActive, CreatedBy, CreatedAt, UpdatedAt, LastLogin FROM Users WHERE ID = ?',
-        [req.params.id]
-      );
-      res.json(rows[0] ? convertRowDates(rows[0]) : null);
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+    res.json(rolesWithPerms);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-  // Create new user
-  app.post('/api/users', async (req, res) => {
-    try {
-      const { id, username, password, name, email, phone, role, permissions, createdBy } = req.body;
-      
-      // STEALTH: Prevent non-SuperAdmins from creating SuperAdmin accounts
-      if (role === 'SuperAdmin' && (!req.user || req.user.role !== 'SuperAdmin')) {
-        return res.status(403).json({ error: 'You do not have permission to create a Super Admin account.' });
-      }
+// POST /api/roles - create a new role
+app.post('/api/roles', async (req, res) => {
+  try {
+    const { name, description, permissions = [] } = req.body;
+    if (!name) return res.status(400).json({ error: 'Role name is required' });
 
-      const createdAt = new Date().toISOString();
-      const permissionsJson = typeof permissions === 'string' ? permissions : JSON.stringify(permissions || []);
+    await pool.execute(
+      'INSERT INTO Roles (Name, Description, IsSystem) VALUES (?, ?, 0)',
+      [name, description || '']
+    );
 
+    // Insert permissions for this role
+    for (const perm of permissions) {
       await pool.execute(
-        'INSERT INTO Users (ID, Username, Password, Name, Email, Phone, Role, Permissions, IsActive, CreatedBy, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [id, username, password, name, email || null, phone || null, role || 'Receptionist', permissionsJson, 1, createdBy || null, createdAt]
+        'INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES (?, ?)',
+        [name, perm]
       );
-
-      res.json({ success: true, id });
-    } catch (error) {
-      console.error('Error creating user:', error);
-      res.status(500).json({ error: error.message });
     }
-  });
 
-  // Update user
-  app.put('/api/users/:id', async (req, res) => {
-    try {
-      const { username, name, email, phone, role, isActive } = req.body;
+    res.json({ success: true, message: `Role '${name}' created` });
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ error: 'A role with this name already exists' });
+    }
+    res.status(500).json({ error: error.message });
+  }
+});
 
-      // STEALTH: Prevent non-SuperAdmins from assigning SuperAdmin role
-      if (role === 'SuperAdmin' && (!req.user || req.user.role !== 'SuperAdmin')) {
-        return res.status(403).json({ error: 'You do not have permission to assign the Super Admin role.' });
+// PUT /api/roles/:name - update role name/description
+app.put('/api/roles/:name', async (req, res) => {
+  try {
+    const { name: oldName } = req.params;
+    const { name: newName, description } = req.body;
+
+    // Check if it's a system role (cannot rename)
+    const [existing] = await pool.execute('SELECT * FROM Roles WHERE Name = ?', [oldName]);
+    if (!existing[0]) return res.status(404).json({ error: 'Role not found' });
+    if (existing[0].IsSystem && newName && newName !== oldName) {
+      return res.status(403).json({ error: 'System roles cannot be renamed' });
+    }
+
+    await pool.execute(
+      'UPDATE Roles SET Name = ?, Description = ? WHERE Name = ?',
+      [newName || oldName, description ?? existing[0].Description, oldName]
+    );
+
+    // If name changed, update RolePermissions references
+    if (newName && newName !== oldName) {
+      await pool.execute('UPDATE RolePermissions SET RoleName = ? WHERE RoleName = ?', [newName, oldName]);
+      await pool.execute('UPDATE Users SET Role = ? WHERE Role = ?', [newName, oldName]);
+    }
+
+    res.json({ success: true, message: 'Role updated' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/roles/:name/permissions - update default permissions for a role
+app.put('/api/roles/:name/permissions', async (req, res) => {
+  try {
+    const { name } = req.params;
+    const { permissions = [] } = req.body;
+
+    // Delete existing permissions for this role
+    await pool.execute('DELETE FROM RolePermissions WHERE RoleName = ?', [name]);
+
+    // Insert new permissions
+    for (const perm of permissions) {
+      await pool.execute(
+        'INSERT IGNORE INTO RolePermissions (RoleName, Permission) VALUES (?, ?)',
+        [name, perm]
+      );
+    }
+
+    res.json({ success: true, message: 'Permissions updated' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// DELETE /api/roles/:name - delete a role (blocked if users are assigned)
+app.delete('/api/roles/:name', async (req, res) => {
+  try {
+    const { name } = req.params;
+
+    // Block deletion of system roles
+    const [existing] = await pool.execute('SELECT * FROM Roles WHERE Name = ?', [name]);
+    if (!existing[0]) return res.status(404).json({ error: 'Role not found' });
+    if (existing[0].IsSystem) return res.status(403).json({ error: 'System roles cannot be deleted' });
+
+    // Block if users are assigned to this role
+    const [assignedUsers] = await pool.execute('SELECT COUNT(*) as count FROM Users WHERE Role = ?', [name]);
+    if (assignedUsers[0].count > 0) {
+      return res.status(409).json({ error: `Cannot delete role: ${assignedUsers[0].count} user(s) are assigned to it` });
+    }
+
+    await pool.execute('DELETE FROM RolePermissions WHERE RoleName = ?', [name]);
+    await pool.execute('DELETE FROM Roles WHERE Name = ?', [name]);
+
+    res.json({ success: true, message: `Role '${name}' deleted` });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ USERS API ============
+
+// Get all users (excluding passwords)
+app.get('/api/users', async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT ID, Username, Name, Email, Phone, Role, Permissions, IsActive, CreatedBy, CreatedAt, UpdatedAt, LastLogin FROM Users ORDER BY CreatedAt DESC'
+    );
+
+    let users = rows;
+    // STEALTH: Filter out SuperAdmin users if requester is not a SuperAdmin
+    if (!req.user || req.user.role !== 'SuperAdmin') {
+      users = users.filter(u => u.Role !== 'SuperAdmin');
+    }
+
+    res.json(users.map(convertRowDates));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get single user by ID
+app.get('/api/users/:id', async (req, res) => {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT ID, Username, Name, Email, Phone, Role, Permissions, IsActive, CreatedBy, CreatedAt, UpdatedAt, LastLogin FROM Users WHERE ID = ?',
+      [req.params.id]
+    );
+    res.json(rows[0] ? convertRowDates(rows[0]) : null);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create new user
+app.post('/api/users', async (req, res) => {
+  try {
+    const { id, username, password, name, email, phone, role, permissions, createdBy } = req.body;
+
+    // STEALTH: Prevent non-SuperAdmins from creating SuperAdmin accounts
+    if (role === 'SuperAdmin' && (!req.user || req.user.role !== 'SuperAdmin')) {
+      return res.status(403).json({ error: 'You do not have permission to create a Super Admin account.' });
+    }
+
+    const createdAt = new Date().toISOString();
+    const permissionsJson = typeof permissions === 'string' ? permissions : JSON.stringify(permissions || []);
+
+    await pool.execute(
+      'INSERT INTO Users (ID, Username, Password, Name, Email, Phone, Role, Permissions, IsActive, CreatedBy, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, username, password, name, email || null, phone || null, role || 'Receptionist', permissionsJson, 1, createdBy || null, createdAt]
+    );
+
+    res.json({ success: true, id });
+  } catch (error) {
+    console.error('Error creating user:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update user
+app.put('/api/users/:id', async (req, res) => {
+  try {
+    const { username, name, email, phone, role, isActive } = req.body;
+
+    // STEALTH: Prevent non-SuperAdmins from assigning SuperAdmin role
+    if (role === 'SuperAdmin' && (!req.user || req.user.role !== 'SuperAdmin')) {
+      return res.status(403).json({ error: 'You do not have permission to assign the Super Admin role.' });
+    }
+
+    await pool.execute(
+      'UPDATE Users SET Username = ?, Name = ?, Email = ?, Phone = ?, Role = ?, IsActive = ? WHERE ID = ?',
+      [username, name, email || null, phone || null, role, isActive !== undefined ? isActive : 1, req.params.id]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update user permissions
+app.put('/api/users/:id/permissions', async (req, res) => {
+  try {
+    const { permissions } = req.body;
+    const permissionsJson = typeof permissions === 'string' ? permissions : JSON.stringify(permissions || []);
+
+    await pool.execute(
+      'UPDATE Users SET Permissions = ? WHERE ID = ?',
+      [permissionsJson, req.params.id]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update user password
+app.put('/api/users/:id/password', async (req, res) => {
+  try {
+    const { password } = req.body;
+
+    await pool.execute(
+      'UPDATE Users SET Password = ? WHERE ID = ?',
+      [password, req.params.id]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Soft delete user (set IsActive to 0)
+app.delete('/api/users/:id', async (req, res) => {
+  try {
+    await pool.execute(
+      'UPDATE Users SET IsActive = 0 WHERE ID = ?',
+      [req.params.id]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Login endpoint
+app.post('/api/users/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const [rows] = await pool.execute(
+      'SELECT ID, Username, Name, Email, Phone, Role, Permissions, IsActive FROM Users WHERE Username = ? AND Password = ?',
+      [username, password]
+    );
+
+    if (rows.length > 0) {
+      const user = rows[0];
+
+      // 🛡️ DEACTIVATED USER CHECK
+      if (!user.IsActive) {
+        return res.status(403).json({ error: 'USER IS deactivated please contact system admin' });
       }
 
+      // Update last login timestamp
       await pool.execute(
-        'UPDATE Users SET Username = ?, Name = ?, Email = ?, Phone = ?, Role = ?, IsActive = ? WHERE ID = ?',
-        [username, name, email || null, phone || null, role, isActive !== undefined ? isActive : 1, req.params.id]
+        'UPDATE Users SET LastLogin = ? WHERE ID = ?',
+        [new Date().toISOString(), user.ID]
       );
 
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Update user permissions
-  app.put('/api/users/:id/permissions', async (req, res) => {
-    try {
-      const { permissions } = req.body;
-      const permissionsJson = typeof permissions === 'string' ? permissions : JSON.stringify(permissions || []);
-
-      await pool.execute(
-        'UPDATE Users SET Permissions = ? WHERE ID = ?',
-        [permissionsJson, req.params.id]
-      );
-
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Update user password
-  app.put('/api/users/:id/password', async (req, res) => {
-    try {
-      const { password } = req.body;
-
-      await pool.execute(
-        'UPDATE Users SET Password = ? WHERE ID = ?',
-        [password, req.params.id]
-      );
-
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Soft delete user (set IsActive to 0)
-  app.delete('/api/users/:id', async (req, res) => {
-    try {
-      await pool.execute(
-        'UPDATE Users SET IsActive = 0 WHERE ID = ?',
-        [req.params.id]
-      );
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Login endpoint
-  app.post('/api/users/login', async (req, res) => {
-    try {
-      const { username, password } = req.body;
-      const [rows] = await pool.execute(
-        'SELECT ID, Username, Name, Email, Phone, Role, Permissions, IsActive FROM Users WHERE Username = ? AND Password = ?',
-        [username, password]
-      );
-
-      if (rows.length > 0) {
-        const user = rows[0];
-
-        // 🛡️ DEACTIVATED USER CHECK
-        if (!user.IsActive) {
-          return res.status(403).json({ error: 'USER IS deactivated please contact system admin' });
-        }
-
-        // Update last login timestamp
-        await pool.execute(
-          'UPDATE Users SET LastLogin = ? WHERE ID = ?',
-          [new Date().toISOString(), user.ID]
-        );
-
-        // Load user's own permissions first; fall back to role defaults if empty
-        let userPerms = [];
-        try {
-          const raw = user.Permissions;
-          userPerms = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
-        } catch { userPerms = []; }
-
-        if (!userPerms || userPerms.length === 0) {
-          // Fall back to role-level permissions
-          const [rolePerms] = await pool.execute(
-            'SELECT Permission FROM RolePermissions WHERE RoleName = ?',
-            [user.Role]
-          );
-          userPerms = rolePerms.map(rp => rp.Permission);
-        }
-
-        const permissions = JSON.stringify(userPerms);
-        const payloadUser = { ...convertRowDates(user), Permissions: permissions };
-
-        // Generate the JWT token with a 1 hour expiration
-        const token = jwt.sign(
-          { id: user.ID, username: user.Username, name: user.Name, role: user.Role },
-          JWT_SECRET,
-          { expiresIn: '1h' }
-        );
-
-        res.json({ success: true, token, user: payloadUser });
-      } else {
-        res.status(401).json({ error: 'Invalid credentials' });
-      }
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // ============ DAILY EXPENSES API ============
-
-  // Get all expenses
-  app.get('/api/daily-expenses', async (req, res) => {
-    try {
-      const page = parseInt(req.query.page) || 1;
-      const limit = parseInt(req.query.limit) || 20;
-      const offset = (page - 1) * limit;
-      const month = req.query.month; // e.g. YYYY-MM
-
-      let whereClause = '';
-      let params = [];
-
-      if (month && month.trim() !== '') {
-        whereClause = 'WHERE Date LIKE ?';
-        params.push(`${month}%`);
-      }
-
-      // 1. Get total count and monthly sum
-      const [countResult] = await pool.query(`SELECT COUNT(*) as total, SUM(Amount) as monthlyTotal FROM DailyExpenses ${whereClause}`, params);
-      const total = countResult[0].total || 0;
-      const monthlyTotal = parseFloat(countResult[0].monthlyTotal) || 0;
-
-
-      // 2. Get paginated data
-      // Selective fetching for list view
-      const columns = 'ID, Date, Category, Description, Amount, CreatedBy, CreatedAt';
-      let query = `SELECT ${columns} FROM DailyExpenses ${whereClause} ORDER BY Date DESC, CreatedAt DESC`;
-      let queryParams = [...params];
-
-      if (limit !== -1) {
-        query += ` LIMIT ? OFFSET ?`;
-        queryParams.push(Number(limit), Number(offset));
-      }
-
-      const [rows] = await pool.query(query, queryParams);
-
-      res.json({
-        data: rows.map(convertRowDates),
-        meta: {
-          total,
-          page,
-          limit,
-          totalPages: limit === -1 ? 1 : Math.max(1, Math.ceil(total / limit)),
-          monthlyTotal
-        }
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Create new expense
-  app.post('/api/daily-expenses', async (req, res) => {
-    try {
-      const { id, date, description, category, amount, paymentMethod, createdBy } = req.body;
-      const createdAt = new Date().toISOString();
-
-      await pool.execute(
-        'INSERT INTO DailyExpenses (ID, Date, Description, Category, Amount, PaymentMethod, CreatedBy, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [id, date, description, category, amount, paymentMethod, createdBy || 'System', createdAt]
-      );
-
-      flushExpenseCache();
-      res.json({ success: true, id });
-    } catch (error) {
-      console.error('Error creating expense:', error);
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Delete expense
-  app.delete('/api/daily-expenses/:id', async (req, res) => {
-    try {
-      await pool.execute('DELETE FROM DailyExpenses WHERE ID = ?', [req.params.id]);
-      flushExpenseCache();
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // ============ HR & PAYROLL API ============
-
-  app.get('/api/employees/me/:userId', async (req, res) => {
-    try {
-      const [rows] = await pool.query('SELECT * FROM Employees WHERE UserID = ?', [req.params.userId]);
-      res.json(rows[0] ? convertRowDates(rows[0]) : null);
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // --- Employees ---
-  app.get('/api/employees', cacheMiddleware, async (req, res) => {
-    try {
-      const columns = 'ID, UserID, Name, Designation, Phone, JoiningDate, BasicSalary, StandardDailyHours, ShiftStartTime, ShiftEndTime, Status, CreatedAt';
-      const [rows] = await pool.query(`SELECT ${columns} FROM Employees ORDER BY CreatedAt DESC`);
-      res.json(rows.map(convertRowDates));
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post('/api/employees', async (req, res) => {
-    try {
-      const { ID, UserID, Name, Designation, Phone, JoiningDate, BasicSalary, Status, StandardDailyHours, ShiftStartTime, ShiftEndTime } = req.body;
-      await pool.execute(
-        'INSERT INTO Employees (ID, UserID, Name, Designation, Phone, JoiningDate, BasicSalary, Status, StandardDailyHours, ShiftStartTime, ShiftEndTime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [ID, UserID || null, Name, Designation || null, Phone || null, JoiningDate || null, BasicSalary || 0, Status || 'Active', StandardDailyHours || 8, ShiftStartTime || '09:00:00', ShiftEndTime || '17:00:00']
-      );
-      res.json({ success: true, id: ID });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.put('/api/employees/:id', async (req, res) => {
-    try {
-      const { UserID, Name, Designation, Phone, JoiningDate, BasicSalary, Status, StandardDailyHours, ShiftStartTime, ShiftEndTime } = req.body;
-      await pool.execute(
-        'UPDATE Employees SET UserID = ?, Name = ?, Designation = ?, Phone = ?, JoiningDate = ?, BasicSalary = ?, Status = ?, StandardDailyHours = ?, ShiftStartTime = ?, ShiftEndTime = ? WHERE ID = ?',
-        [UserID || null, Name, Designation || null, Phone || null, JoiningDate || null, BasicSalary || 0, Status || 'Active', StandardDailyHours || 8, ShiftStartTime || '09:00:00', ShiftEndTime || '17:00:00', req.params.id]
-      );
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.delete('/api/employees/:id', async (req, res) => {
-    try {
-      await pool.execute('DELETE FROM Employees WHERE ID = ?', [req.params.id]);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // --- Attendance ---
-  app.get('/api/attendance', async (req, res) => {
-    try {
-      const { date, employeeId, startDate, endDate } = req.query;
-      let whereClause = 'WHERE 1=1';
-      let params = [];
-
-      if (date) {
-        whereClause += ' AND Date = ?';
-        params.push(date);
-      }
-      if (employeeId) {
-        whereClause += ' AND EmployeeID = ?';
-        params.push(employeeId);
-      }
-      if (startDate && endDate) {
-        whereClause += ' AND Date BETWEEN ? AND ?';
-        params.push(startDate, endDate);
-      }
-
-      const columns = 'ID, EmployeeID, Date, Status, CheckIn, CheckOut, Notes';
-      const [rows] = await pool.query(`SELECT ${columns} FROM Attendance ${whereClause} ORDER BY Date DESC`, params);
-      res.json(rows.map(convertRowDates));
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post('/api/attendance/mark', async (req, res) => {
-    try {
-      const { EmployeeID, Date: recordDate, Status, CheckIn, CheckOut, Notes } = req.body;
-
-      // IP Security Validation
-      let isAuthorized = true;
+      // Load user's own permissions first; fall back to role defaults if empty
+      let userPerms = [];
       try {
-        const [settingsRows] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
-        if (settingsRows.length > 0 && settingsRows[0].Data) {
-          const globalData = typeof settingsRows[0].Data === 'string' ? JSON.parse(settingsRows[0].Data) : settingsRows[0].Data;
+        const raw = user.Permissions;
+        userPerms = raw ? (typeof raw === 'string' ? JSON.parse(raw) : raw) : [];
+      } catch { userPerms = []; }
 
-          if (globalData.clinicIpAddress && globalData.clinicIpAddress.trim() !== '') {
-            // Get client IP
-            const rawClientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || '';
-            const clientIpStr = String(rawClientIp);
-            const requiredIp = globalData.clinicIpAddress.trim();
+      if (!userPerms || userPerms.length === 0) {
+        // Fall back to role-level permissions
+        const [rolePerms] = await pool.execute(
+          'SELECT Permission FROM RolePermissions WHERE RoleName = ?',
+          [user.Role]
+        );
+        userPerms = rolePerms.map(rp => rp.Permission);
+      }
 
-            // Support multiple IPs separated by comma
-            const allowedIps = requiredIp.split(',').map(ip => ip.trim()).filter(ip => ip.length > 0);
+      const permissions = JSON.stringify(userPerms);
+      const payloadUser = { ...convertRowDates(user), Permissions: permissions };
 
-            const isAllowedIP = allowedIps.some(ip => clientIpStr.includes(ip));
+      // Generate the JWT token with a 1 hour expiration
+      const token = jwt.sign(
+        { id: user.ID, username: user.Username, name: user.Name, role: user.Role },
+        JWT_SECRET,
+        { expiresIn: '1h' }
+      );
 
-            if (!isAllowedIP) {
-              console.log(`[ATTENDANCE BLOCKED] Required IP(s): ${requiredIp}, Client IP: ${clientIpStr}`);
-              isAuthorized = false;
-            }
+      res.json({ success: true, token, user: payloadUser });
+    } else {
+      res.status(401).json({ error: 'Invalid credentials' });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ DAILY EXPENSES API ============
+
+// Get all expenses
+app.get('/api/daily-expenses', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+    const month = req.query.month; // e.g. YYYY-MM
+
+    let whereClause = '';
+    let params = [];
+
+    if (month && month.trim() !== '') {
+      whereClause = 'WHERE Date LIKE ?';
+      params.push(`${month}%`);
+    }
+
+    // 1. Get total count and monthly sum
+    const [countResult] = await pool.query(`SELECT COUNT(*) as total, SUM(Amount) as monthlyTotal FROM DailyExpenses ${whereClause}`, params);
+    const total = countResult[0].total || 0;
+    const monthlyTotal = parseFloat(countResult[0].monthlyTotal) || 0;
+
+
+    // 2. Get paginated data
+    // Selective fetching for list view
+    const columns = 'ID, Date, Category, Description, Amount, CreatedBy, CreatedAt';
+    let query = `SELECT ${columns} FROM DailyExpenses ${whereClause} ORDER BY Date DESC, CreatedAt DESC`;
+    let queryParams = [...params];
+
+    if (limit !== -1) {
+      query += ` LIMIT ? OFFSET ?`;
+      queryParams.push(Number(limit), Number(offset));
+    }
+
+    const [rows] = await pool.query(query, queryParams);
+
+    res.json({
+      data: rows.map(convertRowDates),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: limit === -1 ? 1 : Math.max(1, Math.ceil(total / limit)),
+        monthlyTotal
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Create new expense
+app.post('/api/daily-expenses', async (req, res) => {
+  try {
+    const { id, date, description, category, amount, paymentMethod, createdBy } = req.body;
+    const createdAt = new Date().toISOString();
+
+    await pool.execute(
+      'INSERT INTO DailyExpenses (ID, Date, Description, Category, Amount, PaymentMethod, CreatedBy, CreatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [id, date, description, category, amount, paymentMethod, createdBy || 'System', createdAt]
+    );
+
+    flushExpenseCache();
+    res.json({ success: true, id });
+  } catch (error) {
+    console.error('Error creating expense:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete expense
+app.delete('/api/daily-expenses/:id', async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM DailyExpenses WHERE ID = ?', [req.params.id]);
+    flushExpenseCache();
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ HR & PAYROLL API ============
+
+app.get('/api/employees/me/:userId', async (req, res) => {
+  try {
+    const [rows] = await pool.query('SELECT * FROM Employees WHERE UserID = ?', [req.params.userId]);
+    res.json(rows[0] ? convertRowDates(rows[0]) : null);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Employees ---
+app.get('/api/employees', cacheMiddleware, async (req, res) => {
+  try {
+    const columns = 'ID, UserID, Name, Designation, Phone, JoiningDate, BasicSalary, StandardDailyHours, ShiftStartTime, ShiftEndTime, Status, CreatedAt';
+    const [rows] = await pool.query(`SELECT ${columns} FROM Employees ORDER BY CreatedAt DESC`);
+    res.json(rows.map(convertRowDates));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/employees', async (req, res) => {
+  try {
+    const { ID, UserID, Name, Designation, Phone, JoiningDate, BasicSalary, Status, StandardDailyHours, ShiftStartTime, ShiftEndTime } = req.body;
+    await pool.execute(
+      'INSERT INTO Employees (ID, UserID, Name, Designation, Phone, JoiningDate, BasicSalary, Status, StandardDailyHours, ShiftStartTime, ShiftEndTime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [ID, UserID || null, Name, Designation || null, Phone || null, JoiningDate || null, BasicSalary || 0, Status || 'Active', StandardDailyHours || 8, ShiftStartTime || '09:00:00', ShiftEndTime || '17:00:00']
+    );
+    res.json({ success: true, id: ID });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/employees/:id', async (req, res) => {
+  try {
+    const { UserID, Name, Designation, Phone, JoiningDate, BasicSalary, Status, StandardDailyHours, ShiftStartTime, ShiftEndTime } = req.body;
+    await pool.execute(
+      'UPDATE Employees SET UserID = ?, Name = ?, Designation = ?, Phone = ?, JoiningDate = ?, BasicSalary = ?, Status = ?, StandardDailyHours = ?, ShiftStartTime = ?, ShiftEndTime = ? WHERE ID = ?',
+      [UserID || null, Name, Designation || null, Phone || null, JoiningDate || null, BasicSalary || 0, Status || 'Active', StandardDailyHours || 8, ShiftStartTime || '09:00:00', ShiftEndTime || '17:00:00', req.params.id]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/employees/:id', async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM Employees WHERE ID = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Attendance ---
+app.get('/api/attendance', async (req, res) => {
+  try {
+    const { date, employeeId, startDate, endDate } = req.query;
+    let whereClause = 'WHERE 1=1';
+    let params = [];
+
+    if (date) {
+      whereClause += ' AND Date = ?';
+      params.push(date);
+    }
+    if (employeeId) {
+      whereClause += ' AND EmployeeID = ?';
+      params.push(employeeId);
+    }
+    if (startDate && endDate) {
+      whereClause += ' AND Date BETWEEN ? AND ?';
+      params.push(startDate, endDate);
+    }
+
+    const columns = 'ID, EmployeeID, Date, Status, CheckIn, CheckOut, Notes';
+    const [rows] = await pool.query(`SELECT ${columns} FROM Attendance ${whereClause} ORDER BY Date DESC`, params);
+    res.json(rows.map(convertRowDates));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/attendance/mark', async (req, res) => {
+  try {
+    const { EmployeeID, Date: recordDate, Status, CheckIn, CheckOut, Notes } = req.body;
+
+    // IP Security Validation
+    let isAuthorized = true;
+    try {
+      const [settingsRows] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
+      if (settingsRows.length > 0 && settingsRows[0].Data) {
+        const globalData = typeof settingsRows[0].Data === 'string' ? JSON.parse(settingsRows[0].Data) : settingsRows[0].Data;
+
+        if (globalData.clinicIpAddress && globalData.clinicIpAddress.trim() !== '') {
+          // Get client IP
+          const rawClientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || '';
+          const clientIpStr = String(rawClientIp);
+          const requiredIp = globalData.clinicIpAddress.trim();
+
+          // Support multiple IPs separated by comma
+          const allowedIps = requiredIp.split(',').map(ip => ip.trim()).filter(ip => ip.length > 0);
+
+          const isAllowedIP = allowedIps.some(ip => clientIpStr.includes(ip));
+
+          if (!isAllowedIP) {
+            console.log(`[ATTENDANCE BLOCKED] Required IP(s): ${requiredIp}, Client IP: ${clientIpStr}`);
+            isAuthorized = false;
           }
         }
-      } catch (e) {
-        console.error("Error reading IP settings:", e);
       }
+    } catch (e) {
+      console.error("Error reading IP settings:", e);
+    }
 
-      if (!isAuthorized) {
-        return res.status(403).json({ error: "You cannot mark the attendance right now. Please connect to the clinic's Wi-Fi network." });
-      }
+    if (!isAuthorized) {
+      return res.status(403).json({ error: "You cannot mark the attendance right now. Please connect to the clinic's Wi-Fi network." });
+    }
 
-      // Check for existing record to prevent status changing
-      const [existing] = await pool.query("SELECT Status FROM Attendance WHERE EmployeeID = ? AND Date = ?", [EmployeeID, recordDate]);
-      if (existing.length > 0 && existing[0].Status && existing[0].Status !== Status) {
-        return res.status(403).json({ error: `Attendance is already marked as '${existing[0].Status}' and cannot be changed.` });
-      }
+    // Check for existing record to prevent status changing
+    const [existing] = await pool.query("SELECT Status FROM Attendance WHERE EmployeeID = ? AND Date = ?", [EmployeeID, recordDate]);
+    if (existing.length > 0 && existing[0].Status && existing[0].Status !== Status) {
+      return res.status(403).json({ error: `Attendance is already marked as '${existing[0].Status}' and cannot be changed.` });
+    }
 
-      await pool.execute(
-        `INSERT INTO Attendance (EmployeeID, Date, Status, CheckIn, CheckOut, Notes) 
+    await pool.execute(
+      `INSERT INTO Attendance (EmployeeID, Date, Status, CheckIn, CheckOut, Notes) 
        VALUES (?, ?, ?, ?, ?, ?)
        ON DUPLICATE KEY UPDATE Status = VALUES(Status), CheckIn = VALUES(CheckIn), CheckOut = VALUES(CheckOut), Notes = VALUES(Notes)`,
-        [EmployeeID, recordDate, Status, CheckIn || null, CheckOut || null, Notes || null]
-      );
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+      [EmployeeID, recordDate, Status, CheckIn || null, CheckOut || null, Notes || null]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Leave Management ---
+app.get('/api/leaves', async (req, res) => {
+  try {
+    const { employeeId, status } = req.query;
+    let whereClause = 'WHERE 1=1';
+    let params = [];
+    if (employeeId) {
+      whereClause += ' AND EmployeeID = ?';
+      params.push(employeeId);
     }
-  });
-
-  // --- Leave Management ---
-  app.get('/api/leaves', async (req, res) => {
-    try {
-      const { employeeId, status } = req.query;
-      let whereClause = 'WHERE 1=1';
-      let params = [];
-      if (employeeId) {
-        whereClause += ' AND EmployeeID = ?';
-        params.push(employeeId);
-      }
-      if (status) {
-        whereClause += ' AND Status = ?';
-        params.push(status);
-      }
-      const columns = 'ID, EmployeeID, StartDate, EndDate, Reason, Status, CreatedAt';
-      const [rows] = await pool.query(`SELECT ${columns} FROM LeaveRequests ${whereClause} ORDER BY CreatedAt DESC`, params);
-      res.json(rows.map(convertRowDates));
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+    if (status) {
+      whereClause += ' AND Status = ?';
+      params.push(status);
     }
-  });
+    const columns = 'ID, EmployeeID, StartDate, EndDate, Reason, Status, CreatedAt';
+    const [rows] = await pool.query(`SELECT ${columns} FROM LeaveRequests ${whereClause} ORDER BY CreatedAt DESC`, params);
+    res.json(rows.map(convertRowDates));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-  app.post('/api/leaves', async (req, res) => {
-    try {
-      const { ID, EmployeeID, StartDate, EndDate, Reason } = req.body;
-      await pool.execute(
-        'INSERT INTO LeaveRequests (ID, EmployeeID, StartDate, EndDate, Reason, Status) VALUES (?, ?, ?, ?, ?, ?)',
-        [ID, EmployeeID, StartDate, EndDate, Reason || null, 'Pending']
-      );
-      res.json({ success: true, id: ID });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+app.post('/api/leaves', async (req, res) => {
+  try {
+    const { ID, EmployeeID, StartDate, EndDate, Reason } = req.body;
+    await pool.execute(
+      'INSERT INTO LeaveRequests (ID, EmployeeID, StartDate, EndDate, Reason, Status) VALUES (?, ?, ?, ?, ?, ?)',
+      [ID, EmployeeID, StartDate, EndDate, Reason || null, 'Pending']
+    );
+    res.json({ success: true, id: ID });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-  app.put('/api/leaves/:id/status', async (req, res) => {
-    try {
-      const { status, approvedBy } = req.body;
-      await pool.execute('UPDATE LeaveRequests SET Status = ?, ApprovedBy = ? WHERE ID = ?', [status, approvedBy || null, req.params.id]);
+app.put('/api/leaves/:id/status', async (req, res) => {
+  try {
+    const { status, approvedBy } = req.body;
+    await pool.execute('UPDATE LeaveRequests SET Status = ?, ApprovedBy = ? WHERE ID = ?', [status, approvedBy || null, req.params.id]);
 
-      // Auto-mark attendance
-      if (status === 'Approved') {
-        const [leaves] = await pool.query('SELECT EmployeeID, StartDate, EndDate FROM LeaveRequests WHERE ID = ?', [req.params.id]);
-        if (leaves.length > 0) {
-          const leave = leaves[0];
-          let currentDate = new Date(leave.StartDate);
-          const endDate = new Date(leave.EndDate);
+    // Auto-mark attendance
+    if (status === 'Approved') {
+      const [leaves] = await pool.query('SELECT EmployeeID, StartDate, EndDate FROM LeaveRequests WHERE ID = ?', [req.params.id]);
+      if (leaves.length > 0) {
+        const leave = leaves[0];
+        let currentDate = new Date(leave.StartDate);
+        const endDate = new Date(leave.EndDate);
 
-          while (currentDate <= endDate) {
-            const dateStr = [
-              currentDate.getFullYear(),
-              String(currentDate.getMonth() + 1).padStart(2, '0'),
-              String(currentDate.getDate()).padStart(2, '0')
-            ].join('-');
+        while (currentDate <= endDate) {
+          const dateStr = [
+            currentDate.getFullYear(),
+            String(currentDate.getMonth() + 1).padStart(2, '0'),
+            String(currentDate.getDate()).padStart(2, '0')
+          ].join('-');
 
-            await pool.execute(
-              `INSERT INTO Attendance (EmployeeID, Date, Status, Notes) VALUES (?, ?, 'Leave', 'Auto-Approved Leave')
+          await pool.execute(
+            `INSERT INTO Attendance (EmployeeID, Date, Status, Notes) VALUES (?, ?, 'Leave', 'Auto-Approved Leave')
              ON DUPLICATE KEY UPDATE Status = 'Leave', Notes = 'Auto-Approved Leave'`,
-              [leave.EmployeeID, dateStr]
-            );
-            currentDate.setDate(currentDate.getDate() + 1);
-          }
+            [leave.EmployeeID, dateStr]
+          );
+          currentDate.setDate(currentDate.getDate() + 1);
         }
       }
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
     }
-  });
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-  app.delete('/api/leaves/:id', async (req, res) => {
-    try {
-      await pool.execute('DELETE FROM LeaveRequests WHERE ID = ?', [req.params.id]);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+app.delete('/api/leaves/:id', async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM LeaveRequests WHERE ID = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Advance Payments ---
+app.get('/api/advances', async (req, res) => {
+  try {
+    const { employeeId, status } = req.query;
+    let whereClause = 'WHERE 1=1';
+    let params = [];
+    if (employeeId) {
+      whereClause += ' AND EmployeeID = ?';
+      params.push(employeeId);
     }
-  });
-
-  // --- Advance Payments ---
-  app.get('/api/advances', async (req, res) => {
-    try {
-      const { employeeId, status } = req.query;
-      let whereClause = 'WHERE 1=1';
-      let params = [];
-      if (employeeId) {
-        whereClause += ' AND EmployeeID = ?';
-        params.push(employeeId);
-      }
-      if (status) {
-        whereClause += ' AND Status = ?';
-        params.push(status);
-      }
-      const columns = 'ID, EmployeeID, Date, Amount, Description, Status, ApprovedBy, ApprovalTime';
-      const [rows] = await pool.query(`SELECT ${columns} FROM AdvancePayments ${whereClause} ORDER BY Date DESC`, params);
-      const converted = rows.map(convertRowDates);
-      if (converted.length > 0) console.log('DEBUG: First Advance Row:', JSON.stringify(converted[0], null, 2));
-      res.json(converted);
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+    if (status) {
+      whereClause += ' AND Status = ?';
+      params.push(status);
     }
-  });
+    const columns = 'ID, EmployeeID, Date, Amount, Description, Status, ApprovedBy, ApprovalTime';
+    const [rows] = await pool.query(`SELECT ${columns} FROM AdvancePayments ${whereClause} ORDER BY Date DESC`, params);
+    const converted = rows.map(convertRowDates);
+    if (converted.length > 0) console.log('DEBUG: First Advance Row:', JSON.stringify(converted[0], null, 2));
+    res.json(converted);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-  app.post('/api/advances', async (req, res) => {
-    try {
-      const { ID, EmployeeID, Date: advanceDate, Amount, Description, Status, ApprovedBy } = req.body;
-      const finalStatus = Status || 'Pending';
-      const approvalTime = (finalStatus === 'Approved' || finalStatus === 'Deducted') ? new Date() : null;
+app.post('/api/advances', async (req, res) => {
+  try {
+    const { ID, EmployeeID, Date: advanceDate, Amount, Description, Status, ApprovedBy } = req.body;
+    const finalStatus = Status || 'Pending';
+    const approvalTime = (finalStatus === 'Approved' || finalStatus === 'Deducted') ? new Date() : null;
 
-      await pool.execute(
-        'INSERT INTO AdvancePayments (ID, EmployeeID, Date, Amount, Description, Status, ApprovedBy, ApprovalTime) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [ID, EmployeeID, advanceDate, Amount, Description || null, finalStatus, ApprovedBy || null, approvalTime]
-      );
-      res.json({ success: true, id: ID });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+    await pool.execute(
+      'INSERT INTO AdvancePayments (ID, EmployeeID, Date, Amount, Description, Status, ApprovedBy, ApprovalTime) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      [ID, EmployeeID, advanceDate, Amount, Description || null, finalStatus, ApprovedBy || null, approvalTime]
+    );
+    res.json({ success: true, id: ID });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/advances/:id/status', async (req, res) => {
+  try {
+    const { status, approvedBy } = req.body;
+    await pool.execute(
+      'UPDATE AdvancePayments SET Status = ?, ApprovedBy = ?, ApprovalTime = NOW() WHERE ID = ?',
+      [status, approvedBy || null, req.params.id]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/advances/:id', async (req, res) => {
+  try {
+    await pool.execute('DELETE FROM AdvancePayments WHERE ID = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Payroll ---
+app.get('/api/payroll', async (req, res) => {
+  try {
+    const { month, year } = req.query;
+    let whereClause = 'WHERE 1=1';
+    let params = [];
+    if (month && year) {
+      whereClause += ' AND Month = ? AND Year = ?';
+      params.push(month, year);
     }
-  });
+    const columns = 'ID, EmployeeID, Month, Year, BasicSalary, Bonus, Deductions, OvertimeHours, OvertimeAmount, GrossSalary, NetSalary, PaymentStatus, PaymentDate, CreatedAt';
+    const [rows] = await pool.query(`SELECT ${columns} FROM Payroll ${whereClause} ORDER BY CreatedAt DESC`, params);
+    res.json(rows.map(convertRowDates));
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-  app.put('/api/advances/:id/status', async (req, res) => {
-    try {
-      const { status, approvedBy } = req.body;
-      await pool.execute(
-        'UPDATE AdvancePayments SET Status = ?, ApprovedBy = ?, ApprovalTime = NOW() WHERE ID = ?',
-        [status, approvedBy || null, req.params.id]
-      );
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+// Salary Config endpoints
+app.get('/api/hr/salary-config', cacheMiddleware, async (req, res) => {
+  try {
+    const [rows] = await pool.execute("SELECT ID, Category, Data FROM AppSettings WHERE ID = 'SALARY_CONFIG'");
+    if (rows.length > 0) {
+      const config = typeof rows[0].Data === 'string' ? JSON.parse(rows[0].Data) : rows[0].Data;
+      res.json(config);
+    } else {
+      res.status(404).json({ error: 'Salary configuration not found' });
     }
-  });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-  app.delete('/api/advances/:id', async (req, res) => {
-    try {
-      await pool.execute('DELETE FROM AdvancePayments WHERE ID = ?', [req.params.id]);
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // --- Payroll ---
-  app.get('/api/payroll', async (req, res) => {
-    try {
-      const { month, year } = req.query;
-      let whereClause = 'WHERE 1=1';
-      let params = [];
-      if (month && year) {
-        whereClause += ' AND Month = ? AND Year = ?';
-        params.push(month, year);
-      }
-      const columns = 'ID, EmployeeID, Month, Year, BasicSalary, Bonus, Deductions, OvertimeHours, OvertimeAmount, GrossSalary, NetSalary, PaymentStatus, PaymentDate, CreatedAt';
-      const [rows] = await pool.query(`SELECT ${columns} FROM Payroll ${whereClause} ORDER BY CreatedAt DESC`, params);
-      res.json(rows.map(convertRowDates));
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Salary Config endpoints
-  app.get('/api/hr/salary-config', cacheMiddleware, async (req, res) => {
-    try {
-      const [rows] = await pool.execute("SELECT ID, Category, Data FROM AppSettings WHERE ID = 'SALARY_CONFIG'");
-      if (rows.length > 0) {
-        const config = typeof rows[0].Data === 'string' ? JSON.parse(rows[0].Data) : rows[0].Data;
-        res.json(config);
-      } else {
-        res.status(404).json({ error: 'Salary configuration not found' });
-      }
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.put('/api/hr/salary-config', async (req, res) => {
-    try {
-      const data = req.body;
-      await pool.execute(
-        `INSERT INTO AppSettings (ID, Category, Data) VALUES (?, ?, ?)
+app.put('/api/hr/salary-config', async (req, res) => {
+  try {
+    const data = req.body;
+    await pool.execute(
+      `INSERT INTO AppSettings (ID, Category, Data) VALUES (?, ?, ?)
        ON DUPLICATE KEY UPDATE Data = VALUES(Data)`,
-        ['SALARY_CONFIG', 'Global', JSON.stringify(data)]
+      ['SALARY_CONFIG', 'Global', JSON.stringify(data)]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/payroll/generate', async (req, res) => {
+  try {
+    const { month, year, workingDays: workingDaysInput, leaveThreshold: leaveThresholdInput } = req.body;
+
+    // 1. Fetch Global Salary Config
+    let [configRows] = await pool.execute("SELECT Data FROM AppSettings WHERE ID = 'SALARY_CONFIG'");
+    const config = configRows.length > 0 ? (typeof configRows[0].Data === 'string' ? JSON.parse(configRows[0].Data) : configRows[0].Data) : {
+      fixedWorkingDays: 30,
+      paidLeavesPerMonth: 2,
+      overtimeHourlyRate: 200,
+      latesForOneDayDeduction: 3,
+      overtimeEnabled: true
+    };
+
+    // Parameters with Fallbacks: req.body overrides global config
+    const workingDays = workingDaysInput || config.fixedWorkingDays || 30;
+    const leaveThreshold = leaveThresholdInput !== undefined ? leaveThresholdInput : (config.paidLeavesPerMonth || 0);
+
+    // 2. Get all active employees
+    const [employees] = await pool.query("SELECT * FROM Employees WHERE Status = 'Active'");
+
+    // 3. Generate payroll for each employee
+    for (const emp of employees) {
+      // Get attendance stats for the month
+      const [attendanceStats] = await pool.query(
+        "SELECT Status, COUNT(*) as count FROM Attendance WHERE EmployeeID = ? AND MONTH(Date) = ? AND YEAR(Date) = ? GROUP BY Status",
+        [emp.ID, month, year]
       );
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
 
-  app.post('/api/payroll/generate', async (req, res) => {
-    try {
-      const { month, year, workingDays: workingDaysInput, leaveThreshold: leaveThresholdInput } = req.body;
+      const stats = { Present: 0, Absent: 0, Leave: 0, Late: 0 };
+      attendanceStats.forEach(s => { stats[s.Status] = s.count || 0; });
 
-      // 1. Fetch Global Salary Config
-      let [configRows] = await pool.execute("SELECT Data FROM AppSettings WHERE ID = 'SALARY_CONFIG'");
-      const config = configRows.length > 0 ? (typeof configRows[0].Data === 'string' ? JSON.parse(configRows[0].Data) : configRows[0].Data) : {
-        fixedWorkingDays: 30,
-        paidLeavesPerMonth: 2,
-        overtimeHourlyRate: 200,
-        latesForOneDayDeduction: 3,
-        overtimeEnabled: true
-      };
+      const presentOnlyDays = stats.Present || 0;
+      const lateDays = stats.Late || 0;
+      const absentDays = stats.Absent || 0;
+      const leaveDays = stats.Leave || 0;
+      const presentDays = presentOnlyDays + lateDays;
 
-      // Parameters with Fallbacks: req.body overrides global config
-      const workingDays = workingDaysInput || config.fixedWorkingDays || 30;
-      const leaveThreshold = leaveThresholdInput !== undefined ? leaveThresholdInput : (config.paidLeavesPerMonth || 0);
+      // Late Rule Penalty
+      let latePenaltyDays = 0;
+      if (config.lateRuleEnabled && config.latesForOneDayDeduction > 0) {
+        latePenaltyDays = Math.floor(lateDays / config.latesForOneDayDeduction);
+      }
 
-      // 2. Get all active employees
-      const [employees] = await pool.query("SELECT * FROM Employees WHERE Status = 'Active'");
+      // Calculate payable days: Total worked + Leaves (up to threshold)
+      const paidLeaveDays = Math.min(leaveDays, leaveThreshold);
+      const totalPayableDays = presentOnlyDays + (lateDays - latePenaltyDays) + paidLeaveDays;
 
-      // 3. Generate payroll for each employee
-      for (const emp of employees) {
-        // Get attendance stats for the month
-        const [attendanceStats] = await pool.query(
-          "SELECT Status, COUNT(*) as count FROM Attendance WHERE EmployeeID = ? AND MONTH(Date) = ? AND YEAR(Date) = ? GROUP BY Status",
-          [emp.ID, month, year]
-        );
+      // Calculate deduction days: Total working days - Payable days
+      // This includes explicit absents AND late penalty days AND unlogged days
+      const totalDeductibleDays = Math.max(0, workingDays - totalPayableDays);
 
-        const stats = { Present: 0, Absent: 0, Leave: 0, Late: 0 };
-        attendanceStats.forEach(s => { stats[s.Status] = s.count || 0; });
+      // Calculate daily and hourly rate
+      const stdDailyHours = emp.StandardDailyHours || 8;
+      const shiftEndTime = emp.ShiftEndTime || '17:00:00';
+      const perDaySalary = emp.BasicSalary / workingDays;
+      const hourlyRate = perDaySalary / stdDailyHours;
+      const absenceDeduction = perDaySalary * totalDeductibleDays;
 
-        const presentOnlyDays = stats.Present || 0;
-        const lateDays = stats.Late || 0;
-        const absentDays = stats.Absent || 0;
-        const leaveDays = stats.Leave || 0;
-        const presentDays = presentOnlyDays + lateDays;
-
-        // Late Rule Penalty
-        let latePenaltyDays = 0;
-        if (config.lateRuleEnabled && config.latesForOneDayDeduction > 0) {
-          latePenaltyDays = Math.floor(lateDays / config.latesForOneDayDeduction);
-        }
-
-        // Calculate payable days: Total worked + Leaves (up to threshold)
-        const paidLeaveDays = Math.min(leaveDays, leaveThreshold);
-        const totalPayableDays = presentOnlyDays + (lateDays - latePenaltyDays) + paidLeaveDays;
-
-        // Calculate deduction days: Total working days - Payable days
-        // This includes explicit absents AND late penalty days AND unlogged days
-        const totalDeductibleDays = Math.max(0, workingDays - totalPayableDays);
-
-        // Calculate daily and hourly rate
-        const stdDailyHours = emp.StandardDailyHours || 8;
-        const shiftEndTime = emp.ShiftEndTime || '17:00:00';
-        const perDaySalary = emp.BasicSalary / workingDays;
-        const hourlyRate = perDaySalary / stdDailyHours;
-        const absenceDeduction = perDaySalary * totalDeductibleDays;
-
-        // Calculate Overtime natively with MySQL TIMEDIFF
-        const [overtime] = await pool.query(
-          `SELECT ROUND(SUM(TIME_TO_SEC(TIMEDIFF(CheckOut, ?))) / 3600, 2) as ot_hours 
+      // Calculate Overtime natively with MySQL TIMEDIFF
+      const [overtime] = await pool.query(
+        `SELECT ROUND(SUM(TIME_TO_SEC(TIMEDIFF(CheckOut, ?))) / 3600, 2) as ot_hours 
          FROM Attendance 
          WHERE EmployeeID = ? AND MONTH(Date) = ? AND YEAR(Date) = ? 
          AND CheckOut IS NOT NULL AND CheckOut > ?`,
-          [shiftEndTime, emp.ID, month, year, shiftEndTime]
-        );
-        const overtimeHours = parseFloat(overtime[0].ot_hours) || 0;
+        [shiftEndTime, emp.ID, month, year, shiftEndTime]
+      );
+      const overtimeHours = parseFloat(overtime[0].ot_hours) || 0;
 
-        // Use fixed hourly rate for overtime amount
-        const otRate = config.overtimeEnabled ? (config.overtimeHourlyRate || 0) : 0;
-        const overtimeAmount = overtimeHours * otRate;
+      // Use fixed hourly rate for overtime amount
+      const otRate = config.overtimeEnabled ? (config.overtimeHourlyRate || 0) : 0;
+      const overtimeAmount = overtimeHours * otRate;
 
-        // Get pending advances
-        const [advances] = await pool.query(
-          "SELECT SUM(Amount) as total FROM AdvancePayments WHERE EmployeeID = ? AND Status = 'Pending' AND MONTH(Date) <= ? AND YEAR(Date) <= ?",
-          [emp.ID, month, year]
-        );
-        const advanceDeduction = advances[0].total || 0;
+      // Get pending advances
+      const [advances] = await pool.query(
+        "SELECT SUM(Amount) as total FROM AdvancePayments WHERE EmployeeID = ? AND Status = 'Pending' AND MONTH(Date) <= ? AND YEAR(Date) <= ?",
+        [emp.ID, month, year]
+      );
+      const advanceDeduction = advances[0].total || 0;
 
-        const totalDeductions = absenceDeduction + advanceDeduction;
-        const bonus = 0; // Optional extension for Future Bonus APIs
-        const grossSalary = parseFloat(emp.BasicSalary) + overtimeAmount + bonus;
-        const netSalary = Math.max(0, grossSalary - totalDeductions);
+      const totalDeductions = absenceDeduction + advanceDeduction;
+      const bonus = 0; // Optional extension for Future Bonus APIs
+      const grossSalary = parseFloat(emp.BasicSalary) + overtimeAmount + bonus;
+      const netSalary = Math.max(0, grossSalary - totalDeductions);
 
-        const payrollId = `PR-${emp.ID}-${year}-${month}`;
+      const payrollId = `PR-${emp.ID}-${year}-${month}`;
 
-        // Insert or Update Payroll
-        await pool.execute(
-          `INSERT INTO Payroll (ID, EmployeeID, Month, Year, BasicSalary, Bonus, Deductions, NetSalary, PaymentStatus, OvertimeHours, OvertimeAmount, GrossSalary, PresentDays, LeaveDays, AbsentDays, WorkingDays, LeaveThreshold)
+      // Insert or Update Payroll
+      await pool.execute(
+        `INSERT INTO Payroll (ID, EmployeeID, Month, Year, BasicSalary, Bonus, Deductions, NetSalary, PaymentStatus, OvertimeHours, OvertimeAmount, GrossSalary, PresentDays, LeaveDays, AbsentDays, WorkingDays, LeaveThreshold)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Unpaid', ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE BasicSalary=VALUES(BasicSalary), Bonus=VALUES(Bonus), Deductions=VALUES(Deductions), NetSalary=VALUES(NetSalary), OvertimeHours=VALUES(OvertimeHours), OvertimeAmount=VALUES(OvertimeAmount), GrossSalary=VALUES(GrossSalary), PresentDays=VALUES(PresentDays), LeaveDays=VALUES(LeaveDays), AbsentDays=VALUES(AbsentDays), WorkingDays=VALUES(WorkingDays), LeaveThreshold=VALUES(LeaveThreshold)`,
-          [payrollId, emp.ID, month, year, emp.BasicSalary, bonus, totalDeductions, netSalary, overtimeHours, overtimeAmount, grossSalary, presentDays, leaveDays, absentDays, workingDays, leaveThreshold]
+        [payrollId, emp.ID, month, year, emp.BasicSalary, bonus, totalDeductions, netSalary, overtimeHours, overtimeAmount, grossSalary, presentDays, leaveDays, absentDays, workingDays, leaveThreshold]
+      );
+
+      // If there were advances deducted, mark them as Deducted
+      if (advanceDeduction > 0) {
+        await pool.execute(
+          "UPDATE AdvancePayments SET Status = 'Deducted' WHERE EmployeeID = ? AND Status = 'Pending' AND MONTH(Date) <= ? AND YEAR(Date) <= ?",
+          [emp.ID, month, year]
         );
-
-        // If there were advances deducted, mark them as Deducted
-        if (advanceDeduction > 0) {
-          await pool.execute(
-            "UPDATE AdvancePayments SET Status = 'Deducted' WHERE EmployeeID = ? AND Status = 'Pending' AND MONTH(Date) <= ? AND YEAR(Date) <= ?",
-            [emp.ID, month, year]
-          );
-        }
       }
-
-      res.json({ success: true, count: employees.length });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
     }
-  });
 
-  // GET /api/attendance/monthly-summary — per-employee attendance counts for a month
-  app.get('/api/attendance/monthly-summary', async (req, res) => {
-    try {
-      const { month, year } = req.query;
-      if (!month || !year) {
-        return res.status(400).json({ error: 'month and year are required' });
-      }
+    res.json({ success: true, count: employees.length });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-      // Aggregate attendance status counts per employee
-      const [rows] = await pool.query(
-        `SELECT 
+// GET /api/attendance/monthly-summary — per-employee attendance counts for a month
+app.get('/api/attendance/monthly-summary', async (req, res) => {
+  try {
+    const { month, year } = req.query;
+    if (!month || !year) {
+      return res.status(400).json({ error: 'month and year are required' });
+    }
+
+    // Aggregate attendance status counts per employee
+    const [rows] = await pool.query(
+      `SELECT 
          a.EmployeeID,
          e.Name AS EmployeeName,
          e.Designation,
@@ -5658,12 +5876,12 @@ app.post('/api/patient-services', async (req, res) => {
        WHERE MONTH(a.Date) = ? AND YEAR(a.Date) = ?
          AND e.Status = 'Active'
        GROUP BY a.EmployeeID, e.Name, e.Designation, e.ShiftEndTime`,
-        [month, year]
-      );
+      [month, year]
+    );
 
-      // Also fetch overtime hours per employee for the month
-      const [otRows] = await pool.query(
-        `SELECT 
+    // Also fetch overtime hours per employee for the month
+    const [otRows] = await pool.query(
+      `SELECT 
          a.EmployeeID,
          ROUND(SUM(TIME_TO_SEC(TIMEDIFF(a.CheckOut, e.ShiftEndTime))) / 3600, 2) AS overtimeHours
        FROM Attendance a
@@ -5672,48 +5890,48 @@ app.post('/api/patient-services', async (req, res) => {
          AND a.CheckOut IS NOT NULL AND a.CheckOut > e.ShiftEndTime
          AND e.Status = 'Active'
        GROUP BY a.EmployeeID`,
-        [month, year]
-      );
+      [month, year]
+    );
 
-      const otMap = {};
-      otRows.forEach(r => { otMap[r.EmployeeID] = parseFloat(r.overtimeHours) || 0; });
+    const otMap = {};
+    otRows.forEach(r => { otMap[r.EmployeeID] = parseFloat(r.overtimeHours) || 0; });
 
-      const result = rows.map(r => ({
-        ...r,
-        overtimeHours: otMap[r.EmployeeID] || 0
-      }));
+    const result = rows.map(r => ({
+      ...r,
+      overtimeHours: otMap[r.EmployeeID] || 0
+    }));
 
-      res.json(result);
-    } catch (error) {
-      console.error('Error fetching monthly attendance summary:', error);
-      res.status(500).json({ error: error.message });
-    }
-  });
+    res.json(result);
+  } catch (error) {
+    console.error('Error fetching monthly attendance summary:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
-  app.put('/api/payroll/:id/pay', async (req, res) => {
-    try {
-      await pool.execute(
-        "UPDATE Payroll SET PaymentStatus = 'Paid', PaymentDate = CURRENT_TIMESTAMP WHERE ID = ?",
-        [req.params.id]
-      );
-      res.json({ success: true });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+app.put('/api/payroll/:id/pay', async (req, res) => {
+  try {
+    await pool.execute(
+      "UPDATE Payroll SET PaymentStatus = 'Paid', PaymentDate = CURRENT_TIMESTAMP WHERE ID = ?",
+      [req.params.id]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
-  // Health check
-  app.get('/api/health', (req, res) => {
-    res.json({ status: 'ok', database: 'MySQL', timestamp: new Date().toISOString() });
-  });
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', database: 'MySQL', timestamp: new Date().toISOString() });
+});
 
-  // Status Page - accessible at /api/status AND /
-  const getStatusPage = (req, res) => {
-    const statusColor = dbConnected ? '#dcfce7' : '#fee2e2';
-    const statusTextColor = dbConnected ? '#166534' : '#991b1b';
-    const statusText = dbConnected ? 'Connected' : 'Disconnected';
+// Status Page - accessible at /api/status AND /
+const getStatusPage = (req, res) => {
+  const statusColor = dbConnected ? '#dcfce7' : '#fee2e2';
+  const statusTextColor = dbConnected ? '#166534' : '#991b1b';
+  const statusText = dbConnected ? 'Connected' : 'Disconnected';
 
-    const html = `
+  const html = `
     < !DOCTYPE html >
     <html>
       <head>
@@ -5761,483 +5979,520 @@ app.post('/api/patient-services', async (req, res) => {
       </body>
     </html>
 `;
-    res.send(html);
-  };
+  res.send(html);
+};
 
-  app.get('/api/status', getStatusPage);
-  // app.get('/', getStatusPage);
+app.get('/api/status', getStatusPage);
+// app.get('/', getStatusPage);
 
-  // Favicon Handler
-  app.get('/favicon.ico', (req, res) => res.status(204).end());
+// Favicon Handler
+app.get('/favicon.ico', (req, res) => res.status(204).end());
 
-  app.get('/debug-paths', (req, res) => {
-    res.json({
-      serverDirectory: __dirname,
-      checkedPaths: possiblePaths,
-      finalSelectedPath: publicHtmlDistPath,
-      finalIndexPath: publicHtmlIndexPath,
-      fileExists: fs.existsSync(publicHtmlIndexPath),
-      frontendEnv: process.env.FRONTEND_PATH || 'Not Set'
-    });
+app.get('/debug-paths', (req, res) => {
+  res.json({
+    serverDirectory: __dirname,
+    checkedPaths: possiblePaths,
+    finalSelectedPath: publicHtmlDistPath,
+    finalIndexPath: publicHtmlIndexPath,
+    fileExists: fs.existsSync(publicHtmlIndexPath),
+    frontendEnv: process.env.FRONTEND_PATH || 'Not Set'
   });
+});
 
-  // ============ SERVE REACT FRONTEND ============
-  // This hybrid logic ensures the frontend works regardless of whether backend is 
-  // in the same folder as the build, or in a sibling nodejs/public_html structure.
-  const possiblePaths = [
-    process.env.FRONTEND_PATH || '',
-    "/home/u345939801/public_html",
-    "/home/u345939801/domains/staging.salamaatclinic.com/public_html",
-    "/home/u345939801/domains/staging.salamaatclinic.com/public_html/dist",
-    path.resolve(__dirname, "..", "public_html"),
-    "/home/u345939801/public_html/dist",
-    path.resolve(__dirname, "..", "public_html", "dist"),
-    path.resolve(__dirname, "public_html"),
-    path.resolve(__dirname, "dist"),
-    path.resolve(__dirname, ".")
-  ].filter(Boolean);
+// ============ SERVE REACT FRONTEND ============
+// This hybrid logic ensures the frontend works regardless of whether backend is 
+// in the same folder as the build, or in a sibling nodejs/public_html structure.
+const possiblePaths = [
+  process.env.FRONTEND_PATH || '',
+  "/home/u345939801/public_html",
+  "/home/u345939801/domains/staging.salamaatclinic.com/public_html",
+  "/home/u345939801/domains/staging.salamaatclinic.com/public_html/dist",
+  path.resolve(__dirname, "..", "public_html"),
+  "/home/u345939801/public_html/dist",
+  path.resolve(__dirname, "..", "public_html", "dist"),
+  path.resolve(__dirname, "public_html"),
+  path.resolve(__dirname, "dist"),
+  path.resolve(__dirname, ".")
+].filter(Boolean);
 
-  let publicHtmlDistPath = path.join(__dirname, '..', 'public_html', 'dist'); // Default fallback
-  let publicHtmlIndexPath = path.join(publicHtmlDistPath, 'index.html');
+let publicHtmlDistPath = path.join(__dirname, '..', 'public_html', 'dist'); // Default fallback
+let publicHtmlIndexPath = path.join(publicHtmlDistPath, 'index.html');
 
-  for (const p of possiblePaths) {
-    const indexPath = path.join(p, 'index.html');
-    if (fs.existsSync(indexPath)) {
-      publicHtmlDistPath = p;
-      publicHtmlIndexPath = indexPath;
-      console.log('📂 Frontend Dist Path found at:', p);
-      break;
-    }
+for (const p of possiblePaths) {
+  const indexPath = path.join(p, 'index.html');
+  if (fs.existsSync(indexPath)) {
+    publicHtmlDistPath = p;
+    publicHtmlIndexPath = indexPath;
+    console.log('📂 Frontend Dist Path found at:', p);
+    break;
   }
+}
 
-  // ============ APPOINTMENTS API ============
+// ============ APPOINTMENTS API ============
 
-  // GET /api/appointments — list for a given date, with optional status & search
-  app.get('/api/appointments', cacheMiddleware, async (req, res) => {
-    try {
-      const { date, status, search, page = 1, limit = 20 } = req.query;
-      const offset = (parseInt(page) - 1) * parseInt(limit);
+// GET /api/appointments — list for a given date, with optional status & search
+app.get('/api/appointments', cacheMiddleware, async (req, res) => {
+  try {
+    const { date, status, search, page = 1, limit = 20 } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
 
-      let whereClause = 'WHERE DeletedAt IS NULL';
-      const params = [];
+    let whereClause = 'WHERE DeletedAt IS NULL';
+    const params = [];
 
-      if (date) {
-        whereClause += ' AND ApptDate = ?';
-        params.push(date);
-      }
-
-      if (status && status !== 'All' && status !== 'undefined') {
-        whereClause += ' AND Status = ?';
-        params.push(status);
-      }
-
-      if (search && search !== 'undefined') {
-        whereClause += ' AND (PatientName LIKE ? OR Phone LIKE ?)';
-        params.push(`%${search}%`, `%${search}%`);
-      }
-
-      // 1. Get Total Count
-      const [countResult] = await pool.query(
-        `SELECT COUNT(*) as total FROM Appointments ${whereClause}`,
-        params
-      );
-      const total = countResult[0].total;
-
-      // 2. Get Paginated Data
-      const columns = 'ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Service, Status, Notes, TokenNumber, CreatedBy, CreatedAt';
-      const [rows] = await pool.query(
-        `SELECT ${columns} FROM Appointments ${whereClause} ORDER BY TokenNumber DESC, ApptTime DESC LIMIT ? OFFSET ?`,
-        [...params, parseInt(limit), offset]
-      );
-
-      res.json({
-        data: rows.map(convertRowDates),
-        meta: {
-          total,
-          page: parseInt(page),
-          limit: parseInt(limit),
-          totalPages: Math.ceil(total / parseInt(limit))
-        }
-      });
-    } catch (error) {
-      console.error('Error fetching appointments:', error);
-      res.status(500).json({ error: error.message });
+    if (date) {
+      whereClause += ' AND ApptDate = ?';
+      params.push(date);
     }
-  });
 
-  const resequenceTokens = async (date) => {
-    try {
-      const [rows] = await pool.query(
-        "SELECT ID FROM Appointments WHERE ApptDate = ? AND DeletedAt IS NULL ORDER BY ApptTime ASC, CreatedAt ASC",
-        [date]
-      );
-      for (let i = 0; i < rows.length; i++) {
-        await pool.execute(
-          "UPDATE Appointments SET TokenNumber = ? WHERE ID = ?",
-          [i + 1, rows[i].ID]
-        );
-      }
-    } catch (error) {
-      console.error('Error resequencing tokens:', error);
+    if (status && status !== 'All' && status !== 'undefined') {
+      whereClause += ' AND Status = ?';
+      params.push(status);
     }
-  };
 
-  // POST /api/appointments — book a new appointment (auto-assigns daily token)
-  app.post('/api/appointments', async (req, res) => {
-    try {
-      const { id, patientId, name, phone, date, time, service, notes, createdBy } = req.body;
+    if (search && search !== 'undefined') {
+      whereClause += ' AND (PatientName LIKE ? OR Phone LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`);
+    }
 
-      if (!name || !phone || !date || !time) {
-        return res.status(400).json({ error: 'Name, phone, date and time are required.' });
+    // 1. Get Total Count
+    const [countResult] = await pool.query(
+      `SELECT COUNT(*) as total FROM Appointments ${whereClause}`,
+      params
+    );
+    const total = countResult[0].total;
+
+    // 2. Get Paginated Data
+    const columns = 'ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Service, Status, Notes, TokenNumber, CreatedBy, CreatedAt';
+    const [rows] = await pool.query(
+      `SELECT ${columns} FROM Appointments ${whereClause} ORDER BY TokenNumber DESC, ApptTime DESC LIMIT ? OFFSET ?`,
+      [...params, parseInt(limit), offset]
+    );
+
+    res.json({
+      data: rows.map(convertRowDates),
+      meta: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / parseInt(limit))
       }
+    });
+  } catch (error) {
+    console.error('Error fetching appointments:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
-      const finalTime = time;
-
-      const apptId = id || `APPT-${Date.now().toString(36).toUpperCase()}`;
-
-      // Insert with temporary token 0, then resequence
-      const createdAt = new Date().toISOString();
+const resequenceTokens = async (date) => {
+  try {
+    const [rows] = await pool.query(
+      "SELECT ID FROM Appointments WHERE ApptDate = ? AND DeletedAt IS NULL ORDER BY ApptTime ASC, CreatedAt ASC",
+      [date]
+    );
+    for (let i = 0; i < rows.length; i++) {
       await pool.execute(
-        `INSERT INTO Appointments (ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Service, Status, Notes, TokenNumber, CreatedBy, CreatedAt)
+        "UPDATE Appointments SET TokenNumber = ? WHERE ID = ?",
+        [i + 1, rows[i].ID]
+      );
+    }
+  } catch (error) {
+    console.error('Error resequencing tokens:', error);
+  }
+};
+
+// POST /api/appointments — book a new appointment (auto-assigns daily token)
+app.post('/api/appointments', async (req, res) => {
+  try {
+    const { id, patientId, name, phone, date, time, service, notes, createdBy } = req.body;
+
+    if (!name || !phone || !date || !time) {
+      return res.status(400).json({ error: 'Name, phone, date and time are required.' });
+    }
+
+    const finalTime = time;
+
+    const apptId = id || `APPT-${Date.now().toString(36).toUpperCase()}`;
+
+    // Insert with temporary token 0, then resequence
+    const createdAt = new Date().toISOString();
+    await pool.execute(
+      `INSERT INTO Appointments (ID, PatientID, PatientName, Phone, ApptDate, ApptTime, Service, Status, Notes, TokenNumber, CreatedBy, CreatedAt)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'Confirmed', ?, 0, ?, ?)`,
-        [apptId, (patientId && patientId !== '') ? patientId : null, name, phone, date, finalTime, service || 'Consultation', notes || null, createdBy || null, createdAt]
-      );
+      [apptId, (patientId && patientId !== '') ? patientId : null, name, phone, date, finalTime, service || 'Consultation', notes || null, createdBy || null, createdAt]
+    );
 
-      // Re-sequence tokens chronologically by time for this day
-      await resequenceTokens(date);
+    // Re-sequence tokens chronologically by time for this day
+    await resequenceTokens(date);
 
-      // Fetch the newly assigned token number for response
-      const [finalAppt] = await pool.query("SELECT TokenNumber FROM Appointments WHERE ID = ?", [apptId]);
-      const tokenNumber = finalAppt[0]?.TokenNumber || 0;
+    // Fetch the newly assigned token number for response
+    const [finalAppt] = await pool.query("SELECT TokenNumber FROM Appointments WHERE ID = ?", [apptId]);
+    const tokenNumber = finalAppt[0]?.TokenNumber || 0;
 
-      // ⚡ Flush Appointment Cache
-      flushAppointmentCache();
+    // 🔔 Notify Staff of Physical Appointment Scheduled
+    const format12HourTime = (timeStr) => {
+      if (!timeStr) return '';
+      const parts = String(timeStr).trim().split(':');
+      let h = parseInt(parts[0], 10);
+      let m = parseInt(parts[1], 10) || 0;
+      if (isNaN(h)) return timeStr;
+      const ampm = h >= 12 ? 'PM' : 'AM';
+      h = h % 12;
+      h = h ? h : 12;
+      const formattedMinutes = m < 10 ? `0${m}` : m;
+      const formattedHours = h < 10 ? `0${h}` : h;
+      return `${formattedHours}:${formattedMinutes} ${ampm}`;
+    };
 
-      res.json({ success: true, id: apptId, tokenNumber });
-    } catch (error) {
-      console.error('Error creating appointment:', error);
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // PUT /api/appointments/:id — update status or other fields
-  app.put('/api/appointments/:id', async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { Status, PatientName, Phone, ApptDate, ApptTime, Service, Notes, PatientID } = req.body;
-
-      // Build dynamic SET clause
-      const updates = [];
-      const params = [];
-
-      if (Status !== undefined) { updates.push('Status = ?'); params.push(Status); }
-      if (PatientName !== undefined) { updates.push('PatientName = ?'); params.push(PatientName); }
-      if (Phone !== undefined) { updates.push('Phone = ?'); params.push(Phone); }
-      if (ApptDate !== undefined) { updates.push('ApptDate = ?'); params.push(ApptDate); }
-      if (ApptTime !== undefined) { updates.push('ApptTime = ?'); params.push(ApptTime); }
-      if (Service !== undefined) { updates.push('Service = ?'); params.push(Service); }
-      if (Notes !== undefined) { updates.push('Notes = ?'); params.push(Notes); }
-      if (PatientID !== undefined) { updates.push('PatientID = ?'); params.push(PatientID); }
-      
-      // Always update UpdatedAt
-      updates.push('UpdatedAt = ?');
-      params.push(new Date().toISOString());
-
-      if (updates.length === 0) {
-        return res.json({ success: true });
-      }
-
-      params.push(id);
-      await pool.query(`UPDATE Appointments SET ${updates.join(', ')} WHERE ID = ?`, params);
-
-      // If date or time changed, re-sequence the tokens
-      if (ApptDate || ApptTime) {
-        // Find the date of this appointment to re-sequence (use provided ApptDate or fetch current if needed)
-        // For simplicity, if ApptDate was provided, use it. Otherwise we'd need to fetch.
-        // Usually ApptTime changes within the same day.
-        const [currentAppt] = await pool.query("SELECT ApptDate FROM Appointments WHERE ID = ?", [id]);
-        if (currentAppt.length > 0) {
-          await resequenceTokens(currentAppt[0].ApptDate);
-        }
-      }
-
-      // ⚡ Flush Appointment Cache
-      flushAppointmentCache();
-
-      res.json({ success: true });
-    } catch (error) {
-      console.error('Error updating appointment:', error);
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // DELETE /api/appointments/:id — Soft Delete
-  app.delete('/api/appointments/:id', async (req, res) => {
-    try {
-      const { id } = req.params;
-      const deletedBy = req.user?.username || 'Unknown';
-      const deleteTime = new Date().toISOString();
-      
-      // Get the date first so we can re-sequence after deletion
-      const [appt] = await pool.query("SELECT ApptDate FROM Appointments WHERE ID = ? AND DeletedAt IS NULL", [id]);
-      const apptDate = appt.length > 0 ? appt[0].ApptDate : null;
-
-      if (!apptDate) {
-        return res.status(404).json({ error: 'Appointment not found or already deleted.' });
-      }
-
-      // Soft delete by updating DeletedAt and DeletedBy
-      await pool.execute(
-        'UPDATE Appointments SET DeletedAt = ?, DeletedBy = ?, TokenNumber = 0 WHERE ID = ?', 
-        [deleteTime, deletedBy, id]
-      );
-      
-      // Re-sequence tokens for the day to fill the gap
-      await resequenceTokens(apptDate);
-
-      // ⚡ Flush Appointment Cache
-      flushAppointmentCache();
-
-      res.json({ success: true, message: 'Appointment soft-deleted successfully.' });
-    } catch (error) {
-      console.error('Error deleting appointment:', error);
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // ============ WHATSAPP API ============
-  app.post('/api/whatsappsms', async (req, res) => {
-    try {
-      const { to, message, filename, document } = req.body;
-
-      // Get GLOBAL settings to extract UltraMsg credentials
-      const [settings] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
-      if (settings.length === 0) return res.status(400).json({ error: 'Global settings not found.' });
-
-      let configStr = settings[0].Data;
-      if (typeof configStr === 'string') configStr = JSON.parse(configStr);
-
-      const waConfig = configStr.whatsappConfig;
-      if (!waConfig || !waConfig.enabled) {
-        return res.status(400).json({ error: 'WhatsApp integration is currently disabled in Settings.' });
-      }
-      if (!waConfig.instanceId || !waConfig.token) {
-        return res.status(400).json({ error: 'WhatsApp instance ID or token missing.' });
-      }
-
-      // Format phone number to international string (remove symbols, ensure leading 92)
-      let toPhone = (to || '').replace(/\D/g, '');
-      if (toPhone.startsWith('0')) {
-        toPhone = '92' + toPhone.substring(1);
-      }
-
-      // Use dynamic import or require
-      const axios = require('axios');
-      let response;
-      if (document) {
-        // Send document (PDF/etc) via UltraMsg messages/document endpoint
-        response = await axios.post(`https://api.ultramsg.com/${waConfig.instanceId}/messages/document`, {
-          token: waConfig.token,
-          to: `+${toPhone}`,
-          filename: filename || 'report.pdf',
-          document: document, // base64 string or public URL
-          caption: message || ''
-        }, { timeout: 20000 });
-      } else {
-        // Send standard chat message
-        response = await axios.post(`https://api.ultramsg.com/${waConfig.instanceId}/messages/chat`, {
-          token: waConfig.token,
-          to: `+${toPhone}`,
-          body: message
-        }, { timeout: 10000 });
-      }
-
-      res.json({ success: true, data: response.data });
-    } catch (error) {
-      console.error('WhatsApp sending error:', error?.response?.data || error.message);
-      res.status(500).json({ 
-        success: false, 
-        error: error?.response?.data?.message || error.message 
+    const formatPKTDateDisplay = (dateStr) => {
+      if (!dateStr) return '';
+      const d = new Date(dateStr);
+      if (isNaN(d.getTime())) return dateStr;
+      return d.toLocaleDateString('en-US', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric'
       });
+    };
+
+    const displayTime = format12HourTime(finalTime);
+    const displayDate = formatPKTDateDisplay(date);
+
+    createAndSendNotification({
+      targetRoles: ['Doctor', 'Receptionist', 'Admin'],
+      type: 'appointment_scheduled',
+      title: `📅 Appointment Scheduled: ${name}`,
+      message: `Clinic appointment scheduled for ${name} on ${displayDate} at ${displayTime} (${service || 'Consultation'}).`,
+      link: `/appointments?search=${encodeURIComponent(apptId)}`
+    });
+
+    // ⚡ Flush Appointment Cache
+    flushAppointmentCache();
+
+    res.json({ success: true, id: apptId, tokenNumber });
+  } catch (error) {
+    console.error('Error creating appointment:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// PUT /api/appointments/:id — update status or other fields
+app.put('/api/appointments/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { Status, PatientName, Phone, ApptDate, ApptTime, Service, Notes, PatientID } = req.body;
+
+    // Build dynamic SET clause
+    const updates = [];
+    const params = [];
+
+    if (Status !== undefined) { updates.push('Status = ?'); params.push(Status); }
+    if (PatientName !== undefined) { updates.push('PatientName = ?'); params.push(PatientName); }
+    if (Phone !== undefined) { updates.push('Phone = ?'); params.push(Phone); }
+    if (ApptDate !== undefined) { updates.push('ApptDate = ?'); params.push(ApptDate); }
+    if (ApptTime !== undefined) { updates.push('ApptTime = ?'); params.push(ApptTime); }
+    if (Service !== undefined) { updates.push('Service = ?'); params.push(Service); }
+    if (Notes !== undefined) { updates.push('Notes = ?'); params.push(Notes); }
+    if (PatientID !== undefined) { updates.push('PatientID = ?'); params.push(PatientID); }
+
+    // Always update UpdatedAt
+    updates.push('UpdatedAt = ?');
+    params.push(new Date().toISOString());
+
+    if (updates.length === 0) {
+      return res.json({ success: true });
     }
-  });
 
-  // ============ SMS API ============
-  app.post('/api/smsapi', async (req, res) => {
-    try {
-      const { to, message } = req.body;
-      const cleanMessage = (message || '')
-        .replace(/welcome/gi, 'Greetings')
-        .replace(/confirmed/gi, 'completed')
-        .replace(/confirm/gi, 'complete');
+    params.push(id);
+    await pool.query(`UPDATE Appointments SET ${updates.join(', ')} WHERE ID = ?`, params);
 
-      // Get GLOBAL settings to extract SMS credentials
-      const [settings] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
-      if (settings.length === 0) return res.status(400).json({ error: 'Global settings not found.' });
-
-      let configStr = settings[0].Data;
-      if (typeof configStr === 'string') configStr = JSON.parse(configStr);
-
-      const smsConfig = configStr.smsConfig;
-      if (!smsConfig || !smsConfig.enabled) {
-        return res.status(400).json({ error: 'SMS integration is currently disabled in Settings.' });
+    // If date or time changed, re-sequence the tokens
+    if (ApptDate || ApptTime) {
+      // Find the date of this appointment to re-sequence (use provided ApptDate or fetch current if needed)
+      // For simplicity, if ApptDate was provided, use it. Otherwise we'd need to fetch.
+      // Usually ApptTime changes within the same day.
+      const [currentAppt] = await pool.query("SELECT ApptDate FROM Appointments WHERE ID = ?", [id]);
+      if (currentAppt.length > 0) {
+        await resequenceTokens(currentAppt[0].ApptDate);
       }
+    }
 
-      // Format phone number to string (remove symbols, ensure leading 92)
-      let toPhone = (to || '').replace(/\D/g, '');
-      if (toPhone.startsWith('0')) {
-        toPhone = '92' + toPhone.substring(1);
-      }
+    // ⚡ Flush Appointment Cache
+    flushAppointmentCache();
 
-      // Execute request to Branded SMS Pakistan
-      const axios = require('axios');
-      const qs = require('qs');
-      
-      let targetUrl = smsConfig.providerUrlTemplate || 'https://app.brandedsmspakistan.com/api/send';
-      
-      // Normalize root domain to the correct API endpoint
-      if (targetUrl.trim() === 'https://app.brandedsmspakistan.com/' || targetUrl.trim() === 'https://app.brandedsmspakistan.com') {
-        targetUrl = 'https://app.brandedsmspakistan.com/api/send';
-      }
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error updating appointment:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
-      let response;
-      if (targetUrl.includes('brandedsmspakistan.com')) {
-        // Branded SMS Pakistan API expects a GET request for sending messages
-        const emailParam = (smsConfig.email || '').trim();
-        const keyParam = (smsConfig.key || '').trim();
-        const maskParam = (smsConfig.mask || 'INFO SHARE').trim();
+// DELETE /api/appointments/:id — Soft Delete
+app.delete('/api/appointments/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deletedBy = req.user?.username || 'Unknown';
+    const deleteTime = new Date().toISOString();
 
-        console.log(`[SMS] Sending GET request to Branded SMS Pakistan. Email: "${emailParam}", Mask: "${maskParam}", To: "${toPhone}"`);
+    // Get the date first so we can re-sequence after deletion
+    const [appt] = await pool.query("SELECT ApptDate FROM Appointments WHERE ID = ? AND DeletedAt IS NULL", [id]);
+    const apptDate = appt.length > 0 ? appt[0].ApptDate : null;
 
-        response = await axios.get(targetUrl, {
-          params: {
-            email: emailParam,
-            key: keyParam,
-            mask: maskParam,
-            to: toPhone,
-            message: cleanMessage
-          },
-          timeout: 15000
-        });
-      } else {
-        // Other SMS gateways or endpoints that support POST
-        const emailParam = (smsConfig.email || '').trim();
-        const keyParam = (smsConfig.key || '').trim();
-        const maskParam = (smsConfig.mask || 'INFO SHARE').trim();
+    if (!apptDate) {
+      return res.status(404).json({ error: 'Appointment not found or already deleted.' });
+    }
 
-        console.log(`[SMS] Sending POST request to ${targetUrl}. Email: "${emailParam}", Mask: "${maskParam}", To: "${toPhone}"`);
+    // Soft delete by updating DeletedAt and DeletedBy
+    await pool.execute(
+      'UPDATE Appointments SET DeletedAt = ?, DeletedBy = ?, TokenNumber = 0 WHERE ID = ?',
+      [deleteTime, deletedBy, id]
+    );
 
-        const payload = qs.stringify({
+    // Re-sequence tokens for the day to fill the gap
+    await resequenceTokens(apptDate);
+
+    // ⚡ Flush Appointment Cache
+    flushAppointmentCache();
+
+    res.json({ success: true, message: 'Appointment soft-deleted successfully.' });
+  } catch (error) {
+    console.error('Error deleting appointment:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ WHATSAPP API ============
+app.post('/api/whatsappsms', async (req, res) => {
+  try {
+    const { to, message, filename, document } = req.body;
+
+    // Get GLOBAL settings to extract UltraMsg credentials
+    const [settings] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
+    if (settings.length === 0) return res.status(400).json({ error: 'Global settings not found.' });
+
+    let configStr = settings[0].Data;
+    if (typeof configStr === 'string') configStr = JSON.parse(configStr);
+
+    const waConfig = configStr.whatsappConfig;
+    if (!waConfig || !waConfig.enabled) {
+      return res.status(400).json({ error: 'WhatsApp integration is currently disabled in Settings.' });
+    }
+    if (!waConfig.instanceId || !waConfig.token) {
+      return res.status(400).json({ error: 'WhatsApp instance ID or token missing.' });
+    }
+
+    // Format phone number to international string (remove symbols, ensure leading 92)
+    let toPhone = (to || '').replace(/\D/g, '');
+    if (toPhone.startsWith('0')) {
+      toPhone = '92' + toPhone.substring(1);
+    }
+
+    // Use dynamic import or require
+    const axios = require('axios');
+    let response;
+    if (document) {
+      // Send document (PDF/etc) via UltraMsg messages/document endpoint
+      response = await axios.post(`https://api.ultramsg.com/${waConfig.instanceId}/messages/document`, {
+        token: waConfig.token,
+        to: `+${toPhone}`,
+        filename: filename || 'report.pdf',
+        document: document, // base64 string or public URL
+        caption: message || ''
+      }, { timeout: 20000 });
+    } else {
+      // Send standard chat message
+      response = await axios.post(`https://api.ultramsg.com/${waConfig.instanceId}/messages/chat`, {
+        token: waConfig.token,
+        to: `+${toPhone}`,
+        body: message
+      }, { timeout: 10000 });
+    }
+
+    res.json({ success: true, data: response.data });
+  } catch (error) {
+    console.error('WhatsApp sending error:', error?.response?.data || error.message);
+    res.status(500).json({
+      success: false,
+      error: error?.response?.data?.message || error.message
+    });
+  }
+});
+
+// ============ SMS API ============
+app.post('/api/smsapi', async (req, res) => {
+  try {
+    const { to, message } = req.body;
+    const cleanMessage = (message || '')
+      .replace(/welcome/gi, 'Greetings')
+      .replace(/confirmed/gi, 'completed')
+      .replace(/confirm/gi, 'complete');
+
+    // Get GLOBAL settings to extract SMS credentials
+    const [settings] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
+    if (settings.length === 0) return res.status(400).json({ error: 'Global settings not found.' });
+
+    let configStr = settings[0].Data;
+    if (typeof configStr === 'string') configStr = JSON.parse(configStr);
+
+    const smsConfig = configStr.smsConfig;
+    if (!smsConfig || !smsConfig.enabled) {
+      return res.status(400).json({ error: 'SMS integration is currently disabled in Settings.' });
+    }
+
+    // Format phone number to string (remove symbols, ensure leading 92)
+    let toPhone = (to || '').replace(/\D/g, '');
+    if (toPhone.startsWith('0')) {
+      toPhone = '92' + toPhone.substring(1);
+    }
+
+    // Execute request to Branded SMS Pakistan
+    const axios = require('axios');
+    const qs = require('qs');
+
+    let targetUrl = smsConfig.providerUrlTemplate || 'https://app.brandedsmspakistan.com/api/send';
+
+    // Normalize root domain to the correct API endpoint
+    if (targetUrl.trim() === 'https://app.brandedsmspakistan.com/' || targetUrl.trim() === 'https://app.brandedsmspakistan.com') {
+      targetUrl = 'https://app.brandedsmspakistan.com/api/send';
+    }
+
+    let response;
+    if (targetUrl.includes('brandedsmspakistan.com')) {
+      // Branded SMS Pakistan API expects a GET request for sending messages
+      const emailParam = (smsConfig.email || '').trim();
+      const keyParam = (smsConfig.key || '').trim();
+      const maskParam = (smsConfig.mask || 'INFO SHARE').trim();
+
+      console.log(`[SMS] Sending GET request to Branded SMS Pakistan. Email: "${emailParam}", Mask: "${maskParam}", To: "${toPhone}"`);
+
+      response = await axios.get(targetUrl, {
+        params: {
           email: emailParam,
           key: keyParam,
           mask: maskParam,
           to: toPhone,
           message: cleanMessage
-        });
-        
-        response = await axios.post(targetUrl, payload, {
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded'
-          },
-          timeout: 15000
-        });
-      }
+        },
+        timeout: 15000
+      });
+    } else {
+      // Other SMS gateways or endpoints that support POST
+      const emailParam = (smsConfig.email || '').trim();
+      const keyParam = (smsConfig.key || '').trim();
+      const maskParam = (smsConfig.mask || 'INFO SHARE').trim();
 
-      // Map gateway response codes to user-friendly messages
-      let responseData = response.data;
-      if (responseData && responseData.sms) {
-        if (responseData.sms.code === '101' || responseData.sms.code === 101) {
-          responseData.sms.response = 'Phone Number Is Invalid Cannot Send the Msg';
-        }
-      }
+      console.log(`[SMS] Sending POST request to ${targetUrl}. Email: "${emailParam}", Mask: "${maskParam}", To: "${toPhone}"`);
 
-      res.json({ success: true, data: responseData });
-    } catch (error) {
-      console.error('SMS sending error:', error?.response?.data || error.message);
-      res.status(500).json({ error: 'Failed to send SMS message.' });
+      const payload = qs.stringify({
+        email: emailParam,
+        key: keyParam,
+        mask: maskParam,
+        to: toPhone,
+        message: cleanMessage
+      });
+
+      response = await axios.post(targetUrl, payload, {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        timeout: 15000
+      });
     }
-  });
 
-  // ============ COMMUNICATION LOGS API ============
-  app.post('/api/communication-logs', async (req, res) => {
-    try {
-      const { ReferenceID, Type, Recipient, Message, Status, ErrorCode, SentBy } = req.body;
-      const referenceId = ReferenceID || req.body.referenceId;
-      const type = Type || req.body.type;
-      const recipient = Recipient || req.body.recipient;
-      const message = Message || req.body.message;
-      const status = Status || req.body.status;
-      const errorCode = ErrorCode !== undefined ? ErrorCode : req.body.errorCode;
-      const sentBy = SentBy || req.body.sentBy;
-
-      if (!referenceId || !type || !recipient || !message || !status) {
-        return res.status(400).json({ error: 'Missing required communication log fields.' });
+    // Map gateway response codes to user-friendly messages
+    let responseData = response.data;
+    if (responseData && responseData.sms) {
+      if (responseData.sms.code === '101' || responseData.sms.code === 101) {
+        responseData.sms.response = 'Phone Number Is Invalid Cannot Send the Msg';
       }
-      const sentAt = new Date().toISOString();
-      await pool.execute(
-        `INSERT INTO CommunicationLogs (ReferenceID, Type, Recipient, Message, Status, ErrorCode, SentBy, SentAt) 
+    }
+
+    res.json({ success: true, data: responseData });
+  } catch (error) {
+    console.error('SMS sending error:', error?.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to send SMS message.' });
+  }
+});
+
+// ============ COMMUNICATION LOGS API ============
+app.post('/api/communication-logs', async (req, res) => {
+  try {
+    const { ReferenceID, Type, Recipient, Message, Status, ErrorCode, SentBy } = req.body;
+    const referenceId = ReferenceID || req.body.referenceId;
+    const type = Type || req.body.type;
+    const recipient = Recipient || req.body.recipient;
+    const message = Message || req.body.message;
+    const status = Status || req.body.status;
+    const errorCode = ErrorCode !== undefined ? ErrorCode : req.body.errorCode;
+    const sentBy = SentBy || req.body.sentBy;
+
+    if (!referenceId || !type || !recipient || !message || !status) {
+      return res.status(400).json({ error: 'Missing required communication log fields.' });
+    }
+    const sentAt = new Date().toISOString();
+    await pool.execute(
+      `INSERT INTO CommunicationLogs (ReferenceID, Type, Recipient, Message, Status, ErrorCode, SentBy, SentAt) 
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [referenceId, type, recipient, message, status, errorCode || null, sentBy || 'System', sentAt]
-      );
-      res.json({ success: true });
-    } catch (error) {
-      console.error('Failed to create communication log:', error);
-      res.status(500).json({ error: 'Failed to create communication log.' });
+      [referenceId, type, recipient, message, status, errorCode || null, sentBy || 'System', sentAt]
+    );
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to create communication log:', error);
+    res.status(500).json({ error: 'Failed to create communication log.' });
+  }
+});
+
+app.get('/api/communication-logs/:referenceId', async (req, res) => {
+  try {
+    const { referenceId } = req.params;
+    const [rows] = await pool.query(
+      'SELECT * FROM CommunicationLogs WHERE ReferenceID = ? ORDER BY SentAt DESC',
+      [referenceId]
+    );
+    res.json(rows);
+  } catch (error) {
+    console.error('Failed to fetch communication logs:', error);
+    res.status(500).json({ error: 'Failed to fetch communication logs.' });
+  }
+});
+
+// ============ PDF REPORT UPLOAD ============
+app.post('/api/reports/upload/:visitId', express.raw({ type: 'application/pdf', limit: '10mb' }), async (req, res) => {
+  try {
+    const { visitId } = req.params;
+
+    const reportsDir = path.join(__dirname, 'public', 'reports');
+    if (!fs.existsSync(reportsDir)) {
+      fs.mkdirSync(reportsDir, { recursive: true });
     }
-  });
 
-  app.get('/api/communication-logs/:referenceId', async (req, res) => {
-    try {
-      const { referenceId } = req.params;
-      const [rows] = await pool.query(
-        'SELECT * FROM CommunicationLogs WHERE ReferenceID = ? ORDER BY SentAt DESC',
-        [referenceId]
-      );
-      res.json(rows);
-    } catch (error) {
-      console.error('Failed to fetch communication logs:', error);
-      res.status(500).json({ error: 'Failed to fetch communication logs.' });
-    }
-  });
+    const filePath = path.join(reportsDir, `${visitId}.pdf`);
 
-  // ============ PDF REPORT UPLOAD ============
-  app.post('/api/reports/upload/:visitId', express.raw({ type: 'application/pdf', limit: '10mb' }), async (req, res) => {
-    try {
-      const { visitId } = req.params;
-      
-      const reportsDir = path.join(__dirname, 'public', 'reports');
-      if (!fs.existsSync(reportsDir)) {
-        fs.mkdirSync(reportsDir, { recursive: true });
-      }
+    // Write raw binary data from req.body
+    await fs.promises.writeFile(filePath, req.body);
 
-      const filePath = path.join(reportsDir, `${visitId}.pdf`);
-      
-      // Write raw binary data from req.body
-      await fs.promises.writeFile(filePath, req.body);
-      
-      const host = req.get('host');
-      const protocol = req.protocol;
-      
-      // Return the public URL
-      const fileUrl = `${protocol}://${host}/public/reports/${visitId}.pdf`;
-      res.json({ success: true, url: fileUrl });
-    } catch (error) {
-      console.error('Failed to save report PDF:', error);
-      res.status(500).json({ error: 'Failed to save report PDF.' });
-    }
-  });
+    const host = req.get('host');
+    const protocol = req.protocol;
 
-  // Serve static PDF files from public reports folder
-  app.use('/public/reports', express.static(path.join(__dirname, 'public', 'reports')));
+    // Return the public URL
+    const fileUrl = `${protocol}://${host}/public/reports/${visitId}.pdf`;
+    res.json({ success: true, url: fileUrl });
+  } catch (error) {
+    console.error('Failed to save report PDF:', error);
+    res.status(500).json({ error: 'Failed to save report PDF.' });
+  }
+});
 
-  // ============ CHAT API ENDPOINTS ============
+// Serve static PDF files from public reports folder
+app.use('/public/reports', express.static(path.join(__dirname, 'public', 'reports')));
 
-  // 1. Get all conversations for current user
-  app.get('/api/chat/conversations', async (req, res) => {
-    try {
-      const userId = req.user.id;
-      // Get conversations where user is a participant
-      const [rows] = await pool.query(`
+// ============ CHAT API ENDPOINTS ============
+
+// 1. Get all conversations for current user
+app.get('/api/chat/conversations', async (req, res) => {
+  try {
+    const userId = req.user.id;
+    // Get conversations where user is a participant
+    const [rows] = await pool.query(`
         SELECT c.*, 
                (SELECT Content FROM ChatMessages WHERE ConversationID = c.ID ORDER BY CreatedAt DESC LIMIT 1) as LastMessage,
                (SELECT CreatedAt FROM ChatMessages WHERE ConversationID = c.ID ORDER BY CreatedAt DESC LIMIT 1) as LastMessageAt,
@@ -6248,76 +6503,76 @@ app.post('/api/patient-services', async (req, res) => {
         ORDER BY LastMessageAt DESC
       `, [userId, userId]);
 
-      // Get participants for each conversation
-      for (const conv of rows) {
-        const [parts] = await pool.query(`
+    // Get participants for each conversation
+    for (const conv of rows) {
+      const [parts] = await pool.query(`
           SELECT u.ID, u.Username, u.Role, u.LastLogin
           FROM ChatParticipants cp
           JOIN Users u ON cp.UserID = u.ID
           WHERE cp.ConversationID = ?
         `, [conv.ID]);
-        conv.participants = parts;
-      }
-
-      res.json(rows);
-    } catch (err) {
-      console.error('❌ Failed to fetch conversations:', err);
-      res.status(500).json({ error: 'Internal server error' });
+      conv.participants = parts;
     }
-  });
 
-  // 2. Get messages for a specific conversation
-  app.get('/api/chat/messages/:conversationId', async (req, res) => {
-    try {
-      const { conversationId } = req.params;
-      const { limit = 50, beforeId } = req.query;
-      
-      let query = 'SELECT * FROM ChatMessages WHERE ConversationID = ?';
-      const params = [conversationId];
+    res.json(rows);
+  } catch (err) {
+    console.error('❌ Failed to fetch conversations:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
-      if (beforeId) {
-        query += ' AND ID < ?';
-        params.push(beforeId);
-      }
+// 2. Get messages for a specific conversation
+app.get('/api/chat/messages/:conversationId', async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const { limit = 50, beforeId } = req.query;
 
-      query += ' ORDER BY CreatedAt DESC LIMIT ?';
-      params.push(Number(limit));
+    let query = 'SELECT * FROM ChatMessages WHERE ConversationID = ?';
+    const params = [conversationId];
 
-      const [rows] = await pool.query(query, params);
-      // Return in chronological order for the frontend
-      res.json(rows.reverse());
-    } catch (err) {
-      console.error('❌ Failed to fetch messages:', err);
-      res.status(500).json({ error: 'Internal server error' });
+    if (beforeId) {
+      query += ' AND ID < ?';
+      params.push(beforeId);
     }
-  });
 
-  // 3. Mark messages as read
-  app.put('/api/chat/messages/:conversationId/read', async (req, res) => {
-    try {
-      const { conversationId } = req.params;
-      const userId = req.user.id;
+    query += ' ORDER BY CreatedAt DESC LIMIT ?';
+    params.push(Number(limit));
 
-      await pool.execute(
-        'UPDATE ChatMessages SET IsRead = 1 WHERE ConversationID = ? AND SenderID != ?',
-        [conversationId, userId]
-      );
+    const [rows] = await pool.query(query, params);
+    // Return in chronological order for the frontend
+    res.json(rows.reverse());
+  } catch (err) {
+    console.error('❌ Failed to fetch messages:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
-      res.json({ success: true });
-    } catch (err) {
-      console.error('❌ Failed to mark messages as read:', err);
-      res.status(500).json({ error: 'Internal server error' });
-    }
-  });
+// 3. Mark messages as read
+app.put('/api/chat/messages/:conversationId/read', async (req, res) => {
+  try {
+    const { conversationId } = req.params;
+    const userId = req.user.id;
 
-  // 4. Start a new conversation
-  app.post('/api/chat/conversations', async (req, res) => {
-    try {
-      const { targetUserId } = req.body;
-      const userId = req.user.id;
+    await pool.execute(
+      'UPDATE ChatMessages SET IsRead = 1 WHERE ConversationID = ? AND SenderID != ?',
+      [conversationId, userId]
+    );
 
-      // Check if conversation already exists (Direct Message)
-      const [existing] = await pool.query(`
+    res.json({ success: true });
+  } catch (err) {
+    console.error('❌ Failed to mark messages as read:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// 4. Start a new conversation
+app.post('/api/chat/conversations', async (req, res) => {
+  try {
+    const { targetUserId } = req.body;
+    const userId = req.user.id;
+
+    // Check if conversation already exists (Direct Message)
+    const [existing] = await pool.query(`
         SELECT cp1.ConversationID as id
         FROM ChatParticipants cp1
         JOIN ChatParticipants cp2 ON cp1.ConversationID = cp2.ConversationID
@@ -6325,534 +6580,899 @@ app.post('/api/patient-services', async (req, res) => {
         WHERE cp1.UserID = ? AND cp2.UserID = ? AND c.Type = 'Direct'
       `, [userId, targetUserId]);
 
-      if (existing.length > 0) {
-        return res.json({ id: existing[0].id });
-      }
-
-      // Create new conversation with timestamps
-      const now = new Date().toISOString();
-      const [result] = await pool.execute(
-        'INSERT INTO ChatConversations (Type, CreatedAt, UpdatedAt) VALUES (?, ?, ?)',
-        ['Direct', now, now]
-      );
-      const conversationId = result.insertId;
-
-      // Add participants with JoinedAt timestamp
-      await pool.execute(
-        'INSERT INTO ChatParticipants (ConversationID, UserID, JoinedAt) VALUES (?, ?, ?), (?, ?, ?)',
-        [conversationId, userId, now, conversationId, targetUserId, now]
-      );
-
-      res.json({ id: conversationId });
-    } catch (err) {
-      console.error('❌ Failed to start conversation:', err);
-      res.status(500).json({ error: 'Internal server error' });
+    if (existing.length > 0) {
+      return res.json({ id: existing[0].id });
     }
-  });
 
-  // --- PUBLIC API ROUTES ---
-  app.post('/api/public/track-event', async (req, res) => {
+    // Create new conversation with timestamps
+    const now = new Date().toISOString();
+    const [result] = await pool.execute(
+      'INSERT INTO ChatConversations (Type, CreatedAt, UpdatedAt) VALUES (?, ?, ?)',
+      ['Direct', now, now]
+    );
+    const conversationId = result.insertId;
+
+    // Add participants with JoinedAt timestamp
+    await pool.execute(
+      'INSERT INTO ChatParticipants (ConversationID, UserID, JoinedAt) VALUES (?, ?, ?), (?, ?, ?)',
+      [conversationId, userId, now, conversationId, targetUserId, now]
+    );
+
+    res.json({ id: conversationId });
+  } catch (err) {
+    console.error('❌ Failed to start conversation:', err);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// --- PUBLIC API ROUTES ---
+app.post('/api/public/track-event', async (req, res) => {
+  try {
+    const { visitId, action } = req.body;
+    if (!visitId || !action) {
+      return res.status(400).json({ error: 'Missing visitId or action' });
+    }
+
+    const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString();
+    await pool.execute(
+      'INSERT INTO PatientAccessLogs (VisitID, Action, CreatedAt, IPAddress) VALUES (?, ?, NOW(), ?)',
+      [visitId, String(action).toUpperCase(), ip]
+    );
+    res.json({ success: true });
+  } catch (e) {
+    console.error('Error logging patient access event:', e);
+    res.status(500).json({ error: 'Failed to log event' });
+  }
+});
+
+app.get('/api/public/track-logs/:visitId', async (req, res) => {
+  try {
+    const { visitId } = req.params;
+    const [logs] = await pool.execute(
+      'SELECT Action, CreatedAt, IPAddress FROM PatientAccessLogs WHERE VisitID = ? ORDER BY CreatedAt DESC',
+      [visitId]
+    );
+    res.json({ success: true, logs: logs.map(convertRowDates) });
+  } catch (e) {
+    res.status(500).json({ error: e.message, logs: [] });
+  }
+});
+
+app.get('/api/public/track-report/:visitId', async (req, res) => {
+  try {
+    const { visitId } = req.params;
+
+    // Auto-log SCANNED event
     try {
-      const { visitId, action } = req.body;
-      if (!visitId || !action) {
-        return res.status(400).json({ error: 'Missing visitId or action' });
-      }
-      
       const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString();
       await pool.execute(
-        'INSERT INTO PatientAccessLogs (VisitID, Action, CreatedAt, IPAddress) VALUES (?, ?, NOW(), ?)',
-        [visitId, String(action).toUpperCase(), ip]
+        'INSERT INTO PatientAccessLogs (VisitID, Action, CreatedAt, IPAddress) VALUES (?, "SCANNED", NOW(), ?)',
+        [visitId, ip]
       );
-      res.json({ success: true });
-    } catch (e) {
-      console.error('Error logging patient access event:', e);
-      res.status(500).json({ error: 'Failed to log event' });
+    } catch (logErr) { }
+
+    // 1. Try to find the Patient ID from either LabVisits or LabResults
+    let targetPatientId = visitId;
+    let targetVisitId = visitId;
+
+    const [lrCheck] = await pool.execute('SELECT LabPatientID FROM LabResults WHERE ID = ? LIMIT 1', [visitId]);
+    if (lrCheck.length > 0) {
+      targetPatientId = lrCheck[0].LabPatientID;
     }
-  });
 
-  app.get('/api/public/track-logs/:visitId', async (req, res) => {
-    try {
-      const { visitId } = req.params;
-      const [logs] = await pool.execute(
-        'SELECT Action, CreatedAt, IPAddress FROM PatientAccessLogs WHERE VisitID = ? ORDER BY CreatedAt DESC',
-        [visitId]
-      );
-      res.json({ success: true, logs: logs.map(convertRowDates) });
-    } catch (e) {
-      res.status(500).json({ error: e.message, logs: [] });
-    }
-  });
-
-  app.get('/api/public/track-report/:visitId', async (req, res) => {
-    try {
-      const { visitId } = req.params;
-
-      // Auto-log SCANNED event
-      try {
-        const ip = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || '').toString();
-        await pool.execute(
-          'INSERT INTO PatientAccessLogs (VisitID, Action, CreatedAt, IPAddress) VALUES (?, "SCANNED", NOW(), ?)',
-          [visitId, ip]
-        );
-      } catch (logErr) {}
-      
-      // 1. Try to find the Patient ID from either LabVisits or LabResults
-      let targetPatientId = visitId;
-      let targetVisitId = visitId;
-      
-      const [lrCheck] = await pool.execute('SELECT LabPatientID FROM LabResults WHERE ID = ? LIMIT 1', [visitId]);
-      if (lrCheck.length > 0) {
-        targetPatientId = lrCheck[0].LabPatientID;
-      }
-
-      // 2. Fetch LabVisits and LabPatients data safely
-      let [visitRows] = await pool.execute(`
+    // 2. Fetch LabVisits and LabPatients data safely
+    let [visitRows] = await pool.execute(`
         SELECT v.*, p.Name as PatientName, p.Phone, p.Age, p.AgeMonths, p.AgeDays, p.Gender,
         (SELECT Notes FROM LabFeesLedger WHERE VisitID = v.ID AND Notes LIKE '%Waived Off%' ORDER BY PaymentDate DESC LIMIT 1) as WaivedOffReason
         FROM LabVisits v 
         LEFT JOIN LabPatients p ON v.LabPatientID = p.ID
         WHERE v.ID = ? LIMIT 1
       `, [targetVisitId]);
-      
-      if (visitRows.length === 0 && targetPatientId) {
-        [visitRows] = await pool.execute(`
+
+    if (visitRows.length === 0 && targetPatientId) {
+      [visitRows] = await pool.execute(`
           SELECT v.*, p.Name as PatientName, p.Phone, p.Age, p.AgeMonths, p.AgeDays, p.Gender,
           (SELECT Notes FROM LabFeesLedger WHERE VisitID = v.ID AND Notes LIKE '%Waived Off%' ORDER BY PaymentDate DESC LIMIT 1) as WaivedOffReason
           FROM LabVisits v 
           LEFT JOIN LabPatients p ON v.LabPatientID = p.ID
           WHERE v.LabPatientID = ? ORDER BY v.CreatedAt DESC LIMIT 1
         `, [targetPatientId]);
-      }
-      
-      const visitData = visitRows[0] || {};
-      const actualPatientId = visitData.LabPatientID || targetPatientId;
-      
-      // 3. Fetch LabResults data safely (avoiding wrong random results on OR conditions)
-      let [labRows] = await pool.execute('SELECT * FROM LabResults WHERE ID = ? LIMIT 1', [visitId]);
-      
-      if (labRows.length === 0) {
-        // Fallback to getting the latest result for this patient if ID was actually a Patient ID
-        [labRows] = await pool.execute('SELECT * FROM LabResults WHERE LabPatientID = ? ORDER BY CreatedAt DESC LIMIT 1', [actualPatientId]);
-      }
-      
-      const labData = labRows[0] || {};
-      
-      if (!visitData.ID && !labData.ID) {
-        return res.status(404).json({ error: 'Report not found' });
-      }
-      
-      // 4. Calculate Payment & Status
-      const totalAmt = Number(visitData.TotalAmount || 0);
-      const discount = Number(visitData.DiscountAmount || 0);
-      const paid = Number(visitData.PaidAmount || 0);
-      
-      const balance = totalAmt - discount - paid;
-      const isPaid = visitData.PaymentStatus === 'Paid' || balance <= 0;
-      
-      const status = labData.ResultStatus || labData.Status || visitData.Status || 'Pending';
-      const isFinalized = status === 'Finalized' || status === 'Completed' || status === 'Ready';
-      
-      // If we don't have a patient name from visits, we might have it in LabResults
-      let patientName = visitData.PatientName || labData.PatientName;
-      if (!patientName) {
-         // Fallback query if PatientName was missing but we have LabPatientID
-         const [pRows] = await pool.execute('SELECT Name, Age, AgeMonths, AgeDays, Gender, Phone FROM LabPatients WHERE ID = ? LIMIT 1', [actualPatientId]);
-         if (pRows.length > 0) {
-           patientName = pRows[0].Name;
-           visitData.Age = pRows[0].Age;
-           visitData.AgeMonths = pRows[0].AgeMonths;
-           visitData.AgeDays = pRows[0].AgeDays;
-           visitData.Gender = pRows[0].Gender;
-           visitData.Phone = pRows[0].Phone;
-         } else {
-           patientName = 'Unknown Patient';
-         }
-      }
-
-      const publicRes = {
-        patientName: patientName,
-        labPatientId: actualPatientId,
-        date: labData.TestDate || labData.ReportDate || visitData.VisitDate || visitData.CreatedAt,
-        status: status,
-        paymentStatus: visitData.WaivedOffReason ? 'Waived Off' : (visitData.PaymentStatus || 'Unpaid'),
-        waivedOffReason: visitData.WaivedOffReason || null,
-        isLocked: !isPaid || !isFinalized,
-        totalAmount: totalAmt,
-        paidAmount: paid,
-        balance: Math.max(0, balance),
-        age: visitData.Age || labData.PatientAge || 0,
-        ageMonths: visitData.AgeMonths || 0,
-        ageDays: visitData.AgeDays || 0,
-        gender: visitData.Gender || 'Other',
-        phone: visitData.Phone || 'N/A',
-        technician: labData.Technician || 'System',
-        referredBy: labData.ReferredBy || 'Self',
-        isExpired: false,
-      };
-      
-      // Fetch global settings for reportExpiryHours
-      let globalData = {};
-      try {
-        const [gRows] = await pool.execute('SELECT Data FROM AppSettings WHERE ID = "GLOBAL" LIMIT 1');
-        if (gRows.length > 0) {
-          globalData = typeof gRows[0].Data === 'string' ? JSON.parse(gRows[0].Data) : (gRows[0].Data || {});
-        }
-      } catch (e) {
-        console.error("Error loading global settings in track-report:", e);
-      }
-
-      // Calculate Expiry
-      const expiryHours = Number(globalData.reportExpiryHours) || 3;
-      publicRes.expiryHours = expiryHours;
-      
-      const normalizedStatus = String(status || '').trim().toLowerCase();
-      const isStatusFinal = ['finalized', 'completed', 'ready', 'delivered'].includes(normalizedStatus);
-
-      if (isStatusFinal) {
-        const dateRaw = labData.ReportDate || labData.TestDate || visitData.VisitDate || visitData.CreatedAt;
-        let reportTime = NaN;
-        if (dateRaw) {
-          const parsed = new Date(dateRaw);
-          reportTime = parsed.getTime();
-          if (isNaN(reportTime) && typeof dateRaw === 'string') {
-            const fallbackParsed = new Date(dateRaw.replace(' ', 'T'));
-            reportTime = fallbackParsed.getTime();
-          }
-        }
-
-        const currentTime = Date.now();
-        if (!isNaN(reportTime)) {
-          const hoursElapsed = (currentTime - reportTime) / (1000 * 60 * 60);
-          if (hoursElapsed > expiryHours) {
-            publicRes.isExpired = true;
-            publicRes.isLocked = true; // Lock it to prevent downloading tests
-          }
-        }
-      }
-      
-      if (!publicRes.isLocked && !publicRes.isExpired) {
-        try {
-          publicRes.tests = typeof labData.Tests === 'string' ? JSON.parse(labData.Tests) : labData.Tests;
-        } catch (e) {
-          publicRes.tests = [];
-        }
-      }
-      
-      res.json(publicRes);
-    } catch (error) {
-      console.error('Public track API error:', error);
-      res.status(500).json({ error: 'Server error' });
-    }
-  });
-
-  // 1. Serve Static Assets (JS, CSS, Images, Fonts) with long-term caching
-  // Since Vite uses content hashing, it's safe to cache these indefinitely.
-  app.use('/assets', express.static(path.join(publicHtmlDistPath, 'assets'), {
-    immutable: true,
-    maxAge: '1y',
-    etag: true
-  }));
-
-  // 2. Serve other static files (robots.txt, etc.)
-  app.use(express.static(publicHtmlDistPath, {
-    index: false, // We handle index.html manually below
-    etag: true
-  }));
-
-  // 2. SPA Fallback / Status Page
-  app.get('*', (req, res) => {
-    if (req.path.startsWith('/api')) {
-      return res.status(404).json({ error: 'API endpoint not found' });
     }
 
-    if (fs.existsSync(publicHtmlIndexPath)) {
-      // ALWAYS set index.html to no-cache so the browser checks for updates
-      res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
-      res.sendFile(publicHtmlIndexPath);
-    } else {
-      // If missing, show the "Deployment in Progress" status page
-      getStatusPage(req, res);
+    const visitData = visitRows[0] || {};
+    const actualPatientId = visitData.LabPatientID || targetPatientId;
+
+    // 3. Fetch LabResults data safely (avoiding wrong random results on OR conditions)
+    let [labRows] = await pool.execute('SELECT * FROM LabResults WHERE ID = ? LIMIT 1', [visitId]);
+
+    if (labRows.length === 0) {
+      // Fallback to getting the latest result for this patient if ID was actually a Patient ID
+      [labRows] = await pool.execute('SELECT * FROM LabResults WHERE LabPatientID = ? ORDER BY CreatedAt DESC LIMIT 1', [actualPatientId]);
     }
-  });
 
+    const labData = labRows[0] || {};
 
-  // Database initialization moved to start sequence
-  initializeDatabase().catch(err => {
-    console.error('🔥 Database initialization failed:', err.message);
-    dbConnected = false;
-  });
-  // --- SOCKET.IO REAL-TIME CHAT SETUP ---
-  const http = require('http');
-  const { Server } = require('socket.io');
-  const httpServer = http.createServer(app);
-  httpServer.setMaxListeners(50); // Prevent Node warning during Socket.io reconnect storms
-  const io = new Server(httpServer, {
-    cors: {
-      origin: "*",
-      methods: ["GET", "POST"],
-      credentials: true
-    },
-    transports: ['websocket', 'polling'],
-    maxHttpBufferSize: 1e6, // Limit message size (1MB) to prevent OOM
-    pingTimeout: 30000,
-    pingInterval: 10000
-  });
+    if (!visitData.ID && !labData.ID) {
+      return res.status(404).json({ error: 'Report not found' });
+    }
 
-  app.set('io', io);
+    // 4. Calculate Payment & Status
+    const totalAmt = Number(visitData.TotalAmount || 0);
+    const discount = Number(visitData.DiscountAmount || 0);
+    const paid = Number(visitData.PaidAmount || 0);
 
-  // Presence Tracking: UserID -> { socketId, isOnChatPage, lastChatActivity, hasWarnedInactivity }
-  const userSocketMap = new Map();
-  const IDLE_TIMEOUT_MS = 600000; // 10 minutes - Force disconnect after this
+    const balance = totalAmt - discount - paid;
+    const isPaid = visitData.PaymentStatus === 'Paid' || balance <= 0;
 
-  function broadcastOnlineUsers() {
-    const now = Date.now();
-    const onlineUserIds = [];
-    
-    for (const [userId, info] of userSocketMap.entries()) {
-      const diff = now - info.lastChatActivity;
-      
-      // Force disconnect truly idle users to save shared hosting resources
-      if (diff > IDLE_TIMEOUT_MS) {
-        const socket = io.sockets.sockets.get(info.socketId);
-        if (socket) {
-          console.log(`🔌 [AUTO-DISCONNECT] User ${userId} due to 10m inactivity`);
-          socket.emit('force-disconnect', { reason: 'Inactivity timeout' });
-          socket.disconnect(true);
-        }
-        continue;
-      }
+    const status = labData.ResultStatus || labData.Status || visitData.Status || 'Pending';
+    const isFinalized = status === 'Finalized' || status === 'Completed' || status === 'Ready';
 
-      const wasRecentlyActive = diff < 120000; // 2 minutes for "Online" status
-      if (wasRecentlyActive) {
-        onlineUserIds.push(userId);
-        info.hasWarnedInactivity = false;
+    // If we don't have a patient name from visits, we might have it in LabResults
+    let patientName = visitData.PatientName || labData.PatientName;
+    if (!patientName) {
+      // Fallback query if PatientName was missing but we have LabPatientID
+      const [pRows] = await pool.execute('SELECT Name, Age, AgeMonths, AgeDays, Gender, Phone FROM LabPatients WHERE ID = ? LIMIT 1', [actualPatientId]);
+      if (pRows.length > 0) {
+        patientName = pRows[0].Name;
+        visitData.Age = pRows[0].Age;
+        visitData.AgeMonths = pRows[0].AgeMonths;
+        visitData.AgeDays = pRows[0].AgeDays;
+        visitData.Gender = pRows[0].Gender;
+        visitData.Phone = pRows[0].Phone;
       } else {
-        if (!info.hasWarnedInactivity) {
-          const lastActiveDate = new Date(info.lastChatActivity).toISOString();
-          if (pool) {
-            pool.execute('UPDATE Users SET LastLogin = ? WHERE ID = ?', [lastActiveDate, userId]).catch(() => {});
-          }
-          info.hasWarnedInactivity = true;
+        patientName = 'Unknown Patient';
+      }
+    }
+
+    const publicRes = {
+      patientName: patientName,
+      labPatientId: actualPatientId,
+      date: labData.TestDate || labData.ReportDate || visitData.VisitDate || visitData.CreatedAt,
+      status: status,
+      paymentStatus: visitData.WaivedOffReason ? 'Waived Off' : (visitData.PaymentStatus || 'Unpaid'),
+      waivedOffReason: visitData.WaivedOffReason || null,
+      isLocked: !isPaid || !isFinalized,
+      totalAmount: totalAmt,
+      paidAmount: paid,
+      balance: Math.max(0, balance),
+      age: visitData.Age || labData.PatientAge || 0,
+      ageMonths: visitData.AgeMonths || 0,
+      ageDays: visitData.AgeDays || 0,
+      gender: visitData.Gender || 'Other',
+      phone: visitData.Phone || 'N/A',
+      technician: labData.Technician || 'System',
+      referredBy: labData.ReferredBy || 'Self',
+      isExpired: false,
+    };
+
+    // Fetch global settings for reportExpiryHours
+    let globalData = {};
+    try {
+      const [gRows] = await pool.execute('SELECT Data FROM AppSettings WHERE ID = "GLOBAL" LIMIT 1');
+      if (gRows.length > 0) {
+        globalData = typeof gRows[0].Data === 'string' ? JSON.parse(gRows[0].Data) : (gRows[0].Data || {});
+      }
+    } catch (e) {
+      console.error("Error loading global settings in track-report:", e);
+    }
+
+    // Calculate Expiry
+    const expiryHours = Number(globalData.reportExpiryHours) || 3;
+    publicRes.expiryHours = expiryHours;
+
+    const normalizedStatus = String(status || '').trim().toLowerCase();
+    const isStatusFinal = ['finalized', 'completed', 'ready', 'delivered'].includes(normalizedStatus);
+
+    if (isStatusFinal) {
+      const dateRaw = labData.ReportDate || labData.TestDate || visitData.VisitDate || visitData.CreatedAt;
+      let reportTime = NaN;
+      if (dateRaw) {
+        const parsed = new Date(dateRaw);
+        reportTime = parsed.getTime();
+        if (isNaN(reportTime) && typeof dateRaw === 'string') {
+          const fallbackParsed = new Date(dateRaw.replace(' ', 'T'));
+          reportTime = fallbackParsed.getTime();
+        }
+      }
+
+      const currentTime = Date.now();
+      if (!isNaN(reportTime)) {
+        const hoursElapsed = (currentTime - reportTime) / (1000 * 60 * 60);
+        if (hoursElapsed > expiryHours) {
+          publicRes.isExpired = true;
+          publicRes.isLocked = true; // Lock it to prevent downloading tests
         }
       }
     }
-    
-    io.emit('online-users', onlineUserIds);
+
+    if (!publicRes.isLocked && !publicRes.isExpired) {
+      try {
+        publicRes.tests = typeof labData.Tests === 'string' ? JSON.parse(labData.Tests) : labData.Tests;
+      } catch (e) {
+        publicRes.tests = [];
+      }
+    }
+
+    res.json(publicRes);
+  } catch (error) {
+    console.error('Public track API error:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// 1. Serve Static Assets (JS, CSS, Images, Fonts) with long-term caching
+// Since Vite uses content hashing, it's safe to cache these indefinitely.
+app.use('/assets', express.static(path.join(publicHtmlDistPath, 'assets'), {
+  immutable: true,
+  maxAge: '1y',
+  etag: true
+}));
+
+// 2. Serve other static files (robots.txt, etc.)
+app.use(express.static(publicHtmlDistPath, {
+  index: false, // We handle index.html manually below
+  etag: true
+}));
+
+// 2. Static files and API routes setup
+
+
+
+// Database initialization moved to start sequence
+initializeDatabase().catch(err => {
+  console.error('🔥 Database initialization failed:', err.message);
+  dbConnected = false;
+});
+// --- SOCKET.IO REAL-TIME CHAT SETUP ---
+const http = require('http');
+const { Server } = require('socket.io');
+const httpServer = http.createServer(app);
+httpServer.setMaxListeners(50); // Prevent Node warning during Socket.io reconnect storms
+const io = new Server(httpServer, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+    credentials: true
+  },
+  transports: ['websocket', 'polling'],
+  maxHttpBufferSize: 1e6, // Limit message size (1MB) to prevent OOM
+  pingTimeout: 30000,
+  pingInterval: 10000
+});
+
+app.set('io', io);
+
+// Presence Tracking: UserID -> { socketId, isOnChatPage, lastChatActivity, hasWarnedInactivity }
+const userSocketMap = new Map();
+const IDLE_TIMEOUT_MS = 600000; // 10 minutes - Force disconnect after this
+
+function broadcastOnlineUsers() {
+  const now = Date.now();
+  const onlineUserIds = [];
+
+  for (const [userId, info] of userSocketMap.entries()) {
+    const diff = now - info.lastChatActivity;
+
+    // Force disconnect truly idle users to save shared hosting resources
+    if (diff > IDLE_TIMEOUT_MS) {
+      const socket = io.sockets.sockets.get(info.socketId);
+      if (socket) {
+        console.log(`🔌 [AUTO-DISCONNECT] User ${userId} due to 10m inactivity`);
+        socket.emit('force-disconnect', { reason: 'Inactivity timeout' });
+        socket.disconnect(true);
+      }
+      continue;
+    }
+
+    const wasRecentlyActive = diff < 120000; // 2 minutes for "Online" status
+    if (wasRecentlyActive) {
+      onlineUserIds.push(userId);
+      info.hasWarnedInactivity = false;
+    } else {
+      if (!info.hasWarnedInactivity) {
+        const lastActiveDate = new Date(info.lastChatActivity).toISOString();
+        if (pool) {
+          pool.execute('UPDATE Users SET LastLogin = ? WHERE ID = ?', [lastActiveDate, userId]).catch(() => { });
+        }
+        info.hasWarnedInactivity = true;
+      }
+    }
   }
 
-  // Check every 60 seconds
-  setInterval(broadcastOnlineUsers, 60000);
+  io.emit('online-users', onlineUserIds);
+}
 
-  // Socket Auth Middleware
-  io.use((socket, next) => {
-    const token = socket.handshake.auth.token;
-    if (!token) return next(new Error("Authentication error: No token provided"));
+// Check every 60 seconds
+setInterval(broadcastOnlineUsers, 60000);
 
-    jwt.verify(token, JWT_SECRET, (err, decoded) => {
-      if (err) return next(new Error("Authentication error: Invalid token"));
-      socket.user = decoded; // Attach user data to socket
-      next();
+// Socket Auth Middleware
+io.use((socket, next) => {
+  const token = socket.handshake.auth.token;
+  if (!token) return next(new Error("Authentication error: No token provided"));
+
+  jwt.verify(token, JWT_SECRET, (err, decoded) => {
+    if (err) return next(new Error("Authentication error: Invalid token"));
+    socket.user = decoded; // Attach user data to socket
+    next();
+  });
+});
+
+io.on('connection', (socket) => {
+  const userId = socket.user.id;
+
+  // Initialize user info with smart activity tracking
+  userSocketMap.set(userId, {
+    socketId: socket.id,
+    isOnChatPage: false,
+    lastChatActivity: Date.now() // Start active
+  });
+
+  // Update LastLogin in database - with safety check
+  if (pool) {
+    pool.execute('UPDATE Users SET LastLogin = ? WHERE ID = ?', [new Date().toISOString(), userId]).catch(err => {
+      console.error('❌ Failed to update LastLogin:', err);
+    });
+  } else {
+    console.warn('⚠️ Database pool not initialized yet, skipping LastLogin update');
+  }
+
+  console.log(`💬 Chat: User ${socket.user.username} connected (${userId})`);
+  broadcastOnlineUsers();
+
+  // Join a specific conversation room
+  socket.on('join-conversation', (conversationId) => {
+    const roomName = `room_${conversationId}`;
+    socket.join(roomName);
+    console.log(`📍 Chat: ${socket.user.username} joined ${roomName}`);
+  });
+
+  // Handle sending message
+  socket.on('send-message', async (data) => {
+    const { conversationId, content, receiverId } = data;
+    const roomName = `room_${conversationId}`;
+
+    try {
+      // 0. Check for Admin-only Chat Restriction
+      const [settingsRows] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
+      if (settingsRows.length > 0) {
+        const globalData = typeof settingsRows[0].Data === 'string' ? JSON.parse(settingsRows[0].Data) : settingsRows[0].Data;
+        if (globalData.isChatRestricted && socket.user.role !== 'Admin') {
+          return socket.emit('error', {
+            message: 'Chat is currently restricted by Admin. Only administrators can send messages.'
+          });
+        }
+      }
+
+      // 0.1 Check for Conversation-specific Block
+      const [convRows] = await pool.query("SELECT IsBlocked FROM ChatConversations WHERE ID = ?", [Number(conversationId)]);
+      if (convRows.length > 0 && convRows[0].IsBlocked) {
+        // Admin can still send messages even if conversation is blocked
+        if (socket.user.role !== 'Admin') {
+          return socket.emit('error', {
+            message: 'This conversation is blocked by Admin. You cannot send messages.'
+          });
+        }
+      }
+
+      // Ensure sender is in the room
+      // Ensure sender is in the room
+      socket.join(roomName);
+
+      // 1. Save to Database
+      const now = new Date().toISOString();
+      const [result] = await pool.execute(
+        'INSERT INTO ChatMessages (ConversationID, SenderID, Content, CreatedAt) VALUES (?, ?, ?, ?)',
+        [Number(conversationId), userId, content, now]
+      );
+
+      const newMessage = {
+        ID: result.insertId,
+        conversationId,
+        senderId: userId,
+        content,
+        createdAt: now,
+        isRead: 0
+      };
+
+      // 2. Update Conversation metadata for faster sidebar loading
+      await pool.execute(
+        'UPDATE ChatConversations SET LastMessage = ?, LastMessageAt = ?, UpdatedAt = ? WHERE ID = ?',
+        [content.substring(0, 500), now, now, Number(conversationId)]
+      );
+
+      // 3. Emit to everyone in the room
+      io.to(roomName).emit('new-message', newMessage);
+
+      // 3. Global notification for receiver
+      if (receiverId) {
+        const receiverInfo = userSocketMap.get(receiverId);
+        if (receiverInfo?.socketId) {
+          const receiverSocket = io.sockets.sockets.get(receiverInfo.socketId);
+          if (receiverSocket && !receiverSocket.rooms.has(roomName)) {
+            io.to(receiverInfo.socketId).emit('message-notification', {
+              fromName: socket.user.username,
+              content: content.substring(0, 50) + (content.length > 50 ? '...' : '')
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.error('❌ Chat: Failed to save message:', err);
+      socket.emit('error', { message: 'Failed to send message' });
+    }
+  });
+
+  // Handle entering/leaving the chat page
+  socket.on('set-chat-status', (isOnChat) => {
+    const info = userSocketMap.get(userId);
+    if (info) {
+      info.isOnChatPage = !!isOnChat;
+      info.lastChatActivity = Date.now();
+      broadcastOnlineUsers();
+    }
+  });
+
+  // Explicitly mark user as active/online
+  socket.on('user-active', () => {
+    const info = userSocketMap.get(userId);
+    if (info) {
+      info.lastChatActivity = Date.now();
+      broadcastOnlineUsers();
+    }
+  });
+
+  socket.on('typing', (data) => {
+    const { conversationId, isTyping } = data;
+    io.emit('typing', {
+      userId,
+      isTyping,
+      conversationId: Number(conversationId)
     });
   });
 
-  io.on('connection', (socket) => {
-    const userId = socket.user.id;
-    
-    // Initialize user info with smart activity tracking
-    userSocketMap.set(userId, {
-      socketId: socket.id,
-      isOnChatPage: false,
-      lastChatActivity: Date.now() // Start active
-    });
-
-    // Update LastLogin in database - with safety check
+  socket.on('disconnect', () => {
+    const info = userSocketMap.get(userId);
+    // Final update to database on disconnect - with safety check
+    const now = new Date().toISOString();
     if (pool) {
-      pool.execute('UPDATE Users SET LastLogin = ? WHERE ID = ?', [new Date().toISOString(), userId]).catch(err => {
-        console.error('❌ Failed to update LastLogin:', err);
+      pool.execute('UPDATE Users SET LastLogin = ? WHERE ID = ?', [now, userId]).catch(err => {
+        console.error('❌ Failed to update LastLogin on disconnect:', err);
       });
-    } else {
-      console.warn('⚠️ Database pool not initialized yet, skipping LastLogin update');
     }
 
-    console.log(`💬 Chat: User ${socket.user.username} connected (${userId})`);
+    userSocketMap.delete(userId);
+    console.log(`💬 Chat: User ${socket.user.username} disconnected`);
     broadcastOnlineUsers();
+  });
+});
 
-    // Join a specific conversation room
-    socket.on('join-conversation', (conversationId) => {
-      const roomName = `room_${conversationId}`;
-      socket.join(roomName);
-      console.log(`📍 Chat: ${socket.user.username} joined ${roomName}`);
-    });
+// ============ NOTIFICATION SYSTEM HELPER & ENDPOINTS ============
 
-    // Handle sending message
-    socket.on('send-message', async (data) => {
-      const { conversationId, content, receiverId } = data;
-      const roomName = `room_${conversationId}`;
+const createAndSendNotification = async ({
+  userId = null,
+  targetRole = null,
+  targetRoles = null,
+  type,
+  title,
+  message,
+  link = null,
+  emitSocket = true
+}) => {
+  try {
+    const id = `NOTIF-${Date.now()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+    const createdAt = new Date().toISOString();
 
-      try {
-        // 0. Check for Admin-only Chat Restriction
-        const [settingsRows] = await pool.query("SELECT Data FROM AppSettings WHERE ID = 'GLOBAL'");
-        if (settingsRows.length > 0) {
-          const globalData = typeof settingsRows[0].Data === 'string' ? JSON.parse(settingsRows[0].Data) : settingsRows[0].Data;
-          if (globalData.isChatRestricted && socket.user.role !== 'Admin') {
-            return socket.emit('error', { 
-              message: 'Chat is currently restricted by Admin. Only administrators can send messages.' 
-            });
+    let rolesList = [];
+    if (Array.isArray(targetRoles) && targetRoles.length > 0) {
+      rolesList = targetRoles.map(r => String(r).trim());
+    } else if (targetRole) {
+      rolesList = String(targetRole).split(',').map(r => r.trim());
+    }
+    const roleString = rolesList.length > 0 ? rolesList.join(',') : null;
+
+    await pool.execute(
+      `INSERT INTO Notifications (ID, UserID, TargetRole, Type, Title, Message, Link, IsRead, CreatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+      [id, userId || null, roleString, type, title, message, link || null, createdAt]
+    );
+
+    const notificationPayload = {
+      id,
+      userId,
+      targetRole: roleString,
+      type,
+      title,
+      message,
+      link,
+      isRead: false,
+      createdAt
+    };
+
+    if (emitSocket && io) {
+      if (userId) {
+        for (const [uid, info] of userSocketMap.entries()) {
+          if (uid === userId && info.socketId) {
+            io.to(info.socketId).emit('new-notification', notificationPayload);
           }
         }
-
-        // 0.1 Check for Conversation-specific Block
-        const [convRows] = await pool.query("SELECT IsBlocked FROM ChatConversations WHERE ID = ?", [Number(conversationId)]);
-        if (convRows.length > 0 && convRows[0].IsBlocked) {
-          // Admin can still send messages even if conversation is blocked
-          if (socket.user.role !== 'Admin') {
-            return socket.emit('error', { 
-              message: 'This conversation is blocked by Admin. You cannot send messages.' 
-            });
-          }
-        }
-
-        // Ensure sender is in the room
-        // Ensure sender is in the room
-        socket.join(roomName);
-
-        // 1. Save to Database
-        const now = new Date().toISOString();
-        const [result] = await pool.execute(
-          'INSERT INTO ChatMessages (ConversationID, SenderID, Content, CreatedAt) VALUES (?, ?, ?, ?)',
-          [Number(conversationId), userId, content, now]
-        );
-
-        const newMessage = {
-          ID: result.insertId,
-          conversationId,
-          senderId: userId,
-          content,
-          createdAt: now,
-          isRead: 0
-        };
-
-        // 2. Update Conversation metadata for faster sidebar loading
-        await pool.execute(
-          'UPDATE ChatConversations SET LastMessage = ?, LastMessageAt = ?, UpdatedAt = ? WHERE ID = ?',
-          [content.substring(0, 500), now, now, Number(conversationId)]
-        );
-
-        // 3. Emit to everyone in the room
-        io.to(roomName).emit('new-message', newMessage);
-
-        // 3. Global notification for receiver
-        if (receiverId) {
-          const receiverInfo = userSocketMap.get(receiverId);
-          if (receiverInfo?.socketId) {
-            const receiverSocket = io.sockets.sockets.get(receiverInfo.socketId);
-            if (receiverSocket && !receiverSocket.rooms.has(roomName)) {
-              io.to(receiverInfo.socketId).emit('message-notification', {
-                fromName: socket.user.username,
-                content: content.substring(0, 50) + (content.length > 50 ? '...' : '')
-              });
+      } else if (rolesList.length > 0) {
+        for (const [uid, info] of userSocketMap.entries()) {
+          if (info.socketId) {
+            const socket = io.sockets.sockets.get(info.socketId);
+            if (socket && socket.user) {
+              const uRole = socket.user.role;
+              if (rolesList.includes(uRole) || uRole === 'SuperAdmin' || uRole === 'Admin' || rolesList.includes('All')) {
+                io.to(info.socketId).emit('new-notification', notificationPayload);
+              }
             }
           }
         }
-      } catch (err) {
-        console.error('❌ Chat: Failed to save message:', err);
-        socket.emit('error', { message: 'Failed to send message' });
+      } else {
+        io.emit('new-notification', notificationPayload);
       }
-    });
+    }
+    return notificationPayload;
+  } catch (e) {
+    console.error('❌ Error creating/sending notification:', e.message);
+    return null;
+  }
+};
 
-    // Handle entering/leaving the chat page
-    socket.on('set-chat-status', (isOnChat) => {
-      const info = userSocketMap.get(userId);
-      if (info) {
-        info.isOnChatPage = !!isOnChat;
-        info.lastChatActivity = Date.now();
-        broadcastOnlineUsers();
-      }
-    });
+const scanOverduePendingPayments = async () => {
+  try {
+    if (!pool) return;
 
-    // Explicitly mark user as active/online
-    socket.on('user-active', () => {
-      const info = userSocketMap.get(userId);
-      if (info) {
-        info.lastChatActivity = Date.now();
-        broadcastOnlineUsers();
-      }
-    });
+    // Clean up notifications for visits that are Paid, Refunded, or Cancelled (balance <= 0)
+    await pool.execute(`
+      DELETE FROM Notifications 
+      WHERE (Type = 'payment_overdue_past' OR Type = 'payment_pending' OR Type = 'payment_partial')
+        AND (
+          Link IN (
+            SELECT CONCAT('/lab-fees?search=', v.LabPatientID) 
+            FROM LabVisits v 
+            WHERE v.PaymentStatus IN ('Paid', 'Refunded', 'Cancelled') 
+               OR (v.TotalAmount - COALESCE(v.DiscountAmount, 0) - COALESCE(v.PaidAmount, 0)) <= 0
+          )
+          OR Link IN (
+            SELECT CONCAT('/lab-fees?search=', v.ID) 
+            FROM LabVisits v 
+            WHERE v.PaymentStatus IN ('Paid', 'Refunded', 'Cancelled') 
+               OR (v.TotalAmount - COALESCE(v.DiscountAmount, 0) - COALESCE(v.PaidAmount, 0)) <= 0
+          )
+          OR Message LIKE '%Status: Refunded%'
+          OR Message LIKE '%Status: Cancelled%'
+        )
+    `);
 
-    socket.on('typing', (data) => {
-      const { conversationId, isTyping } = data;
-      io.emit('typing', {
-        userId,
-        isTyping,
-        conversationId: Number(conversationId)
-      });
-    });
+    const [unpaidVisits] = await pool.query(`
+        SELECT v.ID, v.LabPatientID, v.TotalAmount, v.DiscountAmount, v.PaidAmount, v.PaymentStatus, v.CreatedAt, v.VisitDate, p.Name as PatientName
+        FROM LabVisits v
+        LEFT JOIN LabPatients p ON v.LabPatientID = p.ID
+        WHERE (v.PaymentStatus = 'Unpaid' OR v.PaymentStatus = 'Partial' OR v.PaymentStatus = 'Pending' OR v.PaymentStatus IS NULL)
+          AND (v.TotalAmount - COALESCE(v.DiscountAmount, 0) - COALESCE(v.PaidAmount, 0)) > 0
+        ORDER BY v.CreatedAt DESC
+        LIMIT 200
+      `);
 
-    socket.on('disconnect', () => {
-      const info = userSocketMap.get(userId);
-      // Final update to database on disconnect - with safety check
-      const now = new Date().toISOString();
-      if (pool) {
-        pool.execute('UPDATE Users SET LastLogin = ? WHERE ID = ?', [now, userId]).catch(err => {
-          console.error('❌ Failed to update LastLogin on disconnect:', err);
+    for (const visit of unpaidVisits) {
+      const pendingAmount = Number(visit.TotalAmount || 0) - Number(visit.DiscountAmount || 0) - Number(visit.PaidAmount || 0);
+      if (pendingAmount <= 0) continue;
+
+      const rawDate = visit.VisitDate || visit.CreatedAt;
+      const formattedDate = rawDate ? new Date(rawDate).toLocaleString('en-US', {
+        timeZone: 'Asia/Karachi',
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true
+      }) : 'Past Visit';
+
+      const title = `Overdue Payment: ${visit.PatientName || visit.LabPatientID || 'Patient'}`;
+      const message = `Visit ${visit.ID} has a pending balance of Rs. ${pendingAmount.toLocaleString()} (Status: ${visit.PaymentStatus || 'Unpaid'}). Pending since ${formattedDate}.`;
+      const link = `/lab-fees?search=${encodeURIComponent(visit.ID)}`;
+
+      // Check if notification already exists for this exact visit (including dismissed ones)
+      const [existing] = await pool.query(
+        "SELECT ID, IsDismissed FROM Notifications WHERE (Link LIKE ? OR Message LIKE ?) AND Type IN ('payment_overdue_past', 'payment_pending', 'payment_partial')",
+        [`%${visit.ID}%`, `%${visit.ID}%`]
+      );
+
+      if (existing && existing.length > 0) {
+        // If user explicitly deleted/dismissed this notification, do NOT resurrect it!
+        if (existing[0].IsDismissed === 1) continue;
+
+        // Update notification message & title WITHOUT resetting IsRead status
+        await pool.execute(
+          "UPDATE Notifications SET Title = ?, Message = ? WHERE ID = ?",
+          [title, message, existing[0].ID]
+        );
+      } else {
+        // Create new unread notification if it doesn't exist yet
+        await createAndSendNotification({
+          targetRoles: ['Receptionist', 'Admin'],
+          type: 'payment_overdue_past',
+          title,
+          message,
+          link,
+          emitSocket: false
         });
       }
+    }
+  } catch (err) {
+    console.warn('⚠️ Could not run overdue pending payment scanner:', err.message);
+  }
+};
 
-      userSocketMap.delete(userId);
-      console.log(`💬 Chat: User ${socket.user.username} disconnected`);
-      broadcastOnlineUsers();
-    });
+const scanUpcomingAppointmentReminders = async () => {
+  try {
+    if (!pool) return;
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    const [appts] = await pool.query(
+      `SELECT * FROM Appointments 
+         WHERE (Status = 'Confirmed' OR Status = 'Scheduled')
+           AND ApptDate = ?
+           AND (DeletedAt IS NULL)`,
+      [todayStr]
+    );
+
+    const now = new Date();
+
+    for (const appt of appts) {
+      if (!appt.ApptTime) continue;
+
+      const timeParts = String(appt.ApptTime).split(':');
+      const apptDateTime = new Date();
+      apptDateTime.setHours(parseInt(timeParts[0], 10) || 0, parseInt(timeParts[1], 10) || 0, 0, 0);
+
+      const diffMs = apptDateTime.getTime() - now.getTime();
+      const diffMinutes = diffMs / (1000 * 60);
+
+      const formattedTime = apptDateTime.toLocaleTimeString('en-US', {
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: true
+      });
+
+      // ⏰ 30-Minute Reminder (between 25 and 35 minutes away)
+      if (diffMinutes >= 25 && diffMinutes <= 35) {
+        const [existing30m] = await pool.query(
+          "SELECT ID FROM Notifications WHERE Link LIKE ? AND Type = 'appointment_30m'",
+          [`%${appt.ID}%`]
+        );
+
+        if (existing30m.length === 0) {
+          await createAndSendNotification({
+            targetRoles: ['Receptionist', 'Doctor', 'Admin'],
+            type: 'appointment_30m',
+            title: `⏰ Appointment Alert (30m): ${appt.PatientName}`,
+            message: `Physical appointment at ${formattedTime}. Phone: ${appt.Phone || 'N/A'}. Status: ${appt.Status || 'Confirmed'}. Check patient arrival or call to remind.`,
+            link: `/appointments?search=${encodeURIComponent(appt.Phone || appt.ID)}`
+          });
+        }
+      }
+
+      // 🚨 15-Minute Reminder (between 10 and 20 minutes away)
+      if (diffMinutes >= 10 && diffMinutes <= 20) {
+        const [existing15m] = await pool.query(
+          "SELECT ID FROM Notifications WHERE Link LIKE ? AND Type = 'appointment_15m'",
+          [`%${appt.ID}%`]
+        );
+
+        if (existing15m.length === 0) {
+          await createAndSendNotification({
+            targetRoles: ['Receptionist', 'Doctor', 'Admin'],
+            type: 'appointment_15m',
+            title: `🚨 Appointment Alert (15m): ${appt.PatientName}`,
+            message: `Upcoming appointment starting in 15 mins (${formattedTime}). Phone: ${appt.Phone || 'N/A'}. Status: ${appt.Status || 'Confirmed'}. Verify check-in.`,
+            link: `/appointments?search=${encodeURIComponent(appt.Phone || appt.ID)}`
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('⚠️ Could not run appointment reminder scanner:', err.message);
+  }
+};
+
+app.get('/api/notifications', async (req, res) => {
+  try {
+    const userId = req.user?.id || '';
+    const userRole = req.user?.role || '';
+    const limit = parseInt(req.query.limit) || 50;
+    const isAdmin = userRole === 'Admin' || userRole === 'SuperAdmin';
+
+    let sql = '';
+    let params = [];
+
+    if (isAdmin) {
+      sql = `SELECT * FROM Notifications 
+             WHERE (IsDismissed IS NULL OR IsDismissed = 0)
+             ORDER BY CreatedAt DESC LIMIT ?`;
+      params = [limit];
+    } else {
+      sql = `SELECT * FROM Notifications 
+             WHERE (IsDismissed IS NULL OR IsDismissed = 0)
+               AND (
+                 (UserID IS NOT NULL AND UserID != '' AND UserID = ?)
+                 OR (
+                   (UserID IS NULL OR UserID = '') 
+                   AND (
+                     TargetRole IS NULL 
+                     OR TargetRole = 'All' 
+                     OR FIND_IN_SET(?, TargetRole) > 0
+                     OR TargetRole LIKE ?
+                   )
+                 )
+               )
+             ORDER BY CreatedAt DESC LIMIT ?`;
+      params = [userId, userRole, `%${userRole}%`, limit];
+    }
+
+    const [rows] = await pool.query(sql, params);
+
+    const notifications = rows.map(r => ({
+      id: r.ID,
+      userId: r.UserID,
+      targetRole: r.TargetRole,
+      type: r.Type,
+      title: r.Title,
+      message: r.Message,
+      link: r.Link,
+      isRead: r.IsRead === 1,
+      createdAt: r.CreatedAt
+    }));
+
+    const unreadCount = notifications.filter(n => !n.isRead).length;
+    res.json({ notifications, unreadCount });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/notifications/scan-overdue', async (req, res) => {
+  try {
+    await scanOverduePendingPayments();
+    res.json({ success: true, message: 'Past pending payment scan completed.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/notifications/:id/read', async (req, res) => {
+  try {
+    await pool.execute('UPDATE Notifications SET IsRead = 1 WHERE ID = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/notifications/read-all', async (req, res) => {
+  try {
+    const userId = req.user?.id || '';
+    const userRole = req.user?.role || '';
+    const isAdmin = userRole === 'Admin' || userRole === 'SuperAdmin';
+
+    let sql = '';
+    let params = [];
+
+    if (isAdmin) {
+      sql = `UPDATE Notifications SET IsRead = 1 
+             WHERE (IsDismissed IS NULL OR IsDismissed = 0)`;
+      params = [];
+    } else {
+      sql = `UPDATE Notifications SET IsRead = 1 
+             WHERE (IsDismissed IS NULL OR IsDismissed = 0)
+               AND (
+                 (UserID IS NOT NULL AND UserID != '' AND UserID = ?)
+                 OR (
+                   (UserID IS NULL OR UserID = '') 
+                   AND (
+                     TargetRole IS NULL 
+                     OR TargetRole = 'All' 
+                     OR FIND_IN_SET(?, TargetRole) > 0
+                     OR TargetRole LIKE ?
+                   )
+                 )
+               )`;
+      params = [userId, userRole, `%${userRole}%`];
+    }
+
+    await pool.execute(sql, params);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/notifications/:id', async (req, res) => {
+  try {
+    await pool.execute('UPDATE Notifications SET IsDismissed = 1 WHERE ID = ?', [req.params.id]);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// SPA Fallback / Status Page (Catch-all for unmatched routes)
+app.get('*', (req, res) => {
+  if (req.path.startsWith('/api')) {
+    return res.status(404).json({ error: 'API endpoint not found' });
+  }
+
+  if (fs.existsSync(publicHtmlIndexPath)) {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.sendFile(publicHtmlIndexPath);
+  } else {
+    getStatusPage(req, res);
+  }
+});
+
+// --- START SERVER ---
+try {
+  const isNumericPort = !isNaN(PORT) && !isNaN(parseFloat(PORT));
+  const listenCallback = () => {
+    console.log('-------------------------------------------');
+    console.log('✅ SERVER ONLINE');
+    console.log(`🏥 Hospital Management Backend: ${isNumericPort ? `http://0.0.0.0:${PORT}` : PORT}`);
+    console.log(`💬 Real-time Chat: Enabled (Socket.io)`);
+    console.log('-------------------------------------------');
+    // Initial scan for past overdue payments and upcoming appointments on startup
+    setTimeout(() => {
+      scanOverduePendingPayments();
+      scanUpcomingAppointmentReminders();
+    }, 5000);
+    // Periodic scanner every 6 hours for overdue payments
+    setInterval(() => {
+      scanOverduePendingPayments();
+    }, 6 * 60 * 60 * 1000);
+    // Periodic scanner every 1 minute for 30m and 15m appointment reminders
+    setInterval(() => {
+      scanUpcomingAppointmentReminders();
+    }, 60 * 1000);
+  };
+
+  const serverInstance = isNumericPort
+    ? httpServer.listen(Number(PORT), '0.0.0.0', listenCallback)
+    : httpServer.listen(PORT, listenCallback);
+
+  serverInstance.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`❌ Port ${PORT} is already in use.`);
+      process.exit(1);
+    } else {
+      console.error('❌ Server error:', err);
+    }
   });
 
-    // --- START SERVER ---
-    try {
-      const isNumericPort = !isNaN(PORT) && !isNaN(parseFloat(PORT));
-      const listenCallback = () => {
-        console.log('-------------------------------------------');
-        console.log('✅ SERVER ONLINE');
-        console.log(`🏥 Hospital Management Backend: ${isNumericPort ? `http://0.0.0.0:${PORT}` : PORT}`);
-        console.log(`💬 Real-time Chat: Enabled (Socket.io)`);
-        console.log('-------------------------------------------');
-      };
+  // Graceful Shutdown Handlers for Hostinger (SIGTERM & SIGINT)
+  let isShuttingDown = false;
+  const gracefulShutdown = (signal) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    console.log(`\n🛑 ${signal} received. Closing server & database pool...`);
 
-      const serverInstance = isNumericPort
-        ? httpServer.listen(Number(PORT), '0.0.0.0', listenCallback)
-        : httpServer.listen(PORT, listenCallback);
+    serverInstance.close(async () => {
+      console.log('👋 HTTP server closed.');
+      try {
+        if (pool) await pool.end();
+        console.log('🔌 Database connection pool closed.');
+      } catch (e) { }
+      process.exit(0);
+    });
 
-      serverInstance.on('error', (err) => {
-        if (err.code === 'EADDRINUSE') {
-          console.error(`❌ Port ${PORT} is already in use.`);
-          process.exit(1);
-        } else {
-          console.error('❌ Server error:', err);
-        }
-      });
+    // Force exit after 3 seconds if graceful shutdown hangs
+    setTimeout(() => process.exit(0), 3000);
+  };
 
-      // Graceful Shutdown Handlers for Hostinger (SIGTERM & SIGINT)
-      let isShuttingDown = false;
-      const gracefulShutdown = (signal) => {
-        if (isShuttingDown) return;
-        isShuttingDown = true;
-        console.log(`\n🛑 ${signal} received. Closing server & database pool...`);
-        
-        serverInstance.close(async () => {
-          console.log('👋 HTTP server closed.');
-          try {
-            if (pool) await pool.end();
-            console.log('🔌 Database connection pool closed.');
-          } catch (e) {}
-          process.exit(0);
-        });
-        
-        // Force exit after 3 seconds if graceful shutdown hangs
-        setTimeout(() => process.exit(0), 3000);
-      };
-
-      process.removeAllListeners('SIGINT');
-      process.removeAllListeners('SIGTERM');
-      process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-      process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
-    } catch (error) {
-      console.error('🔥 CRITICAL ERROR during startup:', error);
-      process.exit(1);
-    }
+  process.removeAllListeners('SIGINT');
+  process.removeAllListeners('SIGTERM');
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+} catch (error) {
+  console.error('🔥 CRITICAL ERROR during startup:', error);
+  process.exit(1);
+}
