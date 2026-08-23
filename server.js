@@ -880,6 +880,18 @@ async function initializeDatabase() {
       await pool.execute("UPDATE Notifications SET Title = REPLACE(Title, 'Lab Lab ', 'Lab ') WHERE Title LIKE '%Lab Lab %'");
     } catch (e) { }
 
+    // Per-User Notification State (for per-user read and dismissal handling)
+    await pool.execute(`
+      CREATE TABLE IF NOT EXISTS NotificationUserStates (
+        NotificationID VARCHAR(100) NOT NULL,
+        UserID VARCHAR(100) NOT NULL,
+        IsRead TINYINT(1) DEFAULT 0,
+        IsDismissed TINYINT(1) DEFAULT 0,
+        PRIMARY KEY (NotificationID, UserID),
+        INDEX idx_user_states (UserID, IsDismissed, IsRead)
+      )
+    `);
+
     // LabTestsCatalog table
     await pool.execute(`
       CREATE TABLE IF NOT EXISTS LabTestsCatalog (
@@ -7122,7 +7134,7 @@ const scanOverduePendingPayments = async () => {
   try {
     if (!pool) return;
 
-    // Clean up notifications for visits that are Paid, Refunded, or Cancelled (balance <= 0)
+    // 1. Clean up notifications for visits that are Paid, Refunded, or Cancelled (or balance <= 0)
     await pool.execute(`
       DELETE FROM Notifications 
       WHERE (Type = 'payment_overdue_past' OR Type = 'payment_pending' OR Type = 'payment_partial')
@@ -7141,14 +7153,22 @@ const scanOverduePendingPayments = async () => {
           )
           OR Message LIKE '%Status: Refunded%'
           OR Message LIKE '%Status: Cancelled%'
+          OR Message LIKE '%Status: Paid%'
         )
     `);
 
+    // Clean up orphaned per-user states
+    await pool.execute(`
+      DELETE FROM NotificationUserStates 
+      WHERE NotificationID NOT IN (SELECT ID FROM Notifications)
+    `);
+
+    // 2. Fetch ONLY visits that have active, non-zero pending balance and are not Paid/Refunded/Cancelled
     const [unpaidVisits] = await pool.query(`
         SELECT v.ID, v.LabPatientID, v.TotalAmount, v.DiscountAmount, v.PaidAmount, v.PaymentStatus, v.CreatedAt, v.VisitDate, p.Name as PatientName
         FROM LabVisits v
         LEFT JOIN LabPatients p ON v.LabPatientID = p.ID
-        WHERE (v.PaymentStatus = 'Unpaid' OR v.PaymentStatus = 'Partial' OR v.PaymentStatus = 'Pending' OR v.PaymentStatus IS NULL)
+        WHERE v.PaymentStatus NOT IN ('Paid', 'Refunded', 'Cancelled')
           AND (v.TotalAmount - COALESCE(v.DiscountAmount, 0) - COALESCE(v.PaidAmount, 0)) > 0
         ORDER BY v.CreatedAt DESC
         LIMIT 200
@@ -7173,23 +7193,20 @@ const scanOverduePendingPayments = async () => {
       const message = `Visit ${visit.ID} has a pending balance of Rs. ${pendingAmount.toLocaleString()} (Status: ${visit.PaymentStatus || 'Unpaid'}). Pending since ${formattedDate}.`;
       const link = `/lab-fees?search=${encodeURIComponent(visit.ID)}`;
 
-      // Check if notification already exists for this exact visit (including dismissed ones)
+      // Check if notification already exists for this exact visit
       const [existing] = await pool.query(
         "SELECT ID, IsDismissed FROM Notifications WHERE (Link LIKE ? OR Message LIKE ?) AND Type IN ('payment_overdue_past', 'payment_pending', 'payment_partial')",
         [`%${visit.ID}%`, `%${visit.ID}%`]
       );
 
       if (existing && existing.length > 0) {
-        // If user explicitly deleted/dismissed this notification, do NOT resurrect it!
-        if (existing[0].IsDismissed === 1) continue;
-
-        // Update notification message & title WITHOUT resetting IsRead status
+        // If notification exists, update title & message cleanly
         await pool.execute(
           "UPDATE Notifications SET Title = ?, Message = ? WHERE ID = ?",
           [title, message, existing[0].ID]
         );
       } else {
-        // Create new unread notification if it doesn't exist yet
+        // Create new notification for pending payment
         await createAndSendNotification({
           targetRoles: ['Receptionist', 'Admin'],
           type: 'payment_overdue_past',
@@ -7288,27 +7305,37 @@ app.get('/api/notifications', async (req, res) => {
     let params = [];
 
     if (isAdmin) {
-      sql = `SELECT * FROM Notifications 
-             WHERE (IsDismissed IS NULL OR IsDismissed = 0)
-             ORDER BY CreatedAt DESC LIMIT ?`;
-      params = [limit];
+      sql = `SELECT n.*, 
+                    COALESCE(nus.IsRead, 0) AS UserIsRead,
+                    COALESCE(nus.IsDismissed, n.IsDismissed, 0) AS UserIsDismissed
+             FROM Notifications n
+             LEFT JOIN NotificationUserStates nus 
+               ON nus.NotificationID = n.ID AND nus.UserID = ?
+             WHERE (COALESCE(nus.IsDismissed, n.IsDismissed, 0) = 0)
+             ORDER BY n.CreatedAt DESC LIMIT ?`;
+      params = [userId, limit];
     } else {
-      sql = `SELECT * FROM Notifications 
-             WHERE (IsDismissed IS NULL OR IsDismissed = 0)
+      sql = `SELECT n.*, 
+                    COALESCE(nus.IsRead, 0) AS UserIsRead,
+                    COALESCE(nus.IsDismissed, n.IsDismissed, 0) AS UserIsDismissed
+             FROM Notifications n
+             LEFT JOIN NotificationUserStates nus 
+               ON nus.NotificationID = n.ID AND nus.UserID = ?
+             WHERE (COALESCE(nus.IsDismissed, n.IsDismissed, 0) = 0)
                AND (
-                 (UserID IS NOT NULL AND UserID != '' AND UserID = ?)
+                 (n.UserID IS NOT NULL AND n.UserID != '' AND n.UserID = ?)
                  OR (
-                   (UserID IS NULL OR UserID = '') 
+                   (n.UserID IS NULL OR n.UserID = '') 
                    AND (
-                     TargetRole IS NULL 
-                     OR TargetRole = 'All' 
-                     OR FIND_IN_SET(?, TargetRole) > 0
-                     OR TargetRole LIKE ?
+                     n.TargetRole IS NULL 
+                     OR n.TargetRole = 'All' 
+                     OR FIND_IN_SET(?, n.TargetRole) > 0
+                     OR n.TargetRole LIKE ?
                    )
                  )
                )
-             ORDER BY CreatedAt DESC LIMIT ?`;
-      params = [userId, userRole, `%${userRole}%`, limit];
+             ORDER BY n.CreatedAt DESC LIMIT ?`;
+      params = [userId, userId, userRole, `%${userRole}%`, limit];
     }
 
     const [rows] = await pool.query(sql, params);
@@ -7321,7 +7348,7 @@ app.get('/api/notifications', async (req, res) => {
       title: r.Title,
       message: r.Message,
       link: r.Link,
-      isRead: r.IsRead === 1,
+      isRead: r.UserIsRead === 1 || r.UserIsRead === true,
       createdAt: r.CreatedAt
     }));
 
@@ -7343,7 +7370,15 @@ app.post('/api/notifications/scan-overdue', async (req, res) => {
 
 app.put('/api/notifications/:id/read', async (req, res) => {
   try {
-    await pool.execute('UPDATE Notifications SET IsRead = 1 WHERE ID = ?', [req.params.id]);
+    const userId = req.user?.id || '';
+    if (userId) {
+      await pool.execute(
+        `INSERT INTO NotificationUserStates (NotificationID, UserID, IsRead, IsDismissed)
+         VALUES (?, ?, 1, 0)
+         ON DUPLICATE KEY UPDATE IsRead = 1`,
+        [req.params.id, userId]
+      );
+    }
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -7356,32 +7391,45 @@ app.put('/api/notifications/read-all', async (req, res) => {
     const userRole = req.user?.role || '';
     const isAdmin = userRole === 'Admin' || userRole === 'SuperAdmin';
 
-    let sql = '';
-    let params = [];
+    let selectSql = '';
+    let selectParams = [];
 
     if (isAdmin) {
-      sql = `UPDATE Notifications SET IsRead = 1 
-             WHERE (IsDismissed IS NULL OR IsDismissed = 0)`;
-      params = [];
+      selectSql = `SELECT n.ID FROM Notifications n
+                   LEFT JOIN NotificationUserStates nus ON nus.NotificationID = n.ID AND nus.UserID = ?
+                   WHERE (COALESCE(nus.IsDismissed, n.IsDismissed, 0) = 0)`;
+      selectParams = [userId];
     } else {
-      sql = `UPDATE Notifications SET IsRead = 1 
-             WHERE (IsDismissed IS NULL OR IsDismissed = 0)
-               AND (
-                 (UserID IS NOT NULL AND UserID != '' AND UserID = ?)
-                 OR (
-                   (UserID IS NULL OR UserID = '') 
-                   AND (
-                     TargetRole IS NULL 
-                     OR TargetRole = 'All' 
-                     OR FIND_IN_SET(?, TargetRole) > 0
-                     OR TargetRole LIKE ?
-                   )
-                 )
-               )`;
-      params = [userId, userRole, `%${userRole}%`];
+      selectSql = `SELECT n.ID FROM Notifications n
+                   LEFT JOIN NotificationUserStates nus ON nus.NotificationID = n.ID AND nus.UserID = ?
+                   WHERE (COALESCE(nus.IsDismissed, n.IsDismissed, 0) = 0)
+                     AND (
+                       (n.UserID IS NOT NULL AND n.UserID != '' AND n.UserID = ?)
+                       OR (
+                         (n.UserID IS NULL OR n.UserID = '') 
+                         AND (
+                           n.TargetRole IS NULL 
+                           OR n.TargetRole = 'All' 
+                           OR FIND_IN_SET(?, n.TargetRole) > 0
+                           OR n.TargetRole LIKE ?
+                         )
+                       )
+                     )`;
+      selectParams = [userId, userId, userRole, `%${userRole}%`];
     }
 
-    await pool.execute(sql, params);
+    const [notifs] = await pool.query(selectSql, selectParams);
+    if (userId && notifs.length > 0) {
+      for (const n of notifs) {
+        await pool.execute(
+          `INSERT INTO NotificationUserStates (NotificationID, UserID, IsRead, IsDismissed)
+           VALUES (?, ?, 1, 0)
+           ON DUPLICATE KEY UPDATE IsRead = 1`,
+          [n.ID, userId]
+        );
+      }
+    }
+
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -7390,7 +7438,22 @@ app.put('/api/notifications/read-all', async (req, res) => {
 
 app.delete('/api/notifications/:id', async (req, res) => {
   try {
-    await pool.execute('UPDATE Notifications SET IsDismissed = 1 WHERE ID = ?', [req.params.id]);
+    const userId = req.user?.id || '';
+    const notifId = req.params.id;
+
+    if (userId) {
+      // Record user-specific dismissal so deleting a notification ONLY affects this specific user
+      await pool.execute(
+        `INSERT INTO NotificationUserStates (NotificationID, UserID, IsRead, IsDismissed)
+         VALUES (?, ?, 1, 1)
+         ON DUPLICATE KEY UPDATE IsDismissed = 1`,
+        [notifId, userId]
+      );
+    } else {
+      // Fallback if unauthenticated
+      await pool.execute('UPDATE Notifications SET IsDismissed = 1 WHERE ID = ?', [notifId]);
+    }
+
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ error: error.message });
