@@ -7225,8 +7225,48 @@ const scanOverduePendingPayments = async () => {
 const scanUpcomingAppointmentReminders = async () => {
   try {
     if (!pool) return;
-    const todayStr = new Date().toISOString().split('T')[0];
 
+    // 1. Deduplicate appointment notifications
+    try {
+      await pool.execute(`
+        DELETE n1 FROM Notifications n1
+        INNER JOIN Notifications n2 
+        ON n1.Type = n2.Type 
+       AND n1.Title = n2.Title 
+       AND n1.ID > n2.ID 
+        WHERE n1.Type IN ('appointment_scheduled', 'appointment_30m', 'appointment_15m')
+      `);
+    } catch (e) { }
+
+    const now = new Date();
+    const todayStr = now.toISOString().split('T')[0];
+    const nowHHMM = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+    // 2. Clean up appointment notifications for past/expired appointments or completed/cancelled status
+    try {
+      await pool.execute(`
+        DELETE FROM Notifications
+        WHERE Type IN ('appointment_scheduled', 'appointment_30m', 'appointment_15m')
+          AND (
+            Link IN (
+              SELECT CONCAT('/appointments?search=', a.ID)
+              FROM Appointments a
+              WHERE a.Status IN ('Completed', 'Cancelled', 'No Show')
+                 OR a.DeletedAt IS NOT NULL
+                 OR (a.ApptDate < ? OR (a.ApptDate = ? AND a.ApptTime < ?))
+            )
+            OR Link IN (
+              SELECT CONCAT('/appointments?search=', a.Phone)
+              FROM Appointments a
+              WHERE a.Status IN ('Completed', 'Cancelled', 'No Show')
+                 OR a.DeletedAt IS NOT NULL
+                 OR (a.ApptDate < ? OR (a.ApptDate = ? AND a.ApptTime < ?))
+            )
+          )
+      `, [todayStr, todayStr, nowHHMM, todayStr, todayStr, nowHHMM]);
+    } catch (e) { }
+
+    // 3. Scan for upcoming appointments for today
     const [appts] = await pool.query(
       `SELECT * FROM Appointments 
          WHERE (Status = 'Confirmed' OR Status = 'Scheduled')
@@ -7234,8 +7274,6 @@ const scanUpcomingAppointmentReminders = async () => {
            AND (DeletedAt IS NULL)`,
       [todayStr]
     );
-
-    const now = new Date();
 
     for (const appt of appts) {
       if (!appt.ApptTime) continue;
@@ -7247,17 +7285,23 @@ const scanUpcomingAppointmentReminders = async () => {
       const diffMs = apptDateTime.getTime() - now.getTime();
       const diffMinutes = diffMs / (1000 * 60);
 
+      // Do NOT send reminders for past appointment times
+      if (diffMinutes < 0) continue;
+
       const formattedTime = apptDateTime.toLocaleTimeString('en-US', {
         hour: '2-digit',
         minute: '2-digit',
         hour12: true
       });
 
+      const searchParam = appt.ID || appt.Phone;
+      const notifLink = `/appointments?search=${encodeURIComponent(searchParam)}`;
+
       // ⏰ 30-Minute Reminder (between 25 and 35 minutes away)
       if (diffMinutes >= 25 && diffMinutes <= 35) {
         const [existing30m] = await pool.query(
-          "SELECT ID FROM Notifications WHERE Link LIKE ? AND Type = 'appointment_30m'",
-          [`%${appt.ID}%`]
+          "SELECT ID FROM Notifications WHERE (Link LIKE ? OR Link LIKE ? OR Message LIKE ?) AND Type = 'appointment_30m'",
+          [`%${appt.ID}%`, `%${appt.Phone || 'NO_PHONE'}%`, `%${appt.ID}%`]
         );
 
         if (existing30m.length === 0) {
@@ -7266,7 +7310,7 @@ const scanUpcomingAppointmentReminders = async () => {
             type: 'appointment_30m',
             title: `⏰ Appointment Alert (30m): ${appt.PatientName}`,
             message: `Physical appointment at ${formattedTime}. Phone: ${appt.Phone || 'N/A'}. Status: ${appt.Status || 'Confirmed'}. Check patient arrival or call to remind.`,
-            link: `/appointments?search=${encodeURIComponent(appt.Phone || appt.ID)}`
+            link: notifLink
           });
         }
       }
@@ -7274,8 +7318,8 @@ const scanUpcomingAppointmentReminders = async () => {
       // 🚨 15-Minute Reminder (between 10 and 20 minutes away)
       if (diffMinutes >= 10 && diffMinutes <= 20) {
         const [existing15m] = await pool.query(
-          "SELECT ID FROM Notifications WHERE Link LIKE ? AND Type = 'appointment_15m'",
-          [`%${appt.ID}%`]
+          "SELECT ID FROM Notifications WHERE (Link LIKE ? OR Link LIKE ? OR Message LIKE ?) AND Type = 'appointment_15m'",
+          [`%${appt.ID}%`, `%${appt.Phone || 'NO_PHONE'}%`, `%${appt.ID}%`]
         );
 
         if (existing15m.length === 0) {
@@ -7284,7 +7328,7 @@ const scanUpcomingAppointmentReminders = async () => {
             type: 'appointment_15m',
             title: `🚨 Appointment Alert (15m): ${appt.PatientName}`,
             message: `Upcoming appointment starting in 15 mins (${formattedTime}). Phone: ${appt.Phone || 'N/A'}. Status: ${appt.Status || 'Confirmed'}. Verify check-in.`,
-            link: `/appointments?search=${encodeURIComponent(appt.Phone || appt.ID)}`
+            link: notifLink
           });
         }
       }
